@@ -8,22 +8,27 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from aqua_drift.models import (
-    DopplerObservation,
+    DopplerBatch,
+    EstimatorFeed,
+    EstimatorOutput,
+    ObserverPlacement,
     ObserverState,
+    Position,
     ScenarioConfig,
+    SimState,
     Snapshot,
     TargetState,
     TickMessage,
-    TrackEstimate,
 )
 from aqua_drift.state import ObserverRejected, SimulationState
 from aqua_drift.storage import EventStore
 
 initial_config = ScenarioConfig(
-    max_slant_range_yd=float(os.getenv("MAX_SLANT_RANGE_YD", "12000"))
+    max_slant_range_yd=float(os.getenv("MAX_SLANT_RANGE_YD", "6000"))
 )
 state = SimulationState(initial_config)
 store = EventStore(os.getenv("DATABASE_URL"))
+ESTIMATE_EVENT_INTERVAL_S = 10
 
 
 @asynccontextmanager
@@ -34,7 +39,7 @@ async def lifespan(_: FastAPI):
     await store.close()
 
 
-app = FastAPI(title="AQUA-DRIFT API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="AQUA-DRIFT API", version="0.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -49,6 +54,7 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+# ------------------------------------------------------------------ public API
 @app.get("/api/config", response_model=ScenarioConfig)
 async def get_config() -> ScenarioConfig:
     return (await state.snapshot()).config
@@ -58,6 +64,7 @@ async def get_config() -> ScenarioConfig:
 async def put_config(config: ScenarioConfig) -> ScenarioConfig:
     await state.set_config(config)
     await store.save_config(config)
+    await store.append_event("config_changed", state.tick, config.model_dump(mode="json"))
     return config
 
 
@@ -66,11 +73,25 @@ async def get_snapshot() -> Snapshot:
     return await state.snapshot()
 
 
+@app.post("/api/observers/placements")
+async def queue_observer_placement(placement: ObserverPlacement) -> dict[str, int]:
+    """Queue an explicit position for the next observer container that starts
+    (e.g. `docker compose up -d --scale observer=N+1`)."""
+    pending = await state.queue_placement(placement)
+    return {"pending_placements": pending}
+
+
 @app.post("/api/reset")
 async def reset_runtime() -> dict[str, str]:
     await state.reset_runtime()
-    await store.append_event("runtime_reset", 0, {"history_retained": True})
+    await store.append_event("runtime_reset", state.tick, {"history_retained": True})
     return {"status": "reset", "history": "retained"}
+
+
+# ------------------------------------------------------------------ internal (containers)
+@app.get("/internal/sim-state", response_model=SimState)
+async def sim_state() -> SimState:
+    return await state.sim_state()
 
 
 @app.post("/internal/clock")
@@ -88,26 +109,32 @@ async def set_target(target: TargetState) -> dict[str, int]:
     return {"tick": target.tick}
 
 
+@app.get("/internal/observer/assignment", response_model=Position)
+async def observer_assignment(observer_id: str) -> Position:
+    return await state.assign_position(observer_id)
+
+
 @app.post("/internal/observer")
 async def set_observer(observer: ObserverState) -> dict[str, str | None]:
     try:
         evicted = await state.set_observer(observer)
     except ObserverRejected as error:
+        await store.archive_observer(observer.observer_id)
+        await store.append_event(
+            "observer_expired", observer.tick, {"observer_id": observer.observer_id},
+            observer.observer_id,
+        )
         raise HTTPException(status_code=410, detail=str(error)) from error
     snapshot = await state.snapshot()
-    record = next(item for item in snapshot.observers if item.state.observer_id == observer.observer_id)
+    record = next(
+        item for item in snapshot.observers if item.state.observer_id == observer.observer_id
+    )
+    payload = observer.model_dump(mode="json")
     await store.upsert_observer(
-        observer.observer_id,
-        record.registered_tick,
-        record.last_tick,
-        observer.model_dump(mode="json"),
+        observer.observer_id, record.registered_tick, record.last_tick, payload
     )
-    await store.append_event(
-        "observer_state", observer.tick, observer.model_dump(mode="json"), observer.observer_id
-    )
-    await store.save_observer_position(
-        observer.observer_id, observer.tick, observer.model_dump(mode="json")
-    )
+    await store.append_event("observer_state", observer.tick, payload, observer.observer_id)
+    await store.save_observer_position(observer.observer_id, observer.tick, payload)
     if evicted:
         await store.archive_observer(evicted)
         await store.append_event("observer_evicted", observer.tick, {"observer_id": evicted}, evicted)
@@ -115,26 +142,24 @@ async def set_observer(observer: ObserverState) -> dict[str, str | None]:
 
 
 @app.post("/internal/doppler")
-async def set_doppler(observation: DopplerObservation) -> dict[str, int]:
-    await state.add_doppler(observation)
-    await store.append_event(
-        "doppler_observation",
-        observation.tick,
-        observation.model_dump(mode="json"),
-        observation.observer_id,
-    )
-    return {"tick": observation.tick}
+async def set_doppler(batch: DopplerBatch) -> dict[str, int]:
+    await state.add_batch(batch)
+    await store.append_event("doppler_batch", batch.tick, batch.model_dump(mode="json"))
+    return {"tick": batch.tick, "observations": len(batch.observations)}
+
+
+@app.get("/internal/estimator-feed", response_model=EstimatorFeed)
+async def estimator_feed(after_tick: int = -1) -> EstimatorFeed:
+    """Observations only: no target truth, no true range, no true source frequency."""
+    return await state.estimator_feed(after_tick)
 
 
 @app.post("/internal/estimate")
-async def set_estimate(estimate: TrackEstimate) -> dict[str, int]:
-    await state.set_estimate(estimate)
-    await store.append_event(
-        f"estimate_{estimate.mode.value.lower()}",
-        estimate.tick,
-        estimate.model_dump(mode="json"),
-    )
-    return {"tick": estimate.tick}
+async def set_estimate(output: EstimatorOutput) -> dict[str, int]:
+    await state.set_estimator_output(output)
+    if output.tick % ESTIMATE_EVENT_INTERVAL_S == 0:
+        await store.append_event("estimate", output.tick, output.model_dump(mode="json"))
+    return {"tick": output.tick}
 
 
 @app.websocket("/ws")

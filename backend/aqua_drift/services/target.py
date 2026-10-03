@@ -1,3 +1,5 @@
+"""Target container: constant HDG / through-water speed / depth base motion, changed only by
+parameter edits and limited by the configured rates (deg/s, kt/s, Ft/s); moved by the current."""
 from __future__ import annotations
 
 import asyncio
@@ -14,22 +16,27 @@ async def run() -> None:
         await wait_for_api(client)
         state: TargetState | None = None
         last_tick = -1
+        generation = None
         while True:
             data = await snapshot(client)
             tick = int(data["tick"])
             config = ScenarioConfig.model_validate(data["config"])
+            if generation is not None and data.get("generation") != generation:
+                state = None
+            generation = data.get("generation")
             if state is None:
                 state = initial_target(config)
                 state.tick = tick
+                last_tick = tick - 1
             if tick > last_tick:
-                elapsed = max(1, tick - max(last_tick, 0))
+                elapsed = max(1, tick - last_tick)
                 current = await current_vector(client, config, state.position)
                 state = advance_target(config, state, elapsed, current)
                 state.tick = tick
                 response = await post(client, "/internal/target", state.model_dump(mode="json"))
                 response.raise_for_status()
                 last_tick = tick
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.1)
 
 
 if __name__ == "__main__":

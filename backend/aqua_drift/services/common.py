@@ -25,7 +25,7 @@ async def wait_for_api(client: httpx.AsyncClient) -> None:
 
 
 async def snapshot(client: httpx.AsyncClient) -> dict[str, Any]:
-    response = await client.get(f"{API_URL}/api/snapshot", timeout=5)
+    response = await client.get(f"{API_URL}/internal/sim-state", timeout=5)
     response.raise_for_status()
     return response.json()
 

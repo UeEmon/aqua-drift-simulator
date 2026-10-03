@@ -5,6 +5,7 @@ import math
 from aqua_drift.models import (
     CurrentFieldConfig,
     DopplerObservation,
+    DopplerTruth,
     ObserverState,
     Position,
     ScenarioConfig,
@@ -165,33 +166,36 @@ def doppler_observation(
     config: ScenarioConfig,
     target: TargetState,
     observer: ObserverState,
-    *,
-    is_new_closest: bool = False,
-) -> DopplerObservation:
+) -> tuple[DopplerObservation, DopplerTruth]:
+    """Synthesize one error-free Doppler sample (or a non-detection) and its truth record."""
     east_m, north_m, down_m = local_offset_m(observer.position, target.position)
     slant_m = math.sqrt(east_m**2 + north_m**2 + down_m**2)
-    relative_east_mps = (target.ground_velocity.east_kt - observer.ground_velocity.east_kt) * KNOT_TO_MPS
-    relative_north_mps = (target.ground_velocity.north_kt - observer.ground_velocity.north_kt) * KNOT_TO_MPS
-    relative_down_mps = (target.ground_velocity.vertical_fps - observer.ground_velocity.vertical_fps) * FT_TO_M
-    relative_speed_mps = math.sqrt(relative_east_mps**2 + relative_north_mps**2 + relative_down_mps**2)
+    rel_e = (target.ground_velocity.east_kt - observer.ground_velocity.east_kt) * KNOT_TO_MPS
+    rel_n = (target.ground_velocity.north_kt - observer.ground_velocity.north_kt) * KNOT_TO_MPS
+    rel_d = (target.ground_velocity.vertical_fps - observer.ground_velocity.vertical_fps) * FT_TO_M
+    relative_speed_mps = math.sqrt(rel_e**2 + rel_n**2 + rel_d**2)
     if slant_m < 1e-9:
         radial_away_mps = 0.0
     else:
-        radial_away_mps = (
-            east_m * relative_east_mps
-            + north_m * relative_north_mps
-            + down_m * relative_down_mps
-        ) / slant_m
+        radial_away_mps = (east_m * rel_e + north_m * rel_n + down_m * rel_d) / slant_m
     source = config.source.source_frequency_hz
     observed = source * (1.0 - radial_away_mps / config.source.sound_speed_mps)
     recognized = source + config.source.shared_recognition_bias_hz
-    return DopplerObservation(
+    slant_yd = slant_m * M_TO_YD
+    detected = slant_yd <= config.max_slant_range_yd
+    observation = DopplerObservation(
         observer_id=observer.observer_id,
         tick=target.tick,
-        observed_frequency_hz=observed,
+        observer_position=observer.position,
+        detected=detected,
+        observed_frequency_hz=observed if detected else None,
         recognized_frequency_hz=recognized,
-        relative_radial_speed_kt=-radial_away_mps / KNOT_TO_MPS,
-        relative_speed_kt=relative_speed_mps / KNOT_TO_MPS,
-        slant_range_yd=slant_m * M_TO_YD,
-        is_new_closest=is_new_closest,
     )
+    truth = DopplerTruth(
+        observer_id=observer.observer_id,
+        tick=target.tick,
+        slant_range_yd=slant_yd,
+        relative_speed_kt=relative_speed_mps / KNOT_TO_MPS,
+        relative_radial_speed_kt=-radial_away_mps / KNOT_TO_MPS,
+    )
+    return observation, truth

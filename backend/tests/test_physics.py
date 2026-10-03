@@ -68,7 +68,38 @@ def test_doppler_has_no_bearing_field() -> None:
         position=Position(latitude=35.0, longitude=140.01, depth_ft=100.0),
         ground_velocity=Velocity(),
     )
-    result = doppler_observation(config, target, observer)
-    assert result.slant_range_yd > 0
-    assert math.isfinite(result.observed_frequency_hz)
-    assert "bearing" not in result.model_dump()
+    observation, truth = doppler_observation(config, target, observer)
+    assert truth.slant_range_yd > 0
+    assert observation.detected
+    assert math.isfinite(observation.observed_frequency_hz)
+    dumped = observation.model_dump()
+    assert "bearing" not in dumped
+    assert "slant_range_yd" not in dumped  # range is truth, never an observation
+
+
+def test_out_of_range_is_explicit_non_detection() -> None:
+    config = ScenarioConfig(max_slant_range_yd=100.0)
+    target = initial_target(config)
+    observer = ObserverState(
+        observer_id="observer-a",
+        tick=0,
+        position=Position(latitude=35.0, longitude=140.2, depth_ft=100.0),
+        ground_velocity=Velocity(),
+    )
+    observation, _ = doppler_observation(config, target, observer)
+    assert observation.detected is False
+    assert observation.observed_frequency_hz is None
+
+
+def test_doppler_frequency_sign() -> None:
+    config = ScenarioConfig()
+    target = initial_target(config)  # heading east at 8 kt
+    ahead = ObserverState(
+        observer_id="ahead",
+        tick=0,
+        position=Position(latitude=35.0, longitude=140.02, depth_ft=500.0),
+        ground_velocity=config.current_field.base_velocity,
+    )
+    observation, truth = doppler_observation(config, target, ahead)
+    assert observation.observed_frequency_hz > config.source.source_frequency_hz  # closing
+    assert truth.relative_radial_speed_kt == pytest.approx(8.0, abs=0.05)

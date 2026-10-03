@@ -5,14 +5,64 @@ from aqua_drift.api import app
 
 def test_health_and_configuration_round_trip() -> None:
     with TestClient(app) as client:
-        health = client.get("/health")
-        assert health.status_code == 200
+        assert client.get("/health").status_code == 200
 
         config = client.get("/api/config").json()
         config["max_slant_range_yd"] = 9000.0
         config["source"]["shared_recognition_bias_hz"] = 1.25
+        config["estimator"]["particle_count"] = 2000
         updated = client.put("/api/config", json=config)
 
         assert updated.status_code == 200
         assert updated.json()["max_slant_range_yd"] == 9000.0
         assert updated.json()["source"]["shared_recognition_bias_hz"] == 1.25
+
+
+def test_estimator_feed_contains_no_truth() -> None:
+    with TestClient(app) as client:
+        client.post("/internal/clock", json={"tick": 5})
+        position = {"latitude": 35.0, "longitude": 140.0, "depth_ft": 100.0}
+        client.post(
+            "/internal/observer",
+            json={"observer_id": "feed-test", "tick": 5, "position": position},
+        )
+        batch = {
+            "tick": 5,
+            "observations": [
+                {
+                    "observer_id": "feed-test",
+                    "tick": 5,
+                    "observer_position": position,
+                    "detected": True,
+                    "observed_frequency_hz": 400.1,
+                    "recognized_frequency_hz": 400.0,
+                }
+            ],
+            "truth": [
+                {
+                    "observer_id": "feed-test",
+                    "tick": 5,
+                    "slant_range_yd": 1234.0,
+                    "relative_speed_kt": 3.0,
+                    "relative_radial_speed_kt": 1.0,
+                }
+            ],
+        }
+        assert client.post("/internal/doppler", json=batch).status_code == 200
+        feed = client.get("/internal/estimator-feed", params={"after_tick": 0}).json()
+        assert feed["batches"][-1]["truth"] == []
+        text = str(feed)
+        assert "1234" not in text
+        assert "source_frequency_hz" not in text
+        assert "shared_recognition_bias_hz" not in text
+
+
+def test_observer_placement_queue() -> None:
+    with TestClient(app) as client:
+        placement = {"position": {"latitude": 35.1, "longitude": 140.1, "depth_ft": 300.0}}
+        assert client.post("/api/observers/placements", json=placement).status_code == 200
+        assigned = client.get(
+            "/internal/observer/assignment", params={"observer_id": "placed-1"}
+        ).json()
+        assert assigned["latitude"] == 35.1
+        assert assigned["depth_ft"] == 300.0

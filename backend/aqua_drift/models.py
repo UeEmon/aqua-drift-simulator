@@ -1,3 +1,9 @@
+"""Domain models shared by every AQUA-DRIFT container.
+
+Truth (target state, true source frequency, true current field, true slant range) and
+observations (Doppler frequency, detection flag, observer position/depth/time) are kept in
+separate models so that the estimator can be fed observations only.
+"""
 from __future__ import annotations
 
 from enum import StrEnum
@@ -16,8 +22,8 @@ class ObserverStatus(StrEnum):
 
 
 class EstimateMode(StrEnum):
-    ONLINE = "ONLINE"
-    SMOOTHED = "SMOOTHED"
+    ONLINE = "ONLINE"  # past track is NOT updated (filter output frozen when produced)
+    SMOOTHED = "SMOOTHED"  # past track IS updated within the recomputation window
 
 
 class Position(BaseModel):
@@ -29,10 +35,15 @@ class Position(BaseModel):
 class Velocity(BaseModel):
     east_kt: float = 0.0
     north_kt: float = 0.0
-    vertical_fps: float = 0.0
+    vertical_fps: float = 0.0  # positive = deeper
+
+
+# --------------------------------------------------------------------------- configuration
 
 
 class TargetMotionConfig(BaseModel):
+    """Target truth. Base motion is constant HDG / constant through-water speed."""
+
     initial_position: Position = Position(latitude=35.0, longitude=140.0, depth_ft=500.0)
     desired_hdg_deg: float = Field(default=90.0, ge=0, lt=360)
     desired_through_water_speed_kt: float = Field(default=8.0, ge=0)
@@ -43,6 +54,8 @@ class TargetMotionConfig(BaseModel):
 
 
 class CurrentFieldConfig(BaseModel):
+    """Truth current field: v(p) = base + G (p - p_ref), p in NM (east, north, down)."""
+
     reference_position: Position = Position(latitude=35.0, longitude=140.0, depth_ft=0.0)
     base_velocity: Velocity = Velocity(east_kt=1.0, north_kt=0.3, vertical_fps=0.0)
     gradient_per_nm: list[list[float]] = Field(
@@ -58,22 +71,88 @@ class CurrentFieldConfig(BaseModel):
 
 
 class SourceFrequencyConfig(BaseModel):
+    """Source truth. The frequency is constant; the recognition bias is common to every
+    observer and does not change with time (its magnitude is a free scenario parameter)."""
+
     source_frequency_hz: float = Field(default=400.0, gt=0)
     shared_recognition_bias_hz: float = 0.0
     sound_speed_mps: float = Field(default=1500.0, gt=0)
 
 
+class ObserverDeploymentConfig(BaseModel):
+    """Default placement for observer containers that are not given an explicit position."""
+
+    pattern: str = Field(default="grid", pattern="^(grid|line|ring|random)$")
+    spacing_yd: float = Field(default=3000.0, gt=0)
+    line_bearing_deg: float = Field(default=0.0, ge=0, lt=360)
+    offset_ahead_yd: float = Field(default=9000.0)
+    depth_ft: float = Field(default=200.0, ge=0)
+    depth_step_ft: float = Field(default=150.0, ge=0)  # alternate depths break vertical mirror
+
+
+class EstimatorConfig(BaseModel):
+    """Assumptions used by the estimator (NOT truth)."""
+
+    particle_count: int = Field(default=6000, ge=500, le=50000)
+    model_frequency_sigma_hz: float = Field(default=0.03, gt=0)
+    assumed_bias_sigma_hz: float = Field(default=0.5, ge=0)
+    max_target_speed_kt: float = Field(default=25.0, gt=0)
+    max_target_depth_ft: float = Field(default=1500.0, gt=0)
+    horizontal_accel_sigma_mps2: float = Field(default=0.01, ge=0)
+    vertical_accel_sigma_mps2: float = Field(default=0.002, ge=0)
+    maneuver_fraction: float = Field(default=0.1, ge=0, le=0.5)
+    maneuver_accel_sigma_mps2: float = Field(default=0.12, ge=0)
+    maneuver_vertical_sigma_mps: float = Field(default=0.15, ge=0)
+    move_min_window_s: int = Field(default=60, ge=20, le=3600)
+    move_mismatch_chi2: float = Field(default=4.0, gt=1)
+    range_gate_softness_yd: float = Field(default=15.0, gt=0)
+    current_gradient_ridge: float = Field(default=1e-6, ge=0)
+    track_store_slots: int = Field(default=360, ge=10, le=2000)
+    cpa_fit_half_window_s: int = Field(default=600, ge=30, le=3600)
+    cpa_min_post_samples: int = Field(default=30, ge=5)
+    move_interval_s: int = Field(default=10, ge=1, le=600)
+    move_window_s: int = Field(default=600, ge=30, le=3600)
+    move_epochs: int = Field(default=60, ge=5, le=600)
+    move_starts: int = Field(default=8, ge=2, le=50)
+    random_seed: int = 7
+
+
 class ScenarioConfig(BaseModel):
     scenario_name: str = "AQUA-DRIFT default"
     observer_limit: int = Field(default=100, ge=1, le=100)
-    max_slant_range_yd: float = Field(default=12000.0, gt=0)
+    max_slant_range_yd: float = Field(default=6000.0, gt=0)
     max_observation_seconds: int = Field(default=10800, ge=1, le=10800)
     doppler_interval_seconds: int = Field(default=1, ge=1)
-    smoothing_window_seconds: int = Field(default=300, ge=1, le=10800)
-    presence_probability_pct: float = Field(default=95.0, gt=0, lt=100)
+    smoothing_window_seconds: int = Field(default=900, ge=1, le=10800)
+    presence_probability_pct: float = Field(default=90.0, gt=0, lt=100)
     target: TargetMotionConfig = TargetMotionConfig()
     current_field: CurrentFieldConfig = CurrentFieldConfig()
     source: SourceFrequencyConfig = SourceFrequencyConfig()
+    deployment: ObserverDeploymentConfig = ObserverDeploymentConfig()
+    estimator: EstimatorConfig = EstimatorConfig()
+
+
+class EstimatorSettings(BaseModel):
+    """Subset of the configuration the estimator is allowed to see (no truth)."""
+
+    max_slant_range_yd: float
+    smoothing_window_seconds: int
+    presence_probability_pct: float
+    sound_speed_mps: float
+    estimator: EstimatorConfig
+
+    @classmethod
+    def from_config(cls, config: ScenarioConfig) -> EstimatorSettings:
+        return cls(
+            max_slant_range_yd=config.max_slant_range_yd,
+            smoothing_window_seconds=config.smoothing_window_seconds,
+            presence_probability_pct=config.presence_probability_pct,
+            sound_speed_mps=config.source.sound_speed_mps,
+            estimator=config.estimator,
+        )
+
+
+# --------------------------------------------------------------------------- runtime state
 
 
 class TickMessage(BaseModel):
@@ -95,32 +174,147 @@ class ObserverState(BaseModel):
     observer_id: str = Field(min_length=1, max_length=128)
     tick: int = Field(ge=0)
     position: Position
-    ground_velocity: Velocity
+    ground_velocity: Velocity = Velocity()  # truth drift (display only)
     status: ObserverStatus = ObserverStatus.ACTIVE
 
 
+class ObserverPlacement(BaseModel):
+    """Optional explicit placement handed to the next observer container that starts."""
+
+    position: Position
+    observer_id: str | None = None
+
+
 class DopplerObservation(BaseModel):
+    """What an observer actually measures at a synchronized 1 s epoch.
+
+    No bearing and no range: only the received frequency (error-free) while the target is
+    inside the common maximum slant range, and an explicit non-detection otherwise.
+    """
+
     observer_id: str
     tick: int = Field(ge=0)
-    observed_frequency_hz: float
-    recognized_frequency_hz: float
-    relative_radial_speed_kt: float
-    relative_speed_kt: float
-    slant_range_yd: float = Field(ge=0)
-    is_new_closest: bool = False
+    observer_position: Position  # exact position/depth at the observation time
+    detected: bool
+    observed_frequency_hz: float | None = None
+    recognized_frequency_hz: float  # observer's belief of the source frequency (biased)
 
 
-class PresenceRegionComponent(BaseModel):
+class DopplerTruth(BaseModel):
+    """Simulator truth attached to an observation for evaluation/display only."""
+
     observer_id: str
-    center: Position
-    radius_yd: float = Field(ge=0)
-    description: str
+    tick: int
+    slant_range_yd: float
+    relative_speed_kt: float
+    relative_radial_speed_kt: float
+
+
+class DopplerBatch(BaseModel):
+    tick: int
+    observations: list[DopplerObservation]
+    truth: list[DopplerTruth] = Field(default_factory=list)
+
+
+class ObserverFix(BaseModel):
+    """Exact observer position/depth/time as seen by the estimator."""
+
+    observer_id: str
+    tick: int
+    position: Position
+
+
+class EstimatorFeed(BaseModel):
+    tick: int
+    generation: int = 0
+    settings: EstimatorSettings
+    observers: list[ObserverFix]
+    archived_observer_ids: list[str]
+    batches: list[DopplerBatch]
+
+
+# --------------------------------------------------------------------------- estimates
+
+
+class RegionComponent(BaseModel):
+    """One connected part of the highest-density presence region."""
+
+    probability_mass_pct: float
+    centroid: Position
+    polygon: list[list[float]]  # [[lon, lat], ...] horizontal hull
+    min_depth_ft: float
+    max_depth_ft: float
+    voxels: list[list[float]] = Field(default_factory=list)  # [lon, lat, depth_ft]
+    voxel_size_yd: float = 0.0
+    voxel_height_ft: float = 0.0
 
 
 class PresenceRegion(BaseModel):
     probability_pct: float
-    components: list[PresenceRegionComponent] = Field(default_factory=list)
+    components: list[RegionComponent] = Field(default_factory=list)
     disconnected: bool = False
+
+
+class Uncertainty(BaseModel):
+    horizontal_major_yd: float
+    horizontal_minor_yd: float
+    horizontal_major_axis_deg: float
+    depth_sigma_ft: float
+    ground_speed_sigma_kt: float
+    through_water_speed_sigma_kt: float
+    cog_sigma_deg: float
+    hdg_sigma_deg: float
+    bias_sigma_hz: float
+
+
+class TrackPoint(BaseModel):
+    tick: int
+    latitude: float
+    longitude: float
+    depth_ft: float
+    horizontal_sigma_yd: float
+    depth_sigma_ft: float
+    ground_speed_kt: float
+    cog_deg: float
+
+
+class RelativeKinematics(BaseModel):
+    observer_id: str
+    relative_speed_kt: float
+    slant_range_yd: float
+    detected: bool
+
+
+class CpaResult(BaseModel):
+    observer_id: str
+    pass_index: int
+    final: bool
+    cpa_tick: float
+    cpa_tick_sigma_s: float
+    cpa_slant_range_yd: float
+    cpa_slant_range_sigma_yd: float
+    relative_speed_kt: float
+    relative_speed_sigma_kt: float
+    slope_hz_per_s: float
+    method_note: str
+    range_from_slope_yd: float | None = None
+    bias_shift_tick_s: float = 0.0
+    bias_range_sigma_yd: float = 0.0
+    speed_range_sigma_yd: float = 0.0
+    fit_source_frequency_hz: float | None = None
+    fit_cpa_tick: float | None = None
+    fit_cpa_slant_range_yd: float | None = None
+    fit_relative_speed_kt: float | None = None
+
+
+class CurrentEstimate(BaseModel):
+    base_velocity: Velocity
+    gradient_per_nm: list[list[float]]
+    reference_position: Position | None = None
+    observer_count: int
+    sample_count: int
+    window_seconds: float
+    residual_kt: float
 
 
 class TrackEstimate(BaseModel):
@@ -134,8 +328,20 @@ class TrackEstimate(BaseModel):
     through_water_speed_kt: float | None = None
     hdg_deg: float | None = None
     cog_deg: float | None = None
+    vertical_rate_fps: float | None = None
+    source_bias_hz: float | None = None
+    uncertainty: Uncertainty | None = None
     presence_region: PresenceRegion
+    track: list[TrackPoint] = Field(default_factory=list)
+    relative: list[RelativeKinematics] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EstimatorOutput(BaseModel):
+    tick: int
+    estimates: list[TrackEstimate]
+    cpa: list[CpaResult]
+    current: CurrentEstimate | None = None
 
 
 class ObserverRecord(BaseModel):
@@ -144,11 +350,24 @@ class ObserverRecord(BaseModel):
     last_tick: int
 
 
-class Snapshot(BaseModel):
+class SimState(BaseModel):
+    """Lightweight state polled by the simulation containers."""
+
     tick: int
+    generation: int = 0
     config: ScenarioConfig
     target: TargetState | None
     observers: list[ObserverRecord]
-    doppler: list[DopplerObservation]
+
+
+class Snapshot(BaseModel):
+    tick: int
+    generation: int = 0
+    config: ScenarioConfig
+    target: TargetState | None
+    observers: list[ObserverRecord]
+    doppler: DopplerBatch | None
     estimates: list[TrackEstimate]
+    cpa: list[CpaResult]
+    current_estimate: CurrentEstimate | None
     archived_observer_ids: list[str]

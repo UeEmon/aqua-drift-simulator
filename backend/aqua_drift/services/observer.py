@@ -1,64 +1,66 @@
+"""Observer container (one per observer). It moves only with the water (passive drift) and
+knows its time, position and depth exactly. Initial position: OBSERVER_LAT/LON/DEPTH_FT env,
+otherwise assigned by the API (queued placement, else the configured default pattern)."""
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import math
 import os
 import socket
 
 import httpx
 
-from aqua_drift.models import ObserverState, Position, ScenarioConfig, Velocity
+from aqua_drift.models import ObserverState, Position, ScenarioConfig
 from aqua_drift.physics import advance_observer
-from aqua_drift.services.common import current_vector, post, snapshot, wait_for_api
+from aqua_drift.services.common import API_URL, current_vector, post, snapshot, wait_for_api
 
 
-def observer_identity() -> tuple[str, float]:
-    observer_id = os.getenv("OBSERVER_ID", socket.gethostname())
-    digest = hashlib.sha256(observer_id.encode()).digest()
-    angle = int.from_bytes(digest[:2], "big") / 65535.0 * 2.0 * math.pi
-    return observer_id, angle
-
-
-def initial_state(observer_id: str, angle: float, config: ScenarioConfig, tick: int) -> ObserverState:
-    origin = config.target.initial_position
-    radius_nm = float(os.getenv("OBSERVER_RADIUS_NM", "2.0"))
-    north_nm = radius_nm * math.cos(angle)
-    east_nm = radius_nm * math.sin(angle)
-    latitude = origin.latitude + north_nm / 60.0
-    longitude = origin.longitude + east_nm / max(60.0 * math.cos(math.radians(origin.latitude)), 1e-8)
-    depth = float(os.getenv("OBSERVER_DEPTH_FT", str(100.0 + (angle / (2 * math.pi)) * 300.0)))
-    return ObserverState(
-        observer_id=observer_id,
-        tick=tick,
-        position=Position(latitude=latitude, longitude=longitude, depth_ft=depth),
-        ground_velocity=Velocity(),
+async def initial_position(client: httpx.AsyncClient, observer_id: str) -> Position:
+    lat, lon = os.getenv("OBSERVER_LAT"), os.getenv("OBSERVER_LON")
+    if lat and lon:
+        return Position(
+            latitude=float(lat),
+            longitude=float(lon),
+            depth_ft=float(os.getenv("OBSERVER_DEPTH_FT", "200")),
+        )
+    response = await client.get(
+        f"{API_URL}/internal/observer/assignment", params={"observer_id": observer_id}, timeout=5
     )
+    response.raise_for_status()
+    return Position.model_validate(response.json())
 
 
 async def run() -> None:
-    observer_id, angle = observer_identity()
+    observer_id = os.getenv("OBSERVER_ID") or socket.gethostname()
     async with httpx.AsyncClient(trust_env=False) as client:
         await wait_for_api(client)
         state: ObserverState | None = None
         last_tick = -1
+        generation = None
         while True:
             data = await snapshot(client)
             tick = int(data["tick"])
             config = ScenarioConfig.model_validate(data["config"])
+            if generation is not None and data.get("generation") != generation:
+                state = None  # runtime reset: return to the assigned start position
+            generation = data.get("generation")
             if state is None:
-                state = initial_state(observer_id, angle, config, tick)
+                state = ObserverState(
+                    observer_id=observer_id,
+                    tick=tick,
+                    position=await initial_position(client, observer_id),
+                )
+                last_tick = tick - 1
             if tick > last_tick:
-                elapsed = max(1, tick - max(last_tick, 0))
+                elapsed = max(1, tick - last_tick)
                 current = await current_vector(client, config, state.position)
                 state = advance_observer(config, state, elapsed, current)
                 state.tick = tick
                 response = await post(client, "/internal/observer", state.model_dump(mode="json"))
                 if response.status_code == 410:
-                    return
+                    return  # evicted or 3 h observation limit reached; history retained
                 response.raise_for_status()
                 last_tick = tick
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.1)
 
 
 if __name__ == "__main__":
