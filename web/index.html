@@ -11,75 +11,142 @@
     <main id="app">
       <section id="viewer-panel" aria-label="3D GIS">
         <div id="cesiumContainer"></div>
+        <div id="legend">
+          <span><i class="sw truth"></i>真値（評価用）</span>
+          <span><i class="sw online"></i>推定・過去航跡非更新</span>
+          <span><i class="sw smoothed"></i>推定・過去航跡更新</span>
+          <span><i class="sw region"></i>推定存在圏</span>
+          <span><i class="sw observer"></i>観測者（探知中は緑）</span>
+        </div>
         <div id="status-strip">
           <span id="connection-status">接続中</span>
-          <span>時刻: <strong id="tick">0</strong>秒</span>
-          <span>観測者: <strong id="observer-count">0</strong></span>
-          <span>推定状態: <strong id="observability">NO_OBSERVATION</strong></span>
+          <span>時刻 <strong id="tick">0</strong> s</span>
+          <span>観測者 <strong id="observer-count">0</strong>（探知中 <strong id="detecting-count">0</strong>）</span>
+          <span>推定状態 <strong id="observability">--</strong></span>
+          <span>位置算出 <strong id="position-basis">--</strong></span>
         </div>
       </section>
 
       <aside id="control-panel">
         <header>
           <h1>AQUA-DRIFT</h1>
-          <p>3D Marine Doppler Simulation System</p>
+          <p>ドップラー観測のみによる潜没目標 3次元航跡処理シミュレーター</p>
         </header>
 
         <section>
-          <h2>対象状態</h2>
+          <h2>推定結果 <small>（方位情報は不使用）</small></h2>
+          <div class="mode-switch" role="radiogroup" aria-label="表示する推定">
+            <label><input type="radio" name="panel-mode" value="ONLINE" checked />過去航跡非更新</label>
+            <label><input type="radio" name="panel-mode" value="SMOOTHED" />過去航跡更新</label>
+          </div>
+          <dl class="metrics">
+            <div class="wide"><dt>現在位置</dt><dd id="est-position">--</dd></div>
+            <div><dt>深度</dt><dd id="est-depth">--</dd></div>
+            <div><dt>深度変化率</dt><dd id="est-vrate">--</dd></div>
+            <div><dt>HDG</dt><dd id="est-hdg">--</dd></div>
+            <div><dt>COG</dt><dd id="est-cog">--</dd></div>
+            <div><dt>対水速力</dt><dd id="est-stw">--</dd></div>
+            <div><dt>対地速力</dt><dd id="est-sog">--</dd></div>
+            <div><dt>水平不確かさ (1σ)</dt><dd id="est-hsigma">--</dd></div>
+            <div><dt>存在圏</dt><dd id="est-region">--</dd></div>
+            <div><dt>周波数偏り推定</dt><dd id="est-bias">--</dd></div>
+            <div><dt>推定誤差（真値比）</dt><dd id="est-error">--</dd></div>
+          </dl>
+          <h3>観測者との相対速力</h3>
+          <div class="table-wrap">
+            <table id="relative-table">
+              <thead><tr><th>観測者</th><th>探知</th><th>相対速力</th><th>推定斜距離</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section>
+          <h2>最近接解析（ドップラー）</h2>
+          <div class="table-wrap">
+            <table id="cpa-table">
+              <thead><tr><th>観測者</th><th>最近接時刻</th><th>最近接斜距離</th><th>相対速力</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="note">時刻誤差は認識周波数と真の音源周波数の差、斜距離誤差は周波数誤差と速力誤差から算出。</p>
+        </section>
+
+        <section>
+          <h2>真値（評価用）</h2>
           <dl class="metrics">
             <div><dt>HDG</dt><dd id="hdg">--</dd></div>
             <div><dt>COG</dt><dd id="cog">--</dd></div>
             <div><dt>対水速力</dt><dd id="water-speed">--</dd></div>
             <div><dt>対地速力</dt><dd id="ground-speed">--</dd></div>
             <div><dt>深度</dt><dd id="depth">--</dd></div>
-            <div><dt>相対速力</dt><dd id="relative-speed">--</dd></div>
           </dl>
         </section>
 
         <section>
-          <h2>シナリオ設定</h2>
-          <form id="config-form">
-            <label>
-              最大斜距離 (YD)
-              <input id="max-range" type="number" min="1" step="100" required />
-            </label>
-            <label>
-              目標HDG (度)
-              <input id="desired-hdg" type="number" min="0" max="359.99" step="0.1" required />
-            </label>
-            <label>
-              対水速力 (kt)
-              <input id="desired-speed" type="number" min="0" step="0.1" required />
-            </label>
-            <label>
-              目標深度 (Ft)
-              <input id="desired-depth" type="number" min="0" step="10" required />
-            </label>
-            <label>
-              存在確率 (%)
-              <input id="probability" type="number" min="1" max="99.9" step="0.1" required />
-            </label>
-            <label>
-              共通周波数認識偏り (Hz)
-              <input id="frequency-bias" type="number" step="0.01" required />
-            </label>
-            <label>
-              過去航跡再計算範囲 (秒)
-              <input id="smoothing-window" type="number" min="1" max="10800" step="1" required />
-            </label>
-            <button type="submit">設定を反映</button>
+          <h2>流速場（観測者漂流から推定）</h2>
+          <dl class="metrics">
+            <div><dt>基準流速</dt><dd id="cur-base">--</dd></div>
+            <div><dt>使用観測者 / 期間</dt><dd id="cur-window">--</dd></div>
+            <div class="wide"><dt>勾配 (kt/NM)</dt><dd id="cur-grad">--</dd></div>
+          </dl>
+        </section>
+
+        <section>
+          <h2>目標運動（変化率で漸次変更）</h2>
+          <form id="target-form" class="grid2">
+            <label>針路 HDG (度)<input id="desired-hdg" type="number" min="0" max="359.9" step="0.1" required /></label>
+            <label>針路変化率 (度/秒)<input id="hdg-rate" type="number" min="0.01" step="0.01" required /></label>
+            <label>対水速力 (kt)<input id="desired-speed" type="number" min="0" step="0.1" required /></label>
+            <label>速力変化率 (kt/秒)<input id="speed-rate" type="number" min="0.001" step="0.001" required /></label>
+            <label>深度 (Ft)<input id="desired-depth" type="number" min="0" step="10" required /></label>
+            <label>深度変化率 (Ft/秒)<input id="depth-rate" type="number" min="0.01" step="0.01" required /></label>
+            <button type="submit" class="span2">目標運動を反映</button>
           </form>
         </section>
 
         <section>
-          <h2>表示</h2>
-          <label class="check"><input id="show-online" type="checkbox" checked />逐次推定</label>
-          <label class="check"><input id="show-smoothed" type="checkbox" checked />更新後推定</label>
-          <label class="check"><input id="show-truth" type="checkbox" checked />シミュレーション真値</label>
+          <h2>観測・推定条件</h2>
+          <form id="config-form" class="grid2">
+            <label>上限斜距離 (YD)<input id="max-range" type="number" min="100" step="100" required /></label>
+            <label>存在確率 (%)<input id="probability" type="number" min="1" max="99.9" step="0.1" required /></label>
+            <label>過去航跡再計算範囲 (秒)<input id="smoothing-window" type="number" min="1" max="10800" step="1" required /></label>
+            <label>観測者上限 (1–100)<input id="observer-limit" type="number" min="1" max="100" step="1" required /></label>
+            <label>音源周波数 (Hz)<input id="source-frequency" type="number" min="1" step="0.1" required /></label>
+            <label>共通周波数認識偏り (Hz)<input id="frequency-bias" type="number" step="0.01" required /></label>
+            <label>推定側の偏り事前σ (Hz)<input id="bias-sigma" type="number" min="0" step="0.01" required /></label>
+            <label>粒子数<input id="particles" type="number" min="500" max="50000" step="500" required /></label>
+            <label>流速 東 (kt)<input id="cur-e" type="number" step="0.05" required /></label>
+            <label>流速 北 (kt)<input id="cur-n" type="number" step="0.05" required /></label>
+            <label>∂u/∂x 東 (kt/NM)<input id="g00" type="number" step="0.01" required /></label>
+            <label>∂v/∂y 北 (kt/NM)<input id="g11" type="number" step="0.01" required /></label>
+            <button type="submit" class="span2">条件を反映</button>
+          </form>
         </section>
 
-        <button id="reset" class="secondary" type="button">ランタイムをリセット</button>
+        <section>
+          <h2>観測者の追加配置</h2>
+          <form id="placement-form" class="grid2">
+            <label>緯度<input id="place-lat" type="number" step="0.0001" required /></label>
+            <label>経度<input id="place-lon" type="number" step="0.0001" required /></label>
+            <label>深度 (Ft)<input id="place-depth" type="number" min="0" step="10" value="200" required /></label>
+            <button type="submit">配置を予約</button>
+          </form>
+          <p class="note">予約後に <code>docker compose up -d --scale observer=N</code> で観測者コンテナを追加。上限超過時は最古の観測者から削除（履歴は保持）。地図をダブルクリックすると座標を入力できます。</p>
+        </section>
+
+        <section>
+          <h2>表示</h2>
+          <label class="check"><input id="show-truth" type="checkbox" checked />真値</label>
+          <label class="check"><input id="show-online" type="checkbox" checked />推定（過去航跡非更新）</label>
+          <label class="check"><input id="show-smoothed" type="checkbox" checked />推定（過去航跡更新）</label>
+          <label class="check"><input id="show-region" type="checkbox" checked />推定存在圏</label>
+          <label class="check"><input id="show-voxels" type="checkbox" checked />存在圏ボクセル</label>
+          <label class="check"><input id="show-range" type="checkbox" />観測者の上限斜距離</label>
+          <label>深度強調倍率<input id="depth-exaggeration" type="number" min="1" max="50" step="1" value="10" /></label>
+        </section>
+
+        <button id="reset" class="secondary" type="button">ランタイムをリセット（履歴は保持）</button>
         <p id="message" role="status" aria-live="polite"></p>
       </aside>
     </main>

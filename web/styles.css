@@ -11,7 +11,7 @@ body { overflow: hidden; }
 
 #app {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
+  grid-template-columns: minmax(0, 1fr) 400px;
 }
 
 #viewer-panel { position: relative; min-width: 0; }
@@ -35,6 +35,27 @@ body { overflow: hidden; }
 
 #connection-status { color: #7fe7b5; }
 
+#legend {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  max-width: calc(100% - 140px);
+  padding: 8px 12px;
+  background: rgba(5, 18, 32, 0.82);
+  border: 1px solid rgba(107, 181, 255, 0.25);
+  border-radius: 8px;
+  font-size: 12px;
+}
+.sw { display: inline-block; width: 18px; height: 4px; margin-right: 6px; vertical-align: middle; border-radius: 2px; }
+.sw.truth { background: #00ffff; }
+.sw.online { background: repeating-linear-gradient(90deg, #ffa500 0 6px, transparent 6px 9px); }
+.sw.smoothed { background: #00ff00; }
+.sw.region { background: #ff4fd8; height: 10px; opacity: 0.7; }
+.sw.observer { background: #ffd700; height: 8px; width: 8px; border-radius: 50%; }
+
 #control-panel {
   overflow-y: auto;
   padding: 20px;
@@ -46,6 +67,23 @@ header h1 { margin: 0; font-size: 24px; letter-spacing: 0.08em; }
 header p { margin: 4px 0 20px; color: #8faecb; font-size: 12px; }
 section { padding: 14px 0; border-top: 1px solid #20364b; }
 h2 { margin: 0 0 12px; font-size: 14px; color: #b7d8f6; }
+h2 small { color: #7f9bb5; font-weight: 400; }
+h3 { margin: 14px 0 6px; font-size: 12px; color: #9cc0e2; }
+.metrics .wide { grid-column: span 2; }
+.mode-switch { display: flex; gap: 14px; margin-bottom: 10px; }
+.mode-switch label { display: flex; align-items: center; gap: 6px; }
+.mode-switch input { width: auto; }
+.grid2 { grid-template-columns: 1fr 1fr; }
+.grid2 .span2 { grid-column: span 2; }
+.table-wrap { max-height: 220px; overflow: auto; border: 1px solid #20364b; border-radius: 6px; }
+table { width: 100%; border-collapse: collapse; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+th, td { padding: 4px 6px; text-align: right; border-bottom: 1px solid #172c40; white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { position: sticky; top: 0; background: #10243a; color: #8faecb; font-weight: 500; }
+tr.det td { color: #8dffb9; }
+tr.provisional td { color: #9fb3c7; font-style: italic; }
+.note { margin: 8px 0 0; color: #7f9bb5; font-size: 11px; line-height: 1.5; }
+code { font-size: 10.5px; color: #cfe6ff; }
 
 .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0; }
 .metrics div { padding: 8px 10px; background: #10243a; border-radius: 6px; }
