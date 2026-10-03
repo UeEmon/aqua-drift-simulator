@@ -1,65 +1,108 @@
 @startuml
-title AQUA-DRIFT Domain Classes
-hide methods
+title AQUA-DRIFT Domain and Estimation Classes
+hide empty methods
 skinparam classAttributeIconSize 0
 
-class ScenarioConfig {
-  observerLimit: 1..100
-  maxSlantRangeYd
-  maxObservationSeconds: 10800
-  dopplerIntervalSeconds: 1
-  smoothingWindowSeconds
-  presenceProbabilityPct
-}
-class TargetMotionConfig {
-  desiredHdgDeg
-  desiredThroughWaterSpeedKt
-  desiredDepthFt
-  hdgRateDegPerSec
-  speedRateKtPerSec
-  depthRateFtPerSec
-}
-class CurrentFieldConfig {
-  referencePosition
-  baseVelocity
-  gradientPerNm[3][3]
-}
-class SourceFrequencyConfig {
-  constantFrequencyHz
-  sharedTimeInvariantBiasHz
-}
-class ObserverState {
-  observerId
-  tick
-  exactPosition
-  exactDepthFt
-  status
-}
-class DopplerObservation {
-  observerId
-  tick
-  observedFrequencyHz
-  recognizedFrequencyHz
-  relativeSpeedKt
-  slantRangeYd
-}
-class TrackEstimate {
-  mode
-  tick
-  observabilityStatus
-  currentPosition [optional]
-  presenceRegion
-}
-class PresenceRegion {
-  probabilityPct
-  rangeOnlyComponents[*]
-  disconnected
+package config {
+  class ScenarioConfig {
+    observer_limit: 1..100
+    max_slant_range_yd
+    max_observation_seconds: 10800
+    doppler_interval_seconds: 1
+    smoothing_window_seconds
+    presence_probability_pct
+  }
+  class TargetMotionConfig {
+    desired_hdg_deg / hdg_rate_deg_per_sec
+    desired_through_water_speed_kt / speed_rate_kt_per_sec
+    desired_depth_ft / depth_rate_ft_per_sec
+  }
+  class CurrentFieldConfig {
+    reference_position
+    base_velocity
+    gradient_per_nm[3][3]
+  }
+  class SourceFrequencyConfig {
+    source_frequency_hz (constant)
+    shared_recognition_bias_hz (common, time-invariant)
+    sound_speed_mps
+  }
+  class ObserverDeploymentConfig
+  class EstimatorConfig {
+    particle_count
+    assumed_bias_sigma_hz
+    maneuver_fraction ...
+    move_window_s ...
+  }
+  ScenarioConfig *-- TargetMotionConfig
+  ScenarioConfig *-- CurrentFieldConfig
+  ScenarioConfig *-- SourceFrequencyConfig
+  ScenarioConfig *-- ObserverDeploymentConfig
+  ScenarioConfig *-- EstimatorConfig
 }
 
-ScenarioConfig *-- TargetMotionConfig
-ScenarioConfig *-- CurrentFieldConfig
-ScenarioConfig *-- SourceFrequencyConfig
-ObserverState --> DopplerObservation
-DopplerObservation --> TrackEstimate
-TrackEstimate *-- PresenceRegion
+package observation {
+  class DopplerObservation {
+    observer_id
+    tick
+    observer_position (exact)
+    detected: bool
+    observed_frequency_hz?
+    recognized_frequency_hz
+  }
+  class DopplerTruth <<evaluation only>> {
+    slant_range_yd
+    relative_speed_kt
+  }
+  class DopplerBatch
+  class EstimatorFeed
+  DopplerBatch o-- DopplerObservation
+  DopplerBatch o-- DopplerTruth
+  EstimatorFeed o-- DopplerBatch : truth stripped
+}
+
+package estimation {
+  class TrackingEngine {
+    process(batch)
+    output(): EstimatorOutput
+  }
+  class CurrentFieldEstimator {
+    fit(now, detectable_time)
+  }
+  class DopplerParticleFilter {
+    x: [p, u, b] × N
+    predict() / update() / move()
+    smoothed_history()
+  }
+  class CpaAnalyzer {
+    add() / results()
+  }
+  class "presence_region()" as HDR
+  TrackingEngine *-- CurrentFieldEstimator
+  TrackingEngine *-- DopplerParticleFilter
+  TrackingEngine *-- CpaAnalyzer
+  TrackingEngine ..> HDR
+}
+
+package output {
+  class TrackEstimate {
+    mode: ONLINE | SMOOTHED
+    current_position, depth_ft
+    hdg_deg, cog_deg
+    through_water / ground / relative speed
+    uncertainty
+    track[]
+  }
+  class PresenceRegion { probability_pct; components[] }
+  class RegionComponent { probability_mass_pct; polygon; voxels; depth span }
+  class CpaResult { cpa_tick ± σ; cpa_slant_range_yd ± σ; relative_speed_kt ± σ }
+  class CurrentEstimate
+  TrackEstimate *-- PresenceRegion
+  PresenceRegion *-- RegionComponent
+}
+
+EstimatorFeed --> TrackingEngine
+TrackingEngine --> TrackEstimate
+TrackingEngine --> CpaResult
+TrackingEngine --> CurrentEstimate
 @enduml

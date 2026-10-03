@@ -1,29 +1,55 @@
 # AQUA-DRIFT architecture
 
-AQUA-DRIFT is a synthetic, three-dimensional marine drift and Doppler simulation environment.
-It deliberately has no bearing observation field, endpoint, message, or estimator input.
+AQUA-DRIFT is a synthetic, three-dimensional simulator for tracking a submerged target that is
+moved by tidal current, using **Doppler observations only** from passively drifting observers.
+Bearing information is not used anywhere in the runtime system.
 
-## Runtime boundaries
+## Containers
 
-- `simulation-clock` produces the shared one-second time base.
-- `target-simulator` advances a rate-limited synthetic target motion profile.
-- `observer` is a horizontally scalable service; each replica owns one observer identity.
-- `current-field` exposes the common affine current field.
-- `doppler-engine` emits one-second synthetic Doppler observations inside the common slant-range gate.
-- `estimator` produces online and retrospective outputs without asserting an absolute horizontal
-  position when direction information is absent.
-- `api` is the only database writer and retains immutable event history.
-- `web` serves an offline CesiumJS viewer with bundled Natural Earth II imagery.
+| Service | Role |
+|---|---|
+| `clock` | Shared 1 s time base |
+| `target` | Constant HDG / through-water speed / depth; changes follow the configured rates (deg/s, kt/s, Ft/s); moved by the current |
+| `observer` (×1..100) | One observer per container; drifts with the water; exact time/position/depth. Start position from env, a queued placement, or the default pattern |
+| `current-field` | Truth affine current field `v(p) = a + G (p − p_ref)` |
+| `doppler` | Acoustic source / Doppler engine. Waits until target and all observers reach the tick, then emits one synchronized batch: frequency when slant range ≤ R_max, explicit non-detection otherwise. Truth is attached separately |
+| `estimator` | Pulls `/internal/estimator-feed` (observations only, truth stripped) and publishes ONLINE / SMOOTHED estimates, CPA results and the current estimate |
+| `api` | FastAPI + WebSocket, single writer of the immutable PostgreSQL/PostGIS event history |
+| `web` | nginx + CesiumJS with bundled Natural Earth II imagery |
 
 ## Truth separation
 
-Target truth is published only for simulation display and evaluation. The estimator receives
-observer state and synthetic Doppler observations. Its output carries an explicit observability
-status. Range-only candidate shells are rendered as point clouds rather than ellipsoidal confidence
-approximations.
+`DopplerObservation` carries only what an observer measures (time, exact own position/depth,
+detected flag, received frequency, recognized source frequency). `DopplerTruth` (slant range,
+relative speed) and the target state are used for display and evaluation only. The estimator
+feed endpoint removes truth, and `EstimatorSettings` exposes no truth parameters (source
+frequency, bias magnitude, current field).
+
+## Estimation
+
+See [estimation-methods.md](estimation-methods.md). In short:
+
+1. Linear current field fitted from observer drift over the detectable time `R_max / V_target`.
+2. 7-state regularized particle filter `[p, u_through_water, bias]` with Doppler likelihood,
+   range-gate likelihood (detected ⇒ inside, not detected ⇒ outside), progressive correction,
+   per-cluster kernel jitter and a maneuver mixture.
+3. Resample-move every `move_interval_s`: window likelihood, multi-start Levenberg–Marquardt,
+   Gaussian-mixture independence MH and random-walk MH; the window is cut when a maneuver
+   makes the constant-velocity fit inconsistent.
+4. Fixed-lag smoothing by ancestor tracing gives the updated past track (SMOOTHED); the
+   filtered track is frozen (ONLINE).
+5. CPA analysis per observer pass: time (zero crossing vs recognized frequency), relative
+   speed (pre/post frequency change), slant range (CPA slope) and their errors from the
+   frequency bias and the speed error.
+6. Presence region: highest-density region at the configured probability; disconnected parts
+   are reported separately with their probability mass.
 
 ## Units
 
-Internal kinematics use metres and seconds where needed. The external interface displays distance
-in yards, depth in feet, speed in knots, speed change in knots per second, depth change in feet per
-second, and direction in degrees true.
+Internal kinematics use metres and seconds. The interface uses YD for distance, Ft for depth,
+kt for speed, kt/s for speed change, Ft/s for depth change and degrees true for HDG/COG.
+
+## Diagrams
+
+PlantUML sources: `docs/uml/components.puml`, `classes.puml`, `sequence.puml`,
+`estimation-activity.puml`, `observer-state.puml`.

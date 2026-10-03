@@ -1,0 +1,31 @@
+@startuml
+title Estimator: per-epoch activity
+start
+:receive DopplerBatch (k);
+:update observer fixes;\nfit linear current field over detectable time T = R_max / V;
+if (filter initialized?) then (no)
+  if (any detection?) then (yes)
+    :sample prior in range sphere\n(thin shell if observer saw non-detection at k-1);
+    :project velocity onto measured Doppler;
+  else (no)
+    :NO_DETECTION;
+    stop
+  endif
+else (yes)
+  :predict: through-water CV + current\n+ maneuver mixture;
+endif
+:update: Doppler likelihood × range-gate likelihood\n(progressive correction, regularized resampling);
+if (k mod move_interval = 0) then (yes)
+  :window likelihood (back-propagated through current);
+  :multi-start LM → modes → Gaussian mixture proposal;
+  :Metropolis-Hastings (independence + random walk);
+  if (best fit χ² > threshold?) then (yes)
+    :maneuver detected → cut window;
+  endif
+endif
+:store ancestor-traced history (fixed-lag smoothing);
+:CPA analysis per observer pass;
+:HDR presence region at p %;
+:publish ONLINE (frozen past) and SMOOTHED (updated past);
+stop
+@enduml
