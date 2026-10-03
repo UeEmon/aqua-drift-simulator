@@ -114,6 +114,10 @@ class SimulationState:
                 record.last_tick = observer.tick
             return evicted_id
 
+    async def observer_record(self, observer_id: str) -> ObserverRecord:
+        async with self.lock:
+            return self.observers[observer_id].model_copy()
+
     # ---------------------------------------------------------------- observations
     async def add_batch(self, batch: DopplerBatch) -> None:
         async with self.lock:

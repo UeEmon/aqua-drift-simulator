@@ -125,10 +125,7 @@ async def set_observer(observer: ObserverState) -> dict[str, str | None]:
             observer.observer_id,
         )
         raise HTTPException(status_code=410, detail=str(error)) from error
-    snapshot = await state.snapshot()
-    record = next(
-        item for item in snapshot.observers if item.state.observer_id == observer.observer_id
-    )
+    record = await state.observer_record(observer.observer_id)
     payload = observer.model_dump(mode="json")
     await store.upsert_observer(
         observer.observer_id, record.registered_tick, record.last_tick, payload

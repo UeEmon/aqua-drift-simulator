@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from typing import Any
 
 import asyncpg
 
 from aqua_drift.models import ScenarioConfig
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE EXTENSION IF NOT EXISTS postgis;
@@ -53,16 +57,38 @@ CREATE INDEX IF NOT EXISTS observer_track_position_gix
 
 
 class EventStore:
-    def __init__(self, database_url: str | None) -> None:
+    def __init__(
+        self, database_url: str | None, connect_timeout_s: float = 120.0, retry_delay_s: float = 2.0
+    ) -> None:
         self.database_url = database_url
         self.pool: asyncpg.Pool | None = None
+        self.connect_timeout_s = connect_timeout_s
+        self.retry_delay_s = retry_delay_s
 
     async def connect(self) -> None:
+        """Connect with retries: the database may still be initializing (first start)."""
         if not self.database_url:
             return
-        self.pool = await asyncpg.create_pool(self.database_url, min_size=1, max_size=5)
-        async with self.pool.acquire() as connection:
-            await connection.execute(SCHEMA)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.connect_timeout_s
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                self.pool = await asyncpg.create_pool(self.database_url, min_size=1, max_size=5)
+                async with self.pool.acquire() as connection:
+                    await connection.execute(SCHEMA)
+                if attempt > 1:
+                    log.info("database connected after %d attempts", attempt)
+                return
+            except (OSError, asyncpg.PostgresError) as error:
+                if self.pool is not None:
+                    await self.pool.close()
+                    self.pool = None
+                if loop.time() >= deadline:
+                    raise
+                log.warning("database not ready (%s); retrying", error.__class__.__name__)
+                await asyncio.sleep(self.retry_delay_s)
 
     async def close(self) -> None:
         if self.pool:
