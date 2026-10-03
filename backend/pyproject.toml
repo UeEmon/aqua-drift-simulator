@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aqua-drift-simulator"
+version = "0.1.0"
+description = "Synthetic three-dimensional marine drift and Doppler simulator"
+requires-python = ">=3.11"
+dependencies = [
+  "asyncpg>=0.29,<1",
+  "fastapi>=0.115,<1",
+  "httpx>=0.27,<1",
+  "pydantic>=2.9,<3",
+  "pydantic-settings>=2.5,<3",
+  "uvicorn[standard]>=0.30,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.24,<1",
+  "ruff>=0.7,<1",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["aqua_drift*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

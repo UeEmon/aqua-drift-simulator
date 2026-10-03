@@ -1,0 +1,13 @@
+@startuml
+title Observer Lifecycle
+[*] --> PENDING
+PENDING --> ACTIVE : register
+ACTIVE --> OUT_OF_RANGE : slant range > Rmax
+OUT_OF_RANGE --> ACTIVE : slant range <= Rmax
+ACTIVE --> EXPIRED : observation time >= 3 h
+ACTIVE --> EVICTED : 101st active registration
+EXPIRED --> ARCHIVED
+EVICTED --> ARCHIVED
+ARCHIVED : immutable history retained
+ARCHIVED --> [*]
+@enduml

@@ -1,0 +1,35 @@
+@startuml
+title AQUA-DRIFT Component Diagram
+left to right direction
+skinparam componentStyle rectangle
+
+component "simulation-clock" as Clock
+component "target-simulator" as Target
+component "observer-001..100" as Observer
+component "current-field" as Field
+component "doppler-engine" as Doppler
+component "estimator\n(online / smoothed)" as Estimator
+database "PostgreSQL + PostGIS" as DB
+component "API / WebSocket" as API
+component "CesiumJS / CZML" as GIS
+
+Clock --> Target : synchronized 1 s tick
+Clock --> Observer : synchronized 1 s tick
+Field --> Target : affine current
+Field --> Observer : passive drift
+Target --> Doppler : synthetic truth
+Observer --> Doppler : exact position/depth
+Doppler --> Estimator : Doppler observation
+Observer --> Estimator : position/depth history
+Estimator --> API
+Target --> API
+Observer --> API
+API --> DB
+API --> GIS : WebSocket snapshot
+
+note bottom of Estimator
+No bearing information is used.
+Absolute position is not asserted
+when it is unobservable.
+end note
+@enduml

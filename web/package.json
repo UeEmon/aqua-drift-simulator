@@ -1,0 +1,8 @@
+{
+  "name": "aqua-drift-web",
+  "private": true,
+  "version": "0.1.0",
+  "dependencies": {
+    "cesium": "1.129.0"
+  }
+}

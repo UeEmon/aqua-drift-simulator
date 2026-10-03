@@ -1,0 +1,98 @@
+name: aqua-drift-simulator
+
+x-worker: &worker
+  build:
+    context: ./backend
+  restart: on-failure
+  environment:
+    API_URL: http://api:8000
+    CURRENT_FIELD_URL: http://current-field:8001
+  depends_on:
+    api:
+      condition: service_healthy
+  networks: [aqua-drift]
+
+services:
+  db:
+    image: postgis/postgis:16-3.4-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-aqua_drift}
+      POSTGRES_USER: ${POSTGRES_USER:-aqua_drift}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aqua_drift}
+    volumes:
+      - aqua-drift-db:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [aqua-drift]
+
+  api:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-aqua_drift}:${POSTGRES_PASSWORD:-aqua_drift}@db:5432/${POSTGRES_DB:-aqua_drift}
+      MAX_SLANT_RANGE_YD: ${MAX_SLANT_RANGE_YD:-12000}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "127.0.0.1:${API_PORT:-8091}:8000"
+    networks: [aqua-drift]
+
+  current-field:
+    <<: *worker
+    command: ["uvicorn", "aqua_drift.services.current_field:app", "--host", "0.0.0.0", "--port", "8001"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  clock:
+    <<: *worker
+    command: ["python", "-m", "aqua_drift.services.clock"]
+
+  target:
+    <<: *worker
+    command: ["python", "-m", "aqua_drift.services.target"]
+
+  observer:
+    <<: *worker
+    command: ["python", "-m", "aqua_drift.services.observer"]
+    deploy:
+      replicas: ${OBSERVER_REPLICAS:-3}
+
+  doppler:
+    <<: *worker
+    command: ["python", "-m", "aqua_drift.services.doppler"]
+
+  estimator:
+    <<: *worker
+    command: ["python", "-m", "aqua_drift.services.estimator"]
+
+  web:
+    build:
+      context: ./web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8090}:80"
+    networks: [aqua-drift]
+
+volumes:
+  aqua-drift-db:
+
+networks:
+  aqua-drift:

@@ -1,0 +1,27 @@
+@startuml
+title AQUA-DRIFT Synchronized Processing
+participant Clock
+participant Target
+participant Field
+participant Observer
+participant Doppler
+participant Estimator
+database Store
+
+loop every 1 second
+  Clock -> Target : tick
+  Field -> Target : current vector
+  Target -> Target : rate-limited update
+  Clock -> Observer : tick
+  Field -> Observer : passive drift vector
+  Observer -> Doppler : exact position/depth
+  Target -> Doppler : synthetic state
+  alt slant range <= Rmax
+    Doppler -> Estimator : Doppler observation
+    Estimator -> Store : online estimate
+  else outside range
+    Doppler -> Store : no-detection event
+  end
+end
+Estimator -> Store : smoothed estimate for configured window
+@enduml

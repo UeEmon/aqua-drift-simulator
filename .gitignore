@@ -1,0 +1,12 @@
+.env
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+node_modules/
+dist/
+coverage.xml
+htmlcov/
