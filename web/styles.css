@@ -54,6 +54,7 @@ body { overflow: hidden; }
 .sw.online { background: repeating-linear-gradient(90deg, #ffa500 0 6px, transparent 6px 9px); }
 .sw.smoothed { background: #00ff00; }
 .sw.region { background: #ff4fd8; height: 10px; opacity: 0.7; }
+.sw.bearing { background: repeating-linear-gradient(90deg, #ffe680 0 5px, transparent 5px 8px); }
 .sw.observer { background: #ffd700; height: 8px; width: 8px; border-radius: 50%; }
 
 #control-panel {
@@ -118,3 +119,54 @@ button.secondary { width: 100%; color: #d7eaff; background: #203b54; }
   #app { grid-template-columns: 1fr; grid-template-rows: minmax(360px, 58vh) 1fr; }
   #control-panel { border-left: 0; border-top: 1px solid #20364b; }
 }
+
+#estimation-bar {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: #10243a;
+  border: 1px solid #20364b;
+  border-radius: 8px;
+}
+.run-state { display: flex; align-items: center; gap: 10px; font-size: 12px; color: #a9c2d9; }
+.badge { padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+.badge.running { color: #062014; background: #5dff9d; }
+.badge.stopped { color: #e7f2ff; background: #4a5d70; }
+.run-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+button.danger { color: #fff; background: #c2453d; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid #2c4963; margin-bottom: 4px; }
+.tab {
+  flex: 1;
+  padding: 8px 4px;
+  color: #a9c2d9;
+  background: transparent;
+  border-radius: 6px 6px 0 0;
+  font-weight: 500;
+  font-size: 12px;
+}
+.tab.active { color: #06111b; background: #67c8ff; font-weight: 700; }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+.tab-panel section:first-child { border-top: 0; }
+.table-wrap.tall { max-height: none; }
+#compare-table td:nth-child(4) { color: #ffd38a; }
+.chart { margin: 0 0 12px; }
+.chart figcaption { margin-bottom: 4px; color: #9cc0e2; font-size: 11.5px; }
+.chart canvas { display: block; width: 100%; background: #0b1928; border: 1px solid #20364b; border-radius: 6px; }
+.chart-tooltip {
+  position: fixed;
+  z-index: 10;
+  padding: 5px 8px;
+  color: #e7f2ff;
+  background: rgba(5, 18, 32, 0.95);
+  border: 1px solid #2c4963;
+  border-radius: 5px;
+  font-size: 11.5px;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+.grid2 h3 { margin: 10px 0 0; }
+.grid2 .check { grid-column: span 2; }

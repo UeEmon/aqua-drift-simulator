@@ -8,7 +8,7 @@ node "Docker Compose network: aqua-drift" {
   component "target\n(constant HDG/STW/depth,\nrate-limited changes)" as Target
   component "observer × 1..100\n(one container each,\npassive drift)" as Observer
   component "current-field\n(affine truth field)" as Field
-  component "doppler\n(acoustic source / Doppler engine)" as Doppler
+  component "doppler\n(acoustic source / Doppler + bearing)" as Doppler
   component "estimator\n(PF + resample-move + CPA)" as Estimator
   component "api\n(FastAPI, WebSocket,\nsingle DB writer)" as API
   database "db\nPostgreSQL + PostGIS\n(immutable event history)" as DB
@@ -28,7 +28,7 @@ GIS --> API : /api/* , /ws
 note bottom of Estimator
 Inputs: time, exact observer position/depth,
 Doppler frequency, detected flag,
-recognized source frequency.
-No bearing, no range, no truth.
+recognized source frequency, bearing (σ15°, 15 s).
+No range, no truth. Start/stop by operator.
 end note
 @enduml

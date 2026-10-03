@@ -40,6 +40,7 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-aqua_drift}:${POSTGRES_PASSWORD:-aqua_drift}@db:5432/${POSTGRES_DB:-aqua_drift}
       MAX_SLANT_RANGE_YD: ${MAX_SLANT_RANGE_YD:-6000}
+      ESTIMATION_AUTOSTART: ${ESTIMATION_AUTOSTART:-true}
     depends_on:
       db:
         condition: service_healthy
@@ -73,7 +74,7 @@ services:
     <<: *worker
     command: ["python", "-m", "aqua_drift.services.observer"]
     deploy:
-      replicas: ${OBSERVER_REPLICAS:-3}
+      replicas: ${OBSERVER_REPLICAS:-4}
 
   # acoustic source / Doppler computation (音源演算部): separate container
   doppler:

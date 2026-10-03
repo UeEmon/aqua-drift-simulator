@@ -45,6 +45,8 @@ class TargetMotionConfig(BaseModel):
     """Target truth. Base motion is constant HDG / constant through-water speed."""
 
     initial_position: Position = Position(latitude=35.0, longitude=140.0, depth_ft=500.0)
+    initial_hdg_deg: float = Field(default=90.0, ge=0, lt=360)
+    initial_through_water_speed_kt: float = Field(default=8.0, ge=0)
     desired_hdg_deg: float = Field(default=90.0, ge=0, lt=360)
     desired_through_water_speed_kt: float = Field(default=8.0, ge=0)
     desired_depth_ft: float = Field(default=500.0, ge=0)
@@ -79,10 +81,26 @@ class SourceFrequencyConfig(BaseModel):
     sound_speed_mps: float = Field(default=1500.0, gt=0)
 
 
-class ObserverDeploymentConfig(BaseModel):
-    """Default placement for observer containers that are not given an explicit position."""
+class BearingConfig(BaseModel):
+    """Horizontal true bearing observation (observer -> target), inside the max slant range.
 
-    pattern: str = Field(default="grid", pattern="^(grid|line|ring|random)$")
+    Errors: normal, zero mean, sigma_deg, independent in time and between observers."""
+
+    enabled: bool = True
+    sigma_deg: float = Field(default=15.0, gt=0, le=90)
+    interval_s: int = Field(default=15, ge=1, le=600)
+    random_seed: int = 11
+
+
+class ObserverDeploymentConfig(BaseModel):
+    """Default placement for observer containers that are not given an explicit position.
+
+    `surround` (default): the first four observers surround the target's initial position
+    (bearings HDG+45/135/225/315 deg at surround_radius_yd); further observers are added on a
+    wider ring."""
+
+    pattern: str = Field(default="surround", pattern="^(surround|grid|line|ring|random)$")
+    surround_radius_yd: float = Field(default=3000.0, gt=0)
     spacing_yd: float = Field(default=3000.0, gt=0)
     line_bearing_deg: float = Field(default=0.0, ge=0, lt=360)
     offset_ahead_yd: float = Field(default=9000.0)
@@ -105,6 +123,8 @@ class EstimatorConfig(BaseModel):
     maneuver_vertical_sigma_mps: float = Field(default=0.15, ge=0)
     move_min_window_s: int = Field(default=60, ge=20, le=3600)
     move_mismatch_chi2: float = Field(default=4.0, gt=1)
+    use_bearing: bool = True
+    bearing_sigma_deg: float = Field(default=15.0, gt=0, le=90)
     range_gate_softness_yd: float = Field(default=15.0, gt=0)
     current_gradient_ridge: float = Field(default=1e-6, ge=0)
     track_store_slots: int = Field(default=360, ge=10, le=2000)
@@ -128,6 +148,7 @@ class ScenarioConfig(BaseModel):
     target: TargetMotionConfig = TargetMotionConfig()
     current_field: CurrentFieldConfig = CurrentFieldConfig()
     source: SourceFrequencyConfig = SourceFrequencyConfig()
+    bearing: BearingConfig = BearingConfig()
     deployment: ObserverDeploymentConfig = ObserverDeploymentConfig()
     estimator: EstimatorConfig = EstimatorConfig()
 
@@ -198,6 +219,7 @@ class DopplerObservation(BaseModel):
     detected: bool
     observed_frequency_hz: float | None = None
     recognized_frequency_hz: float  # observer's belief of the source frequency (biased)
+    bearing_deg: float | None = None  # horizontal true bearing with error (every interval_s)
 
 
 class DopplerTruth(BaseModel):
@@ -208,6 +230,7 @@ class DopplerTruth(BaseModel):
     slant_range_yd: float
     relative_speed_kt: float
     relative_radial_speed_kt: float
+    true_bearing_deg: float = 0.0
 
 
 class DopplerBatch(BaseModel):
@@ -224,9 +247,26 @@ class ObserverFix(BaseModel):
     position: Position
 
 
+class EstimationControl(BaseModel):
+    """Operator start/stop of the estimator. A start begins a new run from the current tick."""
+
+    running: bool = True
+    run_id: int = 0
+    started_tick: int = 0
+    stopped_tick: int | None = None
+
+
+class BearingReport(BaseModel):
+    observer_id: str
+    tick: int
+    bearing_deg: float
+    observer_position: Position
+
+
 class EstimatorFeed(BaseModel):
     tick: int
     generation: int = 0
+    estimation: EstimationControl = EstimationControl()
     settings: EstimatorSettings
     observers: list[ObserverFix]
     archived_observer_ids: list[str]
@@ -363,6 +403,8 @@ class SimState(BaseModel):
 class Snapshot(BaseModel):
     tick: int
     generation: int = 0
+    estimation: EstimationControl = EstimationControl()
+    bearings: list[BearingReport] = Field(default_factory=list)
     config: ScenarioConfig
     target: TargetState | None
     observers: list[ObserverRecord]

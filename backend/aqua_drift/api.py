@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from aqua_drift.models import (
     DopplerBatch,
+    EstimationControl,
     EstimatorFeed,
     EstimatorOutput,
     ObserverPlacement,
@@ -26,7 +27,10 @@ from aqua_drift.storage import EventStore
 initial_config = ScenarioConfig(
     max_slant_range_yd=float(os.getenv("MAX_SLANT_RANGE_YD", "6000"))
 )
-state = SimulationState(initial_config)
+state = SimulationState(
+    initial_config,
+    autostart_estimation=os.getenv("ESTIMATION_AUTOSTART", "true").lower() in ("1", "true", "yes"),
+)
 store = EventStore(os.getenv("DATABASE_URL"))
 ESTIMATE_EVENT_INTERVAL_S = 10
 
@@ -81,9 +85,30 @@ async def queue_observer_placement(placement: ObserverPlacement) -> dict[str, in
     return {"pending_placements": pending}
 
 
+@app.post("/api/estimation/start", response_model=EstimationControl)
+async def start_estimation() -> EstimationControl:
+    control = await state.start_estimation()
+    await store.append_event("estimation_started", state.tick, control.model_dump(mode="json"))
+    return control
+
+
+@app.post("/api/estimation/stop", response_model=EstimationControl)
+async def stop_estimation() -> EstimationControl:
+    control = await state.stop_estimation()
+    await store.append_event("estimation_stopped", state.tick, control.model_dump(mode="json"))
+    return control
+
+
+@app.get("/api/estimation", response_model=EstimationControl)
+async def get_estimation() -> EstimationControl:
+    return (await state.snapshot()).estimation
+
+
 @app.post("/api/reset")
-async def reset_runtime() -> dict[str, str]:
-    await state.reset_runtime()
+async def reset_runtime(replace_observers: bool = True) -> dict[str, str]:
+    """Restart from the configured initial target state. With replace_observers the
+    default-placed observers are re-placed around the new initial target position."""
+    await state.reset_runtime(replace_observers)
     await store.append_event("runtime_reset", state.tick, {"history_retained": True})
     return {"status": "reset", "history": "retained"}
 

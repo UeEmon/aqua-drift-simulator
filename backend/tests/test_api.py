@@ -66,3 +66,15 @@ def test_observer_placement_queue() -> None:
         ).json()
         assert assigned["latitude"] == 35.1
         assert assigned["depth_ft"] == 300.0
+
+
+def test_estimation_control_endpoints() -> None:
+    with TestClient(app) as client:
+        stopped = client.post("/api/estimation/stop").json()
+        assert stopped["running"] is False
+        assert client.get("/internal/estimator-feed").json()["estimation"]["running"] is False
+        started = client.post("/api/estimation/start").json()
+        assert started["running"] is True
+        assert started["run_id"] > stopped["run_id"] - 1
+        assert client.get("/api/snapshot").json()["estimation"]["running"] is True
+        assert client.post("/api/reset", params={"replace_observers": "false"}).status_code == 200

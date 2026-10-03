@@ -32,6 +32,7 @@ class Epoch:
     det: np.ndarray  # (R,) bool
     freq: np.ndarray  # (R,) nan where not detected
     rec: np.ndarray  # (R,)
+    brg: np.ndarray | None = None  # (R,) radians, nan where no bearing
     ids: tuple[str, ...] = ()
     transition: bool = False  # some observer changed detected/not-detected here (or next)
 
@@ -45,6 +46,7 @@ class MoveParams:
     bias_sigma: float
     max_speed: float
     max_depth: float
+    bearing_sigma: float = 0.2618
 
 
 class EpochStore:
@@ -82,8 +84,12 @@ class EpochStore:
             return [(e, 1.0) for e in epochs]
         regular = set(np.unique(np.linspace(0, n - 1, count).round().astype(int)).tolist())
         transitions = {i for i, e in enumerate(epochs) if e.transition}
+        bearings = {
+            i for i, e in enumerate(epochs) if e.brg is not None and np.isfinite(e.brg).any()
+        }  # every bearing is a separate noisy measurement: always kept, weight 1
         weight = n / len(regular)
-        return [(epochs[i], weight if i in regular else 0.0) for i in sorted(regular | transitions)]
+        keep = sorted(regular | transitions | bearings)
+        return [(epochs[i], weight if i in regular else 0.0) for i in keep]
 
 
 @dataclass
@@ -98,6 +104,8 @@ class Window:
     rec: np.ndarray  # (K,)
     w_dop: np.ndarray  # (K,) Doppler weight (0 where not detected / not regular)
     has_doppler: bool
+    brg: np.ndarray | None = None  # (K,) radians (0 where none)
+    w_brg: np.ndarray | None = None  # (K,) 1 where a bearing exists
 
     @classmethod
     def build(
@@ -108,7 +116,7 @@ class Window:
     ) -> Window:
         """`relevant(epoch) -> bool mask` drops non-detecting rows that cannot affect any
         particle (observer far beyond max range of the whole particle cloud)."""
-        dt, pos, vel, det, freq, rec, wd = [], [], [], [], [], [], []
+        dt, pos, vel, det, freq, rec, wd, brg, wb = [], [], [], [], [], [], [], [], []
         for epoch, weight in sample:
             keep = epoch.det | (relevant(epoch) if relevant is not None else True)
             keep = np.broadcast_to(keep, epoch.det.shape)
@@ -122,6 +130,10 @@ class Window:
             freq.append(np.where(epoch.det[keep], epoch.freq[keep], 0.0))
             rec.append(epoch.rec[keep])
             wd.append(np.where(epoch.det[keep], weight, 0.0))
+            b = epoch.brg[keep] if epoch.brg is not None else np.full(k, np.nan)
+            has = np.isfinite(b)
+            brg.append(np.where(has, b, 0.0))
+            wb.append(has.astype(float))
         if not dt:
             empty = np.zeros(0)
             return cls(empty, np.zeros((0, 3)), np.zeros((0, 3)), empty.astype(bool), empty,
@@ -136,7 +148,20 @@ class Window:
             rec=np.concatenate(rec),
             w_dop=w_dop,
             has_doppler=bool(np.any(w_dop > 0)),
+            brg=np.concatenate(brg),
+            w_brg=np.concatenate(wb),
         )
+
+
+def _wrap(angle: np.ndarray) -> np.ndarray:
+    return (angle + np.pi) % (2 * np.pi) - np.pi
+
+
+def _subset(win: Window, cols: np.ndarray) -> Window:
+    return Window(
+        dt=win.dt[cols], pos=win.pos[cols], vel=win.vel[cols], det=win.det[cols],
+        freq=win.freq[cols], rec=win.rec[cols], w_dop=win.w_dop[cols], has_doppler=False,
+    )
 
 
 def _geometry(
@@ -173,6 +198,11 @@ def window_loglik(
         pred = (win.rec[None, :] - part[:, 6:7]) * (1.0 - rdot / prm.c)
         dop = win.w_dop[None, :] * ((pred - win.freq[None, :]) / prm.sigma_f) ** 2
         total[begin : begin + chunk] = gate.sum(axis=1) - 0.5 * dop.sum(axis=1)
+        if win.w_brg is not None and win.w_brg.any():
+            cols = win.w_brg > 0
+            los, _, _ = _geometry(part, _subset(win, cols), current)
+            diff = _wrap(np.arctan2(los[..., 0], los[..., 1]) - win.brg[cols][None, :])
+            total[begin : begin + chunk] -= 0.5 * np.sum((diff / prm.bearing_sigma) ** 2, axis=1)
     if prm.bias_sigma > 0:
         total += -0.5 * (states[:, 6] / prm.bias_sigma) ** 2
     speed = np.linalg.norm(states[:, 3:5], axis=1)
@@ -187,9 +217,16 @@ def _residuals(x: np.ndarray, win: Window, current: CurrentFit, prm: MoveParams)
     margin = (prm.max_range - dist) / prm.gate_soft
     soft = np.where(win.det, np.logaddexp(0.0, -margin), np.logaddexp(0.0, margin))
     pred = (win.rec - x[6]) * (1.0 - rdot / prm.c)
+    if win.w_brg is not None and win.w_brg.any():
+        los, _, _ = _geometry(x[None, :], win, current)
+        diff = _wrap(np.arctan2(los[0, :, 0], los[0, :, 1]) - win.brg)
+        bearing_part = win.w_brg * diff / prm.bearing_sigma
+    else:
+        bearing_part = np.zeros(0)
     parts = [
         np.sqrt(2.0 * soft),
         np.sqrt(win.w_dop) * (pred - win.freq) / prm.sigma_f,
+        bearing_part,
         np.array([x[6] / prm.bias_sigma if prm.bias_sigma > 0 else 0.0]),
         np.array([max(0.0, float(np.hypot(x[3], x[4])) - prm.max_speed) * 100.0]),
     ]

@@ -5,9 +5,11 @@ from collections import OrderedDict, deque
 
 from aqua_drift.deployment import default_position
 from aqua_drift.models import (
+    BearingReport,
     CpaResult,
     CurrentEstimate,
     DopplerBatch,
+    EstimationControl,
     EstimatorFeed,
     EstimatorOutput,
     EstimatorSettings,
@@ -31,7 +33,9 @@ class ObserverRejected(RuntimeError):
 
 
 class SimulationState:
-    def __init__(self, config: ScenarioConfig | None = None) -> None:
+    def __init__(
+        self, config: ScenarioConfig | None = None, autostart_estimation: bool = True
+    ) -> None:
         self.lock = asyncio.Lock()
         self.config = config or ScenarioConfig()
         self.tick = 0
@@ -46,7 +50,10 @@ class SimulationState:
         self.placements: deque[ObserverPlacement] = deque()
         self.assignments: dict[str, Position] = {}
         self.assignment_counter = 0
+        self.explicit_ids: set[str] = set()
         self.generation = 0
+        self.estimation = EstimationControl(running=autostart_estimation)
+        self.bearings: dict[str, BearingReport] = {}
 
     async def set_config(self, config: ScenarioConfig) -> None:
         async with self.lock:
@@ -78,6 +85,7 @@ class SimulationState:
                 return self.assignments[observer_id]
             if self.placements:
                 position = self.placements.popleft().position
+                self.explicit_ids.add(observer_id)
             else:
                 position = default_position(self.config, self.assignment_counter)
                 self.assignment_counter += 1
@@ -127,6 +135,14 @@ class SimulationState:
             batch.observations = [o for o in batch.observations if o.observer_id in active]
             batch.truth = [t for t in batch.truth if t.observer_id in active]
             self.batches.append(batch)
+            for obs in batch.observations:
+                if obs.bearing_deg is not None:
+                    self.bearings[obs.observer_id] = BearingReport(
+                        observer_id=obs.observer_id,
+                        tick=obs.tick,
+                        bearing_deg=obs.bearing_deg,
+                        observer_position=obs.observer_position,
+                    )
 
     async def estimator_feed(self, after_tick: int) -> EstimatorFeed:
         async with self.lock:
@@ -138,6 +154,7 @@ class SimulationState:
             return EstimatorFeed(
                 tick=self.tick,
                 generation=self.generation,
+                estimation=self.estimation,
                 settings=EstimatorSettings.from_config(self.config),
                 observers=[
                     ObserverFix(
@@ -149,8 +166,29 @@ class SimulationState:
                 batches=batches,
             )
 
+    # ---------------------------------------------------------------- estimation control
+    async def start_estimation(self) -> EstimationControl:
+        """Start a new estimation run from the current tick (previous output cleared)."""
+        async with self.lock:
+            self.estimation = EstimationControl(
+                running=True, run_id=self.estimation.run_id + 1, started_tick=self.tick
+            )
+            self.estimates, self.cpa, self.current_estimate = [], [], None
+            return self.estimation
+
+    async def stop_estimation(self) -> EstimationControl:
+        """Stop the estimator; the last estimate stays displayed (frozen)."""
+        async with self.lock:
+            if self.estimation.running:
+                self.estimation = self.estimation.model_copy(
+                    update={"running": False, "stopped_tick": self.tick}
+                )
+            return self.estimation
+
     async def set_estimator_output(self, output: EstimatorOutput) -> None:
         async with self.lock:
+            if not self.estimation.running:
+                return  # late output from a stopped run
             self.estimates = output.estimates
             self.cpa = output.cpa
             self.current_estimate = output.current
@@ -160,6 +198,11 @@ class SimulationState:
             return Snapshot(
                 tick=self.tick,
                 generation=self.generation,
+                estimation=self.estimation,
+                bearings=[
+                    b for b in self.bearings.values()
+                    if self.tick - b.tick <= self.config.bearing.interval_s
+                ],
                 config=self.config,
                 target=self.target,
                 observers=list(self.observers.values()),
@@ -180,11 +223,24 @@ class SimulationState:
                 observers=list(self.observers.values()),
             )
 
-    async def reset_runtime(self) -> None:
+    async def reset_runtime(self, replace_observers: bool = True) -> None:
+        """Restart the scenario from the configured initial target state. Observers return
+        to their start points; default-placed observers are re-placed around the (possibly
+        new) initial target position. Event history in the database is retained."""
         async with self.lock:
             self.generation += 1
             self.target = None
             self.batches.clear()
+            self.bearings.clear()
+            if replace_observers:
+                explicit = {k: v for k, v in self.assignments.items() if k in self.explicit_ids}
+                self.assignments = explicit
+                self.assignment_counter = 0
+            self.observers.clear()  # observers re-register (3 h limit restarts)
+            if self.estimation.running:
+                self.estimation = EstimationControl(
+                    running=True, run_id=self.estimation.run_id + 1, started_tick=self.tick
+                )
             self.estimates = []
             self.cpa = []
             self.current_estimate = None

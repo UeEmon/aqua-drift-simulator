@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 
 async def run() -> None:
     engine: TrackingEngine | None = None
-    generation = -1
+    run_key: tuple[int, int] | None = None
     last_tick = -1
     async with httpx.AsyncClient(trust_env=False) as client:
         await wait_for_api(client)
@@ -28,10 +28,18 @@ async def run() -> None:
             )
             response.raise_for_status()
             feed = EstimatorFeed.model_validate(response.json())
-            if engine is None or feed.generation != generation:
+            control = feed.estimation
+            if not control.running:
+                engine, run_key = None, None  # stopped: discard; a start begins a new run
+                last_tick = max(last_tick, feed.tick)
+                await asyncio.sleep(0.5)
+                continue
+            key = (feed.generation, control.run_id)
+            if engine is None or key != run_key:
                 engine = TrackingEngine(feed.settings)
-                generation = feed.generation
-                last_tick = -1
+                run_key = key
+                last_tick = control.started_tick  # only observations after the start
+                continue
             engine.apply_settings(feed.settings)
             if not feed.batches:
                 await asyncio.sleep(0.2)

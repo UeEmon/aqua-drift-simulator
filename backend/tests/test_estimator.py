@@ -29,7 +29,9 @@ def test_no_estimate_before_detection() -> None:
 
 
 def test_doppler_only_track_converges_through_observer_field() -> None:
-    run = ScenarioRun(_config(), 4)
+    config = _config(use_bearing=False)
+    config.deployment.pattern = "grid"
+    run = ScenarioRun(config, 4)
     output = run.run(1300)
     error = run.error(output)
     estimate = output.estimates[0]
@@ -162,3 +164,21 @@ def test_track_recovers_after_maneuver() -> None:
     assert error["horizontal_error_yd"] < 300
     assert abs(error["hdg_error_deg"]) < 8
     assert abs(error["water_speed_error_kt"]) < 1.5
+
+
+def test_bearings_resolve_collinear_mirror_ambiguity() -> None:
+    config = _config()
+    config.deployment.pattern = "line"
+    config.deployment.depth_step_ft = 0.0
+    run = ScenarioRun(config, 4)
+    output = run.run(1000)
+    estimate = output.estimates[0]
+    assert estimate.metadata["direction_input_available"] is True
+    assert not estimate.presence_region.disconnected
+    assert run.error(output)["horizontal_error_yd"] < 600
+
+
+def test_default_surround_with_bearings_tracks_from_start() -> None:
+    run = ScenarioRun(_config(), 4)
+    output = run.run(300)
+    assert run.error(output)["horizontal_error_yd"] < 250

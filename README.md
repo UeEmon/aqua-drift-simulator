@@ -1,16 +1,16 @@
 # AQUA-DRIFT Simulator
 
-潮流による外力を受ける潜没目標を、漂流する観測者（1〜100）の**ドップラー観測のみ**から
+潮流による外力を受ける潜没目標を、漂流する観測者（1〜100）の**ドップラー観測と方位観測**から
 3次元で航跡処理する合成データ・シミュレーターです。Docker 上で目標・観測者・音源演算・推定器を
 独立コンテナとして動かし、CesiumJS（オープンソース GIS）で表示します。
 
-Synthetic 3-D simulator for Doppler-only tracking of a submerged target under tidal current,
-built on Docker, PostgreSQL/PostGIS and CesiumJS. **No bearing information is used.**
+Synthetic 3-D simulator for Doppler + bearing tracking of a submerged target under tidal current,
+built on Docker, PostgreSQL/PostGIS and CesiumJS.
 
 ## What it computes
 
-From Doppler frequency, detection/non-detection at the common maximum slant range, and the
-exact time/position/depth of each drifting observer:
+From Doppler frequency, horizontal bearing (σ 15°, every 15 s), detection/non-detection at the
+common maximum slant range, and the exact time/position/depth of each drifting observer:
 
 - current position and depth, HDG and COG
 - through-water, over-ground and observer-relative speed
@@ -29,14 +29,27 @@ Documentation:
 - [docs/observation-mode-comparison.md](docs/observation-mode-comparison.md) – position / range-bearing / bearing-only / Doppler / combinations
 - [docs/architecture.md](docs/architecture.md) and [docs/uml/](docs/uml/) – PlantUML design
 
+## GIS panel
+
+- **Estimation bar**: start / stop the estimator (a start begins a new run from the current time)
+- **推定と真値**: estimate vs truth side by side (value, truth, error, 1σ), error-over-time charts,
+  relative speed / range / bearing per observer, CPA (estimate vs truth), current field
+- **目標設定**: target initial position, depth, HDG and speed → restart; live maneuver commands
+- **観測・推定条件**: max slant range, bearing σ / interval, bearing use on/off, frequency bias,
+  current field, probability %, recompute window, particles
+- **表示・観測者**: layer toggles (truth, both tracks, presence region, bearing lines, error line)
+  and observer placement
+
+By default four observers surround the target's initial position.
+
 ## Start with Docker
 
 ```bash
 cp .env.example .env
-docker compose up --build --scale observer=4
+docker compose up --build
 ```
 
-Open <http://localhost:8090>. API health: <http://localhost:8091/health>.
+Four observers start by default (`OBSERVER_REPLICAS`). Open <http://localhost:8090>. API health: <http://localhost:8091/health>.
 
 Add observers (1–100). To place the next one at a specific point, double-click the map (or enter
 coordinates) and press 「配置を予約」, then scale up:

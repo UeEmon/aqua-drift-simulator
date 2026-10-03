@@ -22,6 +22,7 @@
 | 2.2 | 対水速力・針路・深度をパラメータで変更 | ✅ | GIS「目標運動」フォーム / `PUT /api/config` の `target.*` | 同上 |
 | 2.3 | 変化率：速力 kt/秒、深度 Ft/秒 | ✅ | `speed_rate_kt_per_sec`, `depth_rate_ft_per_sec` | 同上 |
 | 2.4 | 針路変化率の単位（未指定） | 🔧 | **度/秒** を採用（`hdg_rate_deg_per_sec`、既定 1.0） | 同上 |
+| 2.6 | **目標の初期配置・初期状態を設定するタブ**（初期緯度経度・深度・HDG・対水速力） | ✅ | GIS「目標設定」タブ → `target.initial_*` ＋ `POST /api/reset`（再スタート、地図ダブルクリックで座標入力） | `test_initial_target_state_is_configurable` |
 | 2.5 | 推定側の変針・変速への追従 | ✅ | 粒子版 IMM（変針混合）＋ resample-move の窓短縮 | `test_track_recovers_after_maneuver` |
 
 ## 3. 外力・流速場
@@ -46,16 +47,21 @@
 | 4.5 | 観測者数 1〜100 | ✅ | `observer_limit`（1..100）、観測者は1コンテナ1観測者で `--scale` | `test_fifo_evicts_oldest_and_retains_archive` |
 | 4.6 | 上限超過時は最古から削除、観測履歴は保持 | ✅ | `SimulationState.set_observer`（FIFO）、DB `simulation_events` は追記のみ | 同上 |
 | 4.7 | 各観測者の観測時間は最大3時間 | ✅ | `max_observation_seconds = 10800`、超過で 410 → コンテナ終了 | `test_observer_expires_after_three_hours` |
-| 4.8 | 観測者の配置 | 🔧 | 既定パターン（grid/line/ring/random）、GIS から座標予約、環境変数 `OBSERVER_LAT/LON/DEPTH_FT` | `test_observer_placement_queue` |
+| 4.8 | **初期観測者は目標を囲む4点** | ✅ | 既定パターン `surround`：目標初期位置から半径 3000 YD、HDG±45°/135° の4点（深度は 200/350/500 Ft 交互）。5台目以降は外側のリング。再スタート時は新しい初期位置の周囲に再配置（選択可） | `test_default_observers_surround_target`, `test_reset_replaces_default_observers_around_new_target` |
+| 4.9 | 観測者の追加配置 | 🔧 | GIS から座標予約、環境変数 `OBSERVER_LAT/LON/DEPTH_FT`、他パターン（grid/line/ring/random） | `test_observer_placement_queue` |
 
 ## 5. 観測方式と方位情報
 
 | # | 要件 | 状態 | 実装 |
 |---|---|---|---|
 | 5.1 | ①位置 ②距離・方位 ③方位のみ の差と組合せの比較 | 📄 | `aqua_drift.analysis.compare_modes`、結果は `docs/observation-mode-comparison.md` |
-| 5.2 | 方位：水平・真北基準・15秒・同期可・σ=15°・正規・平均0・時間/観測者間独立 | 📄 | 上記比較ツールの `Noise`（bearing σ 15°, 15 s） |
-| 5.3 | **最終指定：方位情報は使用しない** | ✅ | 観測モデルに方位フィールドなし、推定器入力にもなし（`test_doppler_has_no_bearing_field`） |
-| 5.4 | 「位置が直接得られる」方式は最終入力に採用しない | ✅ | 比較対象としてのみ実装 |
+| 5.2 | 方位：水平・真北基準・15秒・同期・σ=15°・正規・平均0・時間/観測者間独立・範囲内のみ | ✅ | `BearingConfig`（既定 σ 15°, 15 s）、doppler コンテナで生成 | 
+| 5.3 | **最新指定：ベアリング（方位）情報も活用する**（以前の「使用しない」を変更） | ✅ | 粒子フィルタの逐次更新・resample-move の窓尤度・LM 残差に方位尤度（ラップした角度差／σ）を追加。`estimator.use_bearing` で切替可（ドップラーのみとの比較用） |
+| 5.4 | 「位置が直接得られる」方式は実行系の入力に採用しない | ✅ | 比較対象としてのみ実装 |
+
+検証：`test_bearing_is_horizontal_true_bearing_at_interval`（真方位・σ・間隔）、
+`test_bearings_resolve_collinear_mirror_ambiguity`（一直線配置の鏡像解を方位で解消）、
+`test_default_surround_with_bearings_tracks_from_start`。
 
 ## 6. 観測可能範囲
 
@@ -89,7 +95,7 @@
 | 8.4 | 観測者との相対速度表示 | ✅ | `relative[]`（観測者ごと）＋ CPA の相対速力 | GIS 表 |
 | 8.5 | 対地速度・対水速度表示 | ✅ | `ground_speed_kt` / `through_water_speed_kt` | GIS |
 | 8.6 | 目標の HDG と COG（CUS→COG） | ✅ | `hdg_deg`（対水速度の向き）/ `cog_deg`（対地速度の向き） | GIS |
-| 8.7 | ドップラー観測から位置・深度・速力・航跡・存在圏 | ✅ | `TrackingEngine` 全体 | 推定器テスト |
+| 8.7 | ドップラー（＋方位）観測から位置・深度・速力・航跡・存在圏 | ✅ | `TrackingEngine` 全体 | 推定器テスト |
 
 ## 9. 不確かさ・存在圏・単位
 
@@ -107,11 +113,18 @@
 |---|---|---|---|
 | 10.1 | Docker コンテナ環境 | ✅ | `docker-compose.yml`（db, api, clock, current-field, target, observer×N, doppler, estimator, web） |
 | 10.2 | GIS（オープンソース）、Cesium | ✅ | CesiumJS（Apache-2.0）＋ Natural Earth II（パブリックドメイン、オフライン同梱） |
-| 10.3 | 合成データのシミュレーター | ✅ | 真値生成と推定を分離（推定器には真値を渡さない：`test_estimator_feed_contains_no_truth`） |
+| 10.3 | 合成データのシミュレーター | ✅ | 真値生成と推定を分離（推定器には真値を渡さない：`test_estimator_feed_contains_no_truth`）。真値は比較表示のみに使用 |
 | 10.4 | 目標と観測者は独立コンテナ | ✅ | `target`、`observer`（1観測者1コンテナ） |
 | 10.5 | 音源演算部は必要に応じ別コンテナ | ✅ | `doppler` |
 | 10.6 | UML（PlantUML） | ✅ | `docs/uml/*.puml`（コンポーネント・クラス・シーケンス・推定アクティビティ・観測者状態） |
 | 10.7 | リポジトリ UeEmon/aqua-drift-simulator | ✅ | 本リポジトリ |
+
+## 11. 比較表示・推定操作
+
+| # | 要件 | 状態 | 実装 | 検証 |
+|---|---|---|---|---|
+| 11.1 | **推定状態と真の目標情報を並べて比較** | ✅ | GIS「推定と真値」タブ：位置・深度・HDG・COG・対水/対地速力・深度変化率・周波数偏りを「推定／真値／誤差／推定1σ」で並列表示、真値が存在圏の内外どちらか、誤差と1σの時間推移グラフ、観測者ごとの相対速力・斜距離・方位（推定／真値）、最近接（推定／真値）、流速場（推定／真値）。地図に推定–真値の誤差線 | UI スモークテスト |
+| 11.2 | **推定の開始・停止を操作** | ✅ | `POST /api/estimation/start`（現在時刻以降の観測で新しい推定ランを開始）／`/stop`（停止、最後の結果を保持表示）。GIS 上部に開始・停止ボタンと状態表示。起動時の自動開始は `ESTIMATION_AUTOSTART` | `test_estimation_start_stop_runs`, `test_estimation_control_endpoints` |
 
 ## 未確定事項（ユーザー判断待ち）
 
@@ -121,5 +134,7 @@
 | 流速場の時間更新規則 | 時間一定（設定変更で更新） |
 | 周波数認識誤差の大きさ | 既定 0 Hz（GIS で設定可）。推定側事前 σ 0.5 Hz |
 | 存在圏の描画形式 | 外形立体＋ボクセル |
+| 推定開始時に過去の観測を使うか | 使わない（開始時刻以降の観測のみ） |
+| 周囲4点の半径・向き | 3000 YD、目標針路に対して斜め45°（設定 `deployment.surround_radius_yd`） |
 | 位置・距離観測の誤差（比較用） | 位置 50 YD / 30 Ft、距離 2 %（比較ツールの仮定値） |
 | シミュレーター名称 | リポジトリ名に合わせ「AQUA-DRIFT」 |

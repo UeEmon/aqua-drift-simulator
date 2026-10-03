@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import random
 from dataclasses import dataclass, field
 
 from aqua_drift.deployment import default_position
@@ -44,6 +45,7 @@ class ScenarioRun:
     engine: TrackingEngine | None = None
     truth_track: list[TargetState] = field(default_factory=list)
     tick: int = 0
+    rng: random.Random | None = None
 
     def __post_init__(self) -> None:
         self.target = initial_target(self.config)
@@ -55,6 +57,7 @@ class ScenarioRun:
             for index, position in enumerate(positions)
         ]
         self.engine = TrackingEngine(EstimatorSettings.from_config(self.config))
+        self.rng = random.Random(self.config.bearing.random_seed)
 
     def step(self) -> DopplerBatch:
         self.tick += 1
@@ -65,7 +68,7 @@ class ScenarioRun:
             item.tick = self.tick
         observations, truth = [], []
         for observer in self.observers:
-            obs, tr = doppler_observation(self.config, self.target, observer)
+            obs, tr = doppler_observation(self.config, self.target, observer, self.rng)
             observations.append(obs)
             truth.append(tr)
         batch = DopplerBatch(tick=self.tick, observations=observations, truth=truth)
@@ -121,9 +124,12 @@ def main() -> None:
     parser.add_argument("--report-every", type=int, default=60)
     parser.add_argument("--bias-hz", type=float, default=0.0)
     parser.add_argument("--particles", type=int, default=None)
+    parser.add_argument("--no-bearing", action="store_true", help="estimator ignores bearings")
     args = parser.parse_args()
     config = ScenarioConfig()
     config.source.shared_recognition_bias_hz = args.bias_hz
+    if args.no_bearing:
+        config.estimator.use_bearing = False
     if args.particles:
         config.estimator.particle_count = args.particles
     run = ScenarioRun(config, args.observers)

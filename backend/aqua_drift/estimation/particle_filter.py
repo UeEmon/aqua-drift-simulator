@@ -48,6 +48,7 @@ class ObservationRow:
     detected: bool
     frequency: float | None
     recognized: float
+    bearing: float | None = None  # radians, horizontal true bearing observer -> target
 
 
 class DopplerParticleFilter:
@@ -71,6 +72,8 @@ class DopplerParticleFilter:
         maneuver_vertical: float = 0.15,
         move_min_window_s: int = 60,
         move_mismatch_chi2: float = 4.0,
+        use_bearing: bool = True,
+        bearing_sigma_rad: float = math.radians(15.0),
     ) -> None:
         self.n = particle_count
         self.max_range = max_range_m
@@ -87,6 +90,8 @@ class DopplerParticleFilter:
         self.maneuver_vertical = maneuver_vertical
         self.move_min_window_s = move_min_window_s
         self.move_mismatch_chi2 = move_mismatch_chi2
+        self.use_bearing = use_bearing
+        self.bearing_sigma = bearing_sigma_rad
         self.move_window_eff: float | None = None
         self.maneuver_cut_tick: int | None = None
         self.rng = np.random.default_rng(seed)
@@ -259,6 +264,10 @@ class DopplerParticleFilter:
                     f0 = row.recognized - x[:, 6]
                     predicted = f0 * (1.0 - rdot / self.c)
                     total += -0.5 * ((predicted - row.frequency) / self.sigma_f) ** 2
+                if self.use_bearing and row.bearing is not None:
+                    predicted_b = np.arctan2(los[:, 0], los[:, 1])
+                    diff = (predicted_b - row.bearing + np.pi) % (2 * np.pi) - np.pi
+                    total += -0.5 * (diff / self.bearing_sigma) ** 2
             else:
                 total += -np.logaddexp(0.0, margin)  # log sigmoid(-margin)
         return total
@@ -380,6 +389,10 @@ class DopplerParticleFilter:
                 det=np.array([r.detected and r.frequency is not None for r in rows]),
                 freq=np.array([r.frequency if r.frequency is not None else np.nan for r in rows]),
                 rec=np.array([r.recognized for r in rows]),
+                brg=np.array([
+                    r.bearing if (r.bearing is not None and self.use_bearing) else np.nan
+                    for r in rows
+                ]),
                 ids=tuple(r.observer_id for r in rows),
             )
         )
@@ -393,6 +406,7 @@ class DopplerParticleFilter:
             bias_sigma=self.bias_sigma,
             max_speed=self.max_speed,
             max_depth=self.max_depth,
+            bearing_sigma=self.bearing_sigma,
         )
 
     def move(self, current: CurrentFit, epochs: int = 60, starts: int = 8) -> dict[str, float]:

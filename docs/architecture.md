@@ -1,8 +1,9 @@
 # AQUA-DRIFT architecture
 
 AQUA-DRIFT is a synthetic, three-dimensional simulator for tracking a submerged target that is
-moved by tidal current, using **Doppler observations only** from passively drifting observers.
-Bearing information is not used anywhere in the runtime system.
+moved by tidal current, using Doppler and horizontal bearing observations from passively
+drifting observers. By default four observers surround the target's initial position.
+The operator starts/stops the estimator; the GIS shows estimate and truth side by side.
 
 ## Containers
 
@@ -12,7 +13,7 @@ Bearing information is not used anywhere in the runtime system.
 | `target` | Constant HDG / through-water speed / depth; changes follow the configured rates (deg/s, kt/s, Ft/s); moved by the current |
 | `observer` (×1..100) | One observer per container; drifts with the water; exact time/position/depth. Start position from env, a queued placement, or the default pattern |
 | `current-field` | Truth affine current field `v(p) = a + G (p − p_ref)` |
-| `doppler` | Acoustic source / Doppler engine. Waits until target and all observers reach the tick, then emits one synchronized batch: frequency when slant range ≤ R_max, explicit non-detection otherwise. Truth is attached separately |
+| `doppler` | Acoustic source / Doppler + bearing engine. Waits until target and all observers reach the tick, then emits one synchronized batch: frequency when slant range ≤ R_max, explicit non-detection otherwise. Truth is attached separately |
 | `estimator` | Pulls `/internal/estimator-feed` (observations only, truth stripped) and publishes ONLINE / SMOOTHED estimates, CPA results and the current estimate |
 | `api` | FastAPI + WebSocket, single writer of the immutable PostgreSQL/PostGIS event history |
 | `web` | nginx + CesiumJS with bundled Natural Earth II imagery |
@@ -20,7 +21,7 @@ Bearing information is not used anywhere in the runtime system.
 ## Truth separation
 
 `DopplerObservation` carries only what an observer measures (time, exact own position/depth,
-detected flag, received frequency, recognized source frequency). `DopplerTruth` (slant range,
+detected flag, received frequency, recognized source frequency, noisy bearing). `DopplerTruth` (slant range,
 relative speed) and the target state are used for display and evaluation only. The estimator
 feed endpoint removes truth, and `EstimatorSettings` exposes no truth parameters (source
 frequency, bias magnitude, current field).

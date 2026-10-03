@@ -14,7 +14,7 @@ if (filter initialized?) then (no)
 else (yes)
   :predict: through-water CV + current\n+ maneuver mixture;
 endif
-:update: Doppler likelihood × range-gate likelihood\n(progressive correction, regularized resampling);
+:update: Doppler × bearing × range-gate likelihood\n(progressive correction, regularized resampling);
 if (k mod move_interval = 0) then (yes)
   :window likelihood (back-propagated through current);
   :multi-start LM → modes → Gaussian mixture proposal;

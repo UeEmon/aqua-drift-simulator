@@ -93,6 +93,8 @@ class TrackingEngine:
             maneuver_vertical=e.maneuver_vertical_sigma_mps,
             move_min_window_s=e.move_min_window_s,
             move_mismatch_chi2=e.move_mismatch_chi2,
+            use_bearing=e.use_bearing,
+            bearing_sigma_rad=math.radians(e.bearing_sigma_deg),
         )
         pf.configure_history(self.settings.smoothing_window_seconds, e.track_store_slots)
         return pf
@@ -121,6 +123,8 @@ class TrackingEngine:
         pf.maneuver_vertical = e.maneuver_vertical_sigma_mps
         pf.move_min_window_s = e.move_min_window_s
         pf.move_mismatch_chi2 = e.move_mismatch_chi2
+        pf.use_bearing = e.use_bearing
+        pf.bearing_sigma = math.radians(e.bearing_sigma_deg)
         pf.configure_history(settings.smoothing_window_seconds, e.track_store_slots)
 
     # ------------------------------------------------------------------ processing
@@ -178,6 +182,9 @@ class TrackingEngine:
                     detected=obs.detected,
                     frequency=obs.observed_frequency_hz,
                     recognized=obs.recognized_frequency_hz,
+                    bearing=(
+                        math.radians(obs.bearing_deg) if obs.bearing_deg is not None else None
+                    ),
                 )
             )
             self.cpa.add(
@@ -310,8 +317,11 @@ class TrackingEngine:
             e.cpa_min_post_samples,
         )
         base_meta = {
-            "direction_input_available": False,
-            "observation_inputs": "Doppler frequency, detection flag, observer time/position/depth",
+            "direction_input_available": bool(e.use_bearing),
+            "observation_inputs": (
+                "Doppler frequency, detection flag, observer time/position/depth"
+                + (", horizontal bearing" if e.use_bearing else "")
+            ),
             "detectable_time_s": self.detectable_time_s(),
             "particle_count": self.pf.n,
             "recompute_window_s": self.settings.smoothing_window_seconds,

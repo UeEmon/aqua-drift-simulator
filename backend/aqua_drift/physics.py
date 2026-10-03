@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import random
 
 from aqua_drift.models import (
     CurrentFieldConfig,
@@ -93,7 +94,7 @@ def current_at(field: CurrentFieldConfig, position: Position) -> Velocity:
 
 def initial_target(config: ScenarioConfig) -> TargetState:
     through_water = heading_velocity(
-        config.target.desired_through_water_speed_kt, config.target.desired_hdg_deg
+        config.target.initial_through_water_speed_kt, config.target.initial_hdg_deg
     )
     current = current_at(config.current_field, config.target.initial_position)
     ground = add_velocity(through_water, current)
@@ -101,9 +102,9 @@ def initial_target(config: ScenarioConfig) -> TargetState:
     return TargetState(
         tick=0,
         position=config.target.initial_position,
-        hdg_deg=config.target.desired_hdg_deg,
+        hdg_deg=config.target.initial_hdg_deg,
         cog_deg=cog,
-        through_water_speed_kt=config.target.desired_through_water_speed_kt,
+        through_water_speed_kt=config.target.initial_through_water_speed_kt,
         ground_speed_kt=ground_speed,
         through_water_velocity=through_water,
         ground_velocity=ground,
@@ -166,8 +167,10 @@ def doppler_observation(
     config: ScenarioConfig,
     target: TargetState,
     observer: ObserverState,
+    rng: random.Random | None = None,
 ) -> tuple[DopplerObservation, DopplerTruth]:
-    """Synthesize one error-free Doppler sample (or a non-detection) and its truth record."""
+    """Synthesize one error-free Doppler sample (or a non-detection), a noisy horizontal
+    bearing every `bearing.interval_s` while detected, and the truth record."""
     east_m, north_m, down_m = local_offset_m(observer.position, target.position)
     slant_m = math.sqrt(east_m**2 + north_m**2 + down_m**2)
     rel_e = (target.ground_velocity.east_kt - observer.ground_velocity.east_kt) * KNOT_TO_MPS
@@ -183,6 +186,12 @@ def doppler_observation(
     recognized = source + config.source.shared_recognition_bias_hz
     slant_yd = slant_m * M_TO_YD
     detected = slant_yd <= config.max_slant_range_yd
+    true_bearing = math.degrees(math.atan2(east_m, north_m)) % 360.0
+    bearing = None
+    b = config.bearing
+    if b.enabled and detected and target.tick % b.interval_s == 0:
+        noise = (rng or random).gauss(0.0, b.sigma_deg)
+        bearing = (true_bearing + noise) % 360.0
     observation = DopplerObservation(
         observer_id=observer.observer_id,
         tick=target.tick,
@@ -190,6 +199,7 @@ def doppler_observation(
         detected=detected,
         observed_frequency_hz=observed if detected else None,
         recognized_frequency_hz=recognized,
+        bearing_deg=bearing,
     )
     truth = DopplerTruth(
         observer_id=observer.observer_id,
@@ -197,5 +207,6 @@ def doppler_observation(
         slant_range_yd=slant_yd,
         relative_speed_kt=relative_speed_mps / KNOT_TO_MPS,
         relative_radial_speed_kt=-radial_away_mps / KNOT_TO_MPS,
+        true_bearing_deg=true_bearing,
     )
     return observation, truth

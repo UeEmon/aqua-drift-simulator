@@ -2,12 +2,15 @@
 
 Every synchronized 1 s epoch it produces, for every active observer, the error-free received
 frequency when the target is inside the common maximum slant range, and an explicit
-non-detection otherwise (no missed detections inside the range). Truth (slant range,
+non-detection otherwise (no missed detections inside the range). Every bearing.interval_s it
+also adds a horizontal true bearing with normal error (sigma_deg), independent in time and
+between observers. Truth (slant range,
 relative speed) is attached separately and is stripped before reaching the estimator.
 """
 from __future__ import annotations
 
 import asyncio
+import random
 
 import httpx
 
@@ -18,6 +21,7 @@ from aqua_drift.services.common import post, snapshot, wait_for_api
 
 async def run() -> None:
     last_tick = -1
+    rng: random.Random | None = None
     async with httpx.AsyncClient(trust_env=False) as client:
         await wait_for_api(client)
         while True:
@@ -27,6 +31,8 @@ async def run() -> None:
                 await asyncio.sleep(0.1)
                 continue
             config = ScenarioConfig.model_validate(data["config"])
+            if rng is None:
+                rng = random.Random(config.bearing.random_seed)
             target = TargetState.model_validate(data["target"])
             records = [ObserverRecord.model_validate(item) for item in data["observers"]]
             # wait until target and every observer have published this epoch (time sync)
@@ -36,7 +42,7 @@ async def run() -> None:
             if tick % config.doppler_interval_seconds == 0:
                 observations, truth = [], []
                 for record in records:
-                    obs, tr = doppler_observation(config, target, record.state)
+                    obs, tr = doppler_observation(config, target, record.state, rng)
                     obs.tick = tick
                     tr.tick = tick
                     observations.append(obs)

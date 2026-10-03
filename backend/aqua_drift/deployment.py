@@ -27,7 +27,19 @@ def default_position(config: ScenarioConfig, index: int, angle_hint: float = 0.0
     ahead = d.offset_ahead_yd * YD_TO_M
     centre_e, centre_n = ahead * math.sin(hdg), ahead * math.cos(hdg)
     spacing = d.spacing_yd * YD_TO_M
-    if d.pattern == "grid":
+    if d.pattern == "surround":
+        # first four: square around the target's initial position, diagonal to its heading;
+        # further observers: rings of eight at 1.6x, 2.2x ... the radius
+        radius = d.surround_radius_yd * YD_TO_M
+        if index < 4:
+            angle = hdg + math.radians(45.0 + 90.0 * index)
+        else:
+            ring = (index - 4) // 8
+            radius *= 1.6 + 0.6 * ring
+            angle = hdg + math.radians(22.5 + 45.0 * ((index - 4) % 8))
+        east = radius * math.sin(angle)
+        north = radius * math.cos(angle)
+    elif d.pattern == "grid":
         # staggered 2-row field across the expected track: not collinear, so the
         # Doppler-only mirror ambiguity about a single line of observers is broken
         column = index // 2

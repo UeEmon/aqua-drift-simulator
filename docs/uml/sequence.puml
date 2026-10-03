@@ -23,10 +23,13 @@ else
   Observer -> API : exact position/depth/time
 end
 Doppler -> API : wait until target & all observers at tick k
-Doppler -> Doppler : slant range ≤ R_max ? frequency : non-detection
+Doppler -> Doppler : slant range ≤ R_max ? frequency (+ bearing every 15 s) : non-detection
 Doppler -> API : DopplerBatch (observations + truth)
 API -> DB : events
-Estimator -> API : estimator-feed (observations only)
+Estimator -> API : estimator-feed (observations only, run control)
+alt estimation stopped
+  Estimator -> Estimator : idle (last estimate stays displayed)
+end
 Estimator -> Estimator : current-field fit (detectable time)
 Estimator -> Estimator : PF predict / update
 alt every move_interval_s

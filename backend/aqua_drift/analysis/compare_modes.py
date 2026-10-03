@@ -12,6 +12,7 @@ maximum slant range), the accuracy achievable with:
                slant-range = R_max measurement) -> the observation set of the runtime system
     BRG+DOP  : bearing + Doppler
     RB+DOP   : range/bearing + Doppler
+    BRG+DOP+GATE : bearing + Doppler + detection gate -> current runtime observation set
 
 Two numbers are reported per mode:
 * CRLB  - Cramer-Rao lower bound of the constant-velocity batch estimate at the final time
@@ -71,8 +72,9 @@ class Noise:
     depth_prior_sigma_ft: float = 433.0  # uniform 0..1500 Ft
 
 
-def build_geometry(observers: int, seconds: int) -> Geometry:
+def build_geometry(observers: int, seconds: int, pattern: str = "grid") -> Geometry:
     config = ScenarioConfig()
+    config.deployment.pattern = pattern
     config.estimator.particle_count = 500  # engine unused here
     run = ScenarioRun(config, observers)
     run.engine.process = lambda batch: None  # geometry only; no filtering needed here
@@ -133,7 +135,7 @@ def measurements(theta: np.ndarray, geo: Geometry, kinds: set[str], noise: Noise
         out.append(np.log(np.maximum(rng[sampled], 1.0)) / noise.range_frac)
     if "RB" in kinds or "BRG" in kinds:
         brg = np.arctan2(rel[..., 0], rel[..., 1])
-        out.append(np.unwrap(brg[sampled]) / noise.bearing_rad if brg[sampled].size else brg[sampled])
+        out.append(brg[sampled] / noise.bearing_rad)
     if "DOP" in kinds:
         rng = np.linalg.norm(rel, axis=2)
         rdot = np.sum((theta[3:6][None, None, :] - geo.obs_vel) * rel, axis=2) / np.maximum(rng, 1e-6)
@@ -151,14 +153,41 @@ def measurements(theta: np.ndarray, geo: Geometry, kinds: set[str], noise: Noise
     return np.concatenate([np.atleast_1d(x) for x in out]) if out else np.zeros(0)
 
 
+def _angle_scale(geo: Geometry, kinds: set[str], noise: Noise) -> np.ndarray:
+    """Per-entry period (2 pi / sigma) for bearing entries, 0 for linear entries."""
+    sizes = []
+    first_det = geo.det.any(axis=1)
+    sampled = (geo.ticks.astype(int) % noise.bearing_interval_s == 0)[:, None] & geo.det
+    if "POS" in kinds:
+        sizes.append((3 * int(first_det.sum()), 0.0))
+    if "RB" in kinds:
+        sizes.append((int(sampled.sum()), 0.0))
+    if "RB" in kinds or "BRG" in kinds:
+        sizes.append((int(sampled.sum()), 2 * np.pi / noise.bearing_rad))
+    if "DOP" in kinds:
+        sizes.append((int(geo.det.sum()), 0.0))
+    if "GATE" in kinds and geo.transitions:
+        sizes.append((len(geo.transitions), 0.0))
+    sizes.append((1, 0.0))  # depth prior
+    return np.concatenate([np.full(n, period) for n, period in sizes])
+
+
+def wrapped_diff(a: np.ndarray, b: np.ndarray, period: np.ndarray) -> np.ndarray:
+    d = a - b
+    ang = period > 0
+    d[ang] = (d[ang] + period[ang] / 2) % period[ang] - period[ang] / 2
+    return d
+
+
 def _jacobian(theta: np.ndarray, geo: Geometry, kinds: set[str], noise: Noise) -> np.ndarray:
     steps = np.array([1.0, 1.0, 0.3, 0.01, 0.01, 0.003, 0.001])
     base = measurements(theta, geo, kinds, noise)
+    period = _angle_scale(geo, kinds, noise)
     cols = []
     for i, h in enumerate(steps):
         d = theta.copy()
         d[i] += h
-        cols.append((measurements(d, geo, kinds, noise) - base) / h)
+        cols.append(wrapped_diff(measurements(d, geo, kinds, noise), base, period) / h)
     return np.stack(cols, axis=1)
 
 
@@ -176,6 +205,8 @@ def monte_carlo(geo: Geometry, kinds: set[str], noise: Noise, runs: int, rng: np
     theta_true = np.append(geo.truth, geo.f_rec - geo.f_true)
     clean = measurements(theta_true, geo, kinds, noise)
     prior_value = noise.depth_prior_mean_ft / noise.depth_prior_sigma_ft
+    period = _angle_scale(geo, kinds, noise)
+    assert len(period) == len(clean), "angle mask out of sync with measurements"
     errors = []
     for _ in range(runs):
         z = clean + rng.normal(size=clean.shape)
@@ -183,7 +214,7 @@ def monte_carlo(geo: Geometry, kinds: set[str], noise: Noise, runs: int, rng: np
         x0 = theta_true + rng.normal(0, 1, 7) * np.array([300, 300, 100, 0.5, 0.5, 0.05, 0.05])
 
         def resid(theta: np.ndarray, z: np.ndarray = z) -> np.ndarray:
-            r = measurements(theta, geo, kinds, noise) - z
+            r = wrapped_diff(measurements(theta, geo, kinds, noise), z, period)
             return np.append(r, theta[6] / 0.5)
 
         sol = least_squares(resid, x0, x_scale=np.array([300, 300, 30, 0.5, 0.5, 0.05, 0.05]))
@@ -199,11 +230,14 @@ MODES = {
     "DOP+GATE": {"DOP", "GATE"},
     "BRG+DOP": {"BRG", "DOP"},
     "RB+DOP": {"RB", "DOP"},
+    "BRG+DOP+GATE": {"BRG", "DOP", "GATE"},
 }
 
 
-def run_study(observers: int, seconds: int, runs: int, seed: int = 3) -> list[dict[str, float]]:
-    geo = build_geometry(observers, seconds)
+def run_study(
+    observers: int, seconds: int, runs: int, seed: int = 3, pattern: str = "grid"
+) -> list[dict[str, float]]:
+    geo = build_geometry(observers, seconds, pattern)
     noise = Noise()
     rng = np.random.default_rng(seed)
     rows = []
@@ -230,8 +264,9 @@ def main() -> None:
     parser.add_argument("--observers", type=int, default=4)
     parser.add_argument("--seconds", type=int, default=1500)
     parser.add_argument("--runs", type=int, default=30)
+    parser.add_argument("--pattern", default="grid", help="observer layout (grid, surround, ...)")
     args = parser.parse_args()
-    rows = run_study(args.observers, args.seconds, args.runs)
+    rows = run_study(args.observers, args.seconds, args.runs, pattern=args.pattern)
     print(f"observers={args.observers} seconds={args.seconds} runs={args.runs}")
     print("| mode | CRLB pos (YD) | MC pos (YD) | CRLB depth (Ft) | MC depth (Ft) | CRLB vel (kt) | MC vel (kt) |")
     print("|---|---:|---:|---:|---:|---:|---:|")
