@@ -40,7 +40,14 @@ Documentation:
 - **表示・観測者**: layer toggles (truth, both tracks, presence region, bearing lines, error line)
   and observer placement
 
+- **View toolbar (map, top right)**: oblique / top-down (vertical) / horizontal side view
+  (direction selectable), orthographic top view, **centre on estimate**, centre on truth,
+  follow estimate, FPS overlay
+
 By default four observers surround the target's initial position.
+
+Rendering uses GPU-batched Cesium primitives, on-demand rendering and 4x MSAA. A hardware
+GPU with WebGL2 is recommended; the GIS also runs on software WebGL (used in CI).
 
 ## Start with Docker
 
@@ -78,6 +85,9 @@ python -m aqua_drift.scenario --seconds 3000 --observers 4 --bias-hz 0.2   # clo
 python -m aqua_drift.analysis.compare_modes --observers 4 --runs 20        # observation-mode study
 ruff check . && pytest
 ```
+
+CI also starts the full stack with Docker and checks the GIS in headless Chromium
+(`e2e/ui_check.py`); screenshots are uploaded as the `gis-e2e` artifact.
 
 ## Display conventions
 
