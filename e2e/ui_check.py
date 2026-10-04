@@ -156,20 +156,32 @@ def main() -> int:
             check_centred("centre-on-truth button", 0.05, "truth")
 
         def views() -> None:
-            expected = {"top": -90.0, "side": 0.0, "oblique": None}
+            # wait for the camera flight to finish (software WebGL frames can take seconds)
+            ranges = {"top": (-93.0, -87.0), "side": (-3.0, 3.0), "oblique": (-80.0, -10.0)}
             for view in ("top", "side", "oblique"):
+                low, high = ranges[view]
                 page.evaluate(f"() => document.querySelector(\".vt[data-view='{view}']\").click()")
-                page.wait_for_timeout(3000)
+                try:
+                    page.wait_for_function(
+                        f"""() => {{ const c = window.aquaDrift.viewer.camera;
+                            const p = Cesium.Math.toDegrees(c.pitch);
+                            return !c._currentFlight && p >= {low} && p <= {high}; }}""",
+                        timeout=20_000,
+                    )
+                except Exception:  # noqa: BLE001 - reported below with the measured pitch
+                    pass
+                page.wait_for_timeout(500)
                 pitch = page.evaluate("() => Cesium.Math.toDegrees(window.aquaDrift.viewer.camera.pitch)")
                 note(f"view {view}: camera pitch {pitch:.1f} deg")
-                target = expected[view]
-                if target is not None and abs(pitch - target) > 3:
-                    fail(f"view '{view}' pitch {pitch:.1f} deg, expected {target}")
-                if view == "oblique" and not (-80 < pitch < -10):
-                    fail(f"oblique pitch {pitch:.1f} deg out of range")
+                if not (low <= pitch <= high):
+                    fail(f"view '{view}' pitch {pitch:.1f} deg, expected {low}..{high}")
                 page.screenshot(path=str(out / f"02-view-{view}.png"))
 
         def check_centred(label: str, limit: float, which: str = "estimate") -> None:
+            try:
+                page.wait_for_function("() => !window.aquaDrift.viewer.camera._currentFlight", timeout=20_000)
+            except Exception:  # noqa: BLE001
+                pass
             pos = page.evaluate(CENTER_JS, which)
             name = "truth" if which == "truth" else "estimate"
             if pos is None:
