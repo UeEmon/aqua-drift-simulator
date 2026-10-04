@@ -51,11 +51,12 @@ OVERFLOW_JS = """() => {
   return out;
 }"""
 
-CENTER_JS = """() => {
+CENTER_JS = """(which) => {
   const a = window.aquaDrift; const s = a.state.latestSnapshot;
-  const est = s.estimates.find(e => e.current_position);
-  if (!est) return null;
-  const p = est.current_position;
+  let p = null;
+  if (which === 'truth') { p = s.target && s.target.position; }
+  else { const est = s.estimates.find(e => e.current_position); p = est && est.current_position; }
+  if (!p) return null;
   const ex = Number(document.getElementById('depth-exaggeration').value) || 1;
   const c = Cesium.Cartesian3.fromDegrees(p.longitude, p.latitude, -p.depth_ft * 0.3048 * ex);
   const st = Cesium.SceneTransforms;
@@ -143,6 +144,17 @@ def main() -> int:
                     note(f"no horizontal overflow at viewport {width}px")
             page.set_viewport_size({"width": 1600, "height": 1000})
 
+        def default_centre() -> None:
+            selected = page.evaluate("() => document.getElementById('center-target').value")
+            if selected != "truth":
+                fail(f"default centre target is '{selected}', expected 'truth'")
+            page.evaluate("() => document.querySelector(\".vt[data-view='oblique']\").click()")
+            page.wait_for_timeout(3000)
+            check_centred("default view centre", 0.05, "truth")
+            page.evaluate("() => document.getElementById('center-truth').click()")
+            page.wait_for_timeout(3000)
+            check_centred("centre-on-truth button", 0.05, "truth")
+
         def views() -> None:
             expected = {"top": -90.0, "side": 0.0, "oblique": None}
             for view in ("top", "side", "oblique"):
@@ -157,16 +169,17 @@ def main() -> int:
                     fail(f"oblique pitch {pitch:.1f} deg out of range")
                 page.screenshot(path=str(out / f"02-view-{view}.png"))
 
-        def check_centred(label: str, limit: float) -> None:
-            pos = page.evaluate(CENTER_JS)
+        def check_centred(label: str, limit: float, which: str = "estimate") -> None:
+            pos = page.evaluate(CENTER_JS, which)
+            name = "truth" if which == "truth" else "estimate"
             if pos is None:
-                fail(f"{label}: could not project the estimate to the screen")
+                fail(f"{label}: could not project the {name} to the screen")
                 return
             dx = pos["x"] - pos["cw"] / 2
             dy = pos["y"] - pos["ch"] / 2
-            note(f"{label}: estimate offset from screen centre {dx:.0f}, {dy:.0f} px")
+            note(f"{label}: {name} offset from screen centre {dx:.0f}, {dy:.0f} px")
             if math.hypot(dx, dy) > limit * max(pos["cw"], pos["ch"]):
-                fail(f"{label}: estimate not centred, offset {dx:.0f},{dy:.0f} px")
+                fail(f"{label}: {name} not centred, offset {dx:.0f},{dy:.0f} px")
 
         def centre() -> None:
             page.evaluate("() => document.getElementById('center-estimate').click()")
@@ -178,7 +191,7 @@ def main() -> int:
             page.evaluate("() => document.getElementById('follow-estimate').click()")
             page.wait_for_function("() => document.getElementById('follow-estimate').checked", timeout=10_000)
             page.wait_for_timeout(8000)
-            check_centred("follow mode", 0.08)
+            check_centred("follow mode (default: truth)", 0.08, "truth")
 
         def final_screens() -> None:
             page.evaluate("() => document.querySelector(\".tab[data-tab='tab-compare']\").click()")
@@ -228,6 +241,7 @@ def main() -> int:
         stage("background map", base_map)
         stage("telemetry idle", lambda: telemetry("idle"))
         stage("overflow", overflow)
+        stage("default centre is truth", default_centre)
         stage("views", views)
         stage("telemetry after views", lambda: telemetry("after views"))
         stage("centre on estimate", centre)

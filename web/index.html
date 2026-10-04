@@ -34,11 +34,15 @@
             </select>
           </div>
           <div class="vt-row">
-            <button type="button" id="center-estimate" class="vt primary" title="推定位置を画面中心へ">◎ 推定位置を中心</button>
-            <button type="button" id="center-truth" class="vt" title="真値を画面中心へ">真値を中心</button>
+            <button type="button" id="center-truth" class="vt primary" title="真値を画面中心へ（既定）">◎ 真値を中心</button>
+            <button type="button" id="center-estimate" class="vt" title="推定位置を画面中心へ">推定位置を中心</button>
+            <select id="center-target" aria-label="画面中心の対象" title="視点切替・追従で中心にする対象">
+              <option value="truth" selected>中心：真値（既定）</option>
+              <option value="estimate">中心：推定位置</option>
+            </select>
           </div>
           <div class="vt-row checks">
-            <label><input id="follow-estimate" type="checkbox" />推定位置に追従</label>
+            <label title="中心の対象（既定は真値）に追従"><input id="follow-estimate" type="checkbox" />中心対象に追従</label>
             <label><input id="orthographic" type="checkbox" />正射投影</label>
             <label><input id="show-fps" type="checkbox" />FPS</label>
             <label title="背景地図（Natural Earth II）。描画優先のため通常はオフ"><input id="show-basemap" type="checkbox" />背景地図</label>

@@ -597,7 +597,12 @@ function viewRadiusM() {
   return (config ? config.max_slant_range_yd : 6000) * YD_TO_M;
 }
 
-function focusPosition(prefer = "estimate") {
+function centreTarget() {
+  // what the views, the initial view and follow mode centre on: truth by default
+  return $("center-target")?.value === "estimate" ? "estimate" : "truth";
+}
+
+function focusPosition(prefer = centreTarget()) {
   const snapshot = state.latestSnapshot;
   if (!snapshot) return null;
   const estimate = selectedEstimate(snapshot);
@@ -624,7 +629,7 @@ function sideHeading(focus) {
 }
 
 function applyView(view) {
-  const focus = focusPosition("estimate");
+  const focus = focusPosition(centreTarget());
   if (!focus) {
     setMessage("表示対象（推定位置または真値）がまだありません。");
     return;
@@ -688,11 +693,13 @@ function followEstimate() {
     state.followAnchor = null;
     return;
   }
-  const estimate = selectedEstimate();
-  if (!estimate?.current_position) return;
-  const now = cartOf(estimate.current_position);
+  const focus = focusPosition(centreTarget());
+  if (!focus) return;
+  if (state.followSource !== focus.source) state.followAnchor = null; // target switched
+  state.followSource = focus.source;
+  const now = cartOf(focus.position);
   if (state.followAnchor) {
-    // translate the camera by the estimate's displacement: orientation and zoom stay as set
+    // translate the camera by the followed position's displacement: orientation and zoom stay
     const delta = Cesium.Cartesian3.subtract(now, state.followAnchor, new Cesium.Cartesian3());
     viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
     Cesium.Cartesian3.add(viewer.camera.position, delta, viewer.camera.position);
@@ -707,7 +714,11 @@ $("center-estimate").addEventListener("click", () => centerOn("estimate"));
 $("center-truth").addEventListener("click", () => centerOn("truth"));
 $("follow-estimate").addEventListener("change", () => {
   state.followAnchor = null;
-  if (checked("follow-estimate")) centerOn("estimate");
+  if (checked("follow-estimate")) centerOn(centreTarget());
+});
+$("center-target").addEventListener("change", () => {
+  state.followAnchor = null;
+  centerOn(centreTarget());
 });
 $("orthographic").addEventListener("change", () => {
   const active = document.querySelector(".vt[data-view].active");

@@ -41,8 +41,8 @@ Documentation:
   and observer placement
 
 - **View toolbar (map, top right)**: oblique / top-down (vertical) / horizontal side view
-  (direction selectable), orthographic top view, **centre on estimate**, centre on truth,
-  follow estimate, FPS overlay
+  (direction selectable), orthographic top view, **centre on truth (default centre target)**,
+  centre on estimate, centre-target selector, follow the centre target, FPS overlay
 
 By default four observers surround the target's initial position; the remaining observer
 containers wait in standby. The `deployer` service places them **ahead (前程) of the estimated
