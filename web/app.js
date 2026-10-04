@@ -356,23 +356,47 @@ function updateEstimateLayers(estimates, target) {
 }
 
 // ---------------------------------------------------------------- presence region (batched GPU geometry)
-function swapWhenReady(slot) {
+const MAX_PENDING_MS = 4000;
+const telemetry = { frames: 0, pendingDropped: 0, swaps: 0 };
+
+function swapWhenReady(slot, now) {
   if (!slot.pending) return false;
-  if (!slot.pending.ready) return true;
+  if (!slot.pending.ready) {
+    // never spin the render loop forever: a build that is not ready in time is dropped and the
+    // previous geometry stays (the next estimate update builds a fresh one)
+    if (now - slot.pendingSince > MAX_PENDING_MS) {
+      scene.primitives.remove(slot.pending);
+      slot.pending = null;
+      telemetry.pendingDropped += 1;
+      return false;
+    }
+    return true;
+  }
   if (slot.current) scene.primitives.remove(slot.current);
   slot.current = slot.pending;
   slot.pending = null;
+  telemetry.swaps += 1;
   return false;
 }
+let pendingRenderScheduled = false;
 scene.postRender.addEventListener(() => {
-  // async geometry is built in web workers; keep rendering until it is uploaded, then swap
-  const waiting = [gpu.region, gpu.regionOutline, gpu.voxels].map(swapWhenReady).some(Boolean);
-  if (waiting) scene.requestRender();
+  telemetry.frames += 1;
+  // async geometry is built in web workers; poll at a modest rate until it is uploaded, then swap
+  const now = performance.now();
+  const waiting = [gpu.region, gpu.regionOutline, gpu.voxels].map((slot) => swapWhenReady(slot, now)).some(Boolean);
+  if (waiting && !pendingRenderScheduled) {
+    pendingRenderScheduled = true;
+    setTimeout(() => {
+      pendingRenderScheduled = false;
+      scene.requestRender();
+    }, 50);
+  }
 });
 
 function replacePrimitive(slot, primitive) {
   if (slot.pending) scene.primitives.remove(slot.pending);
   slot.pending = primitive ? scene.primitives.add(primitive) : null;
+  slot.pendingSince = performance.now();
   if (!primitive && slot.current) {
     scene.primitives.remove(slot.current);
     slot.current = null;
@@ -1106,5 +1130,5 @@ function connect() {
   socket.addEventListener("error", () => socket.close());
 }
 
-window.aquaDrift = { viewer, state, applyView, centerOn }; // for diagnostics / E2E tests
+window.aquaDrift = { viewer, state, applyView, centerOn, telemetry, gpu }; // diagnostics / E2E
 connect();

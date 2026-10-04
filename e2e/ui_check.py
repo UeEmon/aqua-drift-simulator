@@ -80,6 +80,12 @@ def main() -> int:
             args=["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"],
         )
         page = browser.new_page(viewport={"width": 1600, "height": 1000})
+        page.add_init_script(
+            """window.__longTasks = { count: 0, total: 0 };
+            try { new PerformanceObserver((list) => { for (const e of list.getEntries()) {
+              window.__longTasks.count++; window.__longTasks.total += e.duration; } })
+              .observe({ entryTypes: ['longtask'] }); } catch (e) {}"""
+        )
         page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
         page.on("console", lambda m: errors.append(f"console.{m.type}: {m.text}") if m.type == "error" else None)
         page.goto(args.url, wait_until="load")
@@ -145,9 +151,32 @@ def main() -> int:
                 fail(f"estimate not centred after button: offset {dx:.0f},{dy:.0f} px")
         page.screenshot(path=str(out / "03-centered.png"))
 
+        def telemetry(label: str) -> None:
+            t0 = page.evaluate("() => window.aquaDrift.telemetry.frames")
+            page.wait_for_timeout(3000)
+            data = page.evaluate(
+                """() => ({ t: window.aquaDrift.telemetry, long: window.__longTasks,
+                  pending: ['region','regionOutline','voxels'].map(k => !!window.aquaDrift.gpu[k].pending) })"""
+            )
+            fps = (data["t"]["frames"] - t0) / 3.0
+            note(f"telemetry {label}: {fps:.1f} frames/s, long tasks {data['long']}, "
+                 f"pending {data['pending']}, swaps {data['t']['swaps']}, dropped {data['t']['pendingDropped']}")
+            if fps > 20:
+                fail(f"render loop not idle ({label}): {fps:.1f} frames/s with requestRenderMode")
+
         def follow_and_capture() -> None:
-            page.check("#follow-estimate")
+            telemetry("before follow")
+            page.evaluate("() => document.getElementById('follow-estimate').click()")
+            page.wait_for_function("() => document.getElementById('follow-estimate').checked", timeout=10_000)
             page.wait_for_timeout(5000)
+            telemetry("following")
+            pos = page.evaluate(CENTER_JS)
+            if pos:
+                dx = pos["x"] - pos["cw"] / 2
+                dy = pos["y"] - pos["ch"] / 2
+                note(f"follow mode: estimate offset from centre {dx:.0f}, {dy:.0f} px")
+                if math.hypot(dx, dy) > 0.08 * max(pos["cw"], pos["ch"]):
+                    fail(f"follow mode lost the estimate: offset {dx:.0f},{dy:.0f} px")
             page.click(".tab[data-tab='tab-compare']")
             page.screenshot(path=str(out / "04-follow.png"))
             page.screenshot(path=str(out / "05-full-page.png"), full_page=True)
