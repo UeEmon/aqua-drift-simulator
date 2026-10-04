@@ -46,6 +46,16 @@ See [estimation-methods.md](estimation-methods.md). In short:
 6. Presence region: highest-density region at the configured probability; disconnected parts
    are reported separately with their probability mass.
 
+## GIS stream (WebSocket /ws, protocol v2)
+
+`aqua_drift/wire.py` keeps, per connection, what the client already has: the first message is
+complete, later ones carry only changes (track tails via `keep` + new points, the shared
+presence region at most every 3 s, unchanged sections omitted), as compact rounded arrays with
+per-message deflate. In the browser `stream-worker.js` (Web Worker) runs the socket and the
+decoder (`stream-decoder.js`), merges deltas, converts track points to Earth-centred XYZ and
+transfers them as Float64Arrays; the main thread only updates chunked GPU polylines, markers
+and the visible panel. `/api/snapshot` still returns the full snapshot.
+
 ## Units
 
 Internal kinematics use metres and seconds. The interface uses YD for distance, Ft for depth,

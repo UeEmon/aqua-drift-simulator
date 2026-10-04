@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
 
@@ -27,6 +28,7 @@ from aqua_drift.models import (
 )
 from aqua_drift.state import ObserverRejected, SimulationState
 from aqua_drift.storage import EventStore
+from aqua_drift.wire import WireEncoder
 
 initial_config = ScenarioConfig(
     max_slant_range_yd=float(os.getenv("MAX_SLANT_RANGE_YD", "6000"))
@@ -225,11 +227,19 @@ async def set_estimate(output: EstimatorOutput) -> dict[str, int]:
 
 @app.websocket("/ws")
 async def websocket_snapshot(websocket: WebSocket) -> None:
+    """GIS stream, protocol v2: first message full, then compact deltas (see aqua_drift.wire).
+    `/api/snapshot` still returns the full snapshot for tools and tests."""
     await websocket.accept()
+    encoder = WireEncoder()
+    loop = asyncio.get_running_loop()
+    last_tick = -1
     try:
         while True:
             snapshot = await state.snapshot()
-            await websocket.send_json(snapshot.model_dump(mode="json"))
-            await asyncio.sleep(1)
+            if snapshot.tick != last_tick:
+                message = encoder.encode(snapshot, loop.time())
+                await websocket.send_text(json.dumps(message, separators=(",", ":")))
+                last_tick = snapshot.tick
+            await asyncio.sleep(0.25)  # send each new tick promptly, never twice
     except WebSocketDisconnect:
         return

@@ -44,10 +44,25 @@
           <div class="vt-row checks">
             <label title="中心の対象（既定は真値）に追従"><input id="follow-estimate" type="checkbox" />中心対象に追従</label>
             <label><input id="orthographic" type="checkbox" />正射投影</label>
-            <label><input id="show-fps" type="checkbox" />FPS</label>
+            <label title="1秒ごとの更新の間をなめらかに補間（描画が追いつかない場合は自動停止）"><input id="smooth-motion" type="checkbox" checked />なめらか</label>
             <label title="背景地図（Natural Earth II）。描画優先のため通常はオフ"><input id="show-basemap" type="checkbox" />背景地図</label>
+            <label title="海面（地球）を半透明で表示。描画優先のため通常はオフ"><input id="show-sea" type="checkbox" />海面</label>
+          </div>
+          <div class="vt-row checks">
+            <label title="描画品質（自動は描画時間に応じて解像度とアンチエイリアスを調整）">品質
+              <select id="quality">
+                <option value="auto" selected>自動</option>
+                <option value="0">高</option>
+                <option value="1">中</option>
+                <option value="2">低</option>
+                <option value="3">最低</option>
+              </select>
+            </label>
+            <label title="描画・受信の計測値を表示"><input id="show-perf" type="checkbox" />性能</label>
+            <label><input id="show-fps" type="checkbox" />FPS</label>
           </div>
         </div>
+        <pre id="perf-hud" hidden></pre>
         <div id="status-strip">
           <span id="connection-status">接続中</span>
           <span>時刻 <strong id="tick">0</strong> s</span>
@@ -227,7 +242,13 @@
             <label class="check"><input id="show-online" type="checkbox" checked />推定（過去航跡非更新）</label>
             <label class="check"><input id="show-smoothed" type="checkbox" checked />推定（過去航跡更新）</label>
             <label class="check"><input id="show-region" type="checkbox" checked />推定存在圏</label>
-            <label class="check"><input id="show-voxels" type="checkbox" checked />存在圏ボクセル（GPU描画の立体）</label>
+            <label class="check"><input id="show-voxels" type="checkbox" checked />存在圏ボクセル</label>
+            <label>ボクセルの描き方
+              <select id="voxel-style">
+                <option value="box" selected>立体（密度の高い400個まで）</option>
+                <option value="point">点（軽量）</option>
+              </select>
+            </label>
             <label class="check"><input id="show-bearing" type="checkbox" checked />方位観測線</label>
             <label class="check"><input id="show-error-line" type="checkbox" checked />推定–真値の誤差線</label>
             <label class="check"><input id="show-range" type="checkbox" />観測者の上限斜距離</label>
@@ -267,6 +288,7 @@
 
     <script>window.CESIUM_BASE_URL = "/cesium/";</script>
     <script src="/cesium/Cesium.js"></script>
+    <script src="/stream-decoder.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

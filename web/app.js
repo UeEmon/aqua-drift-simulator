@@ -4,10 +4,8 @@
 const FT_TO_M = 0.3048;
 const YD_TO_M = 0.9144;
 const EARTH_R = 6371008.8;
-const MAX_TRUTH_POINTS = 4000;
-const MAX_DRAWN_TRACK_POINTS = 1200; // GPU upload budget per polyline per update
 const REGION_REBUILD_MS = 3000; // presence-region geometry rebuild throttle
-const MAX_VOXEL_BOXES = 900; // densest voxels drawn as boxes
+const MAX_VOXEL_BOXES = 400; // densest voxels drawn as translucent boxes (overdraw budget)
 const MAX_HISTORY = 3600;
 
 const $ = (id) => document.getElementById(id);
@@ -54,6 +52,12 @@ if (scene.moon) scene.moon.show = false;
 if (scene.fog) scene.fog.enabled = false;
 scene.backgroundColor = Cesium.Color.fromCssColorString("#03080f");
 scene.globe.baseColor = Cesium.Color.fromCssColorString("#0b2238");
+scene.globe.show = false; // sea surface off by default (translucent globe = extra render passes)
+
+function applyGlobe() {
+  scene.globe.show = checked("show-sea") || Boolean(baseMap.layer && baseMap.layer.show);
+  scene.requestRender();
+}
 
 // Background map (Natural Earth II): off by default, loaded only when first switched on.
 const baseMap = { layer: null, loading: null };
@@ -73,7 +77,7 @@ async function setBaseMap(on) {
     }
   }
   if (baseMap.layer) baseMap.layer.show = on;
-  scene.requestRender();
+  applyGlobe();
 }
 for (const id of ["show-basemap", "show-basemap-2"]) {
   if ($(id)) $(id).addEventListener("change", () => setBaseMap($(id).checked));
@@ -99,6 +103,7 @@ const gpu = {
   labels: scene.primitives.add(new Cesium.LabelCollection()),
   regionLabels: scene.primitives.add(new Cesium.LabelCollection()),
   drops: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
+  voxelPoints: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
   dropLabels: scene.primitives.add(new Cesium.LabelCollection()),
   region: { current: null, pending: null },
   regionOutline: { current: null, pending: null },
@@ -113,8 +118,7 @@ function dashMaterial(color, dashLength = 12) {
 }
 
 const state = {
-  truthTrack: [],
-  observerTracks: new Map(),
+  region: null,
   observers: new Map(), // id -> {point, label, track, range}
   bearingLines: new Map(),
   latestConfig: null,
@@ -189,14 +193,16 @@ function pointInPolygon(lon, lat, polygon) {
   }
   return inside;
 }
-function thin(points) {
-  // keep the recent part at full rate, decimate the older part: bounded GPU upload per update
-  if (points.length <= MAX_DRAWN_TRACK_POINTS) return points;
-  const recent = Math.floor(MAX_DRAWN_TRACK_POINTS / 2);
-  const older = points.slice(0, points.length - recent);
-  const step = Math.ceil(older.length / (MAX_DRAWN_TRACK_POINTS - recent));
-  const kept = older.filter((_, i) => i % step === 0);
-  return kept.concat(points.slice(points.length - recent));
+function tabVisible(id) {
+  const panel = $(id);
+  return !panel || !panel.classList || !panel.classList.contains || panel.classList.contains("active");
+}
+
+function setHtml(element, html) {
+  // skip DOM work when nothing changed (most panels change rarely)
+  if (!element || element._html === html) return;
+  element.innerHTML = html;
+  element._html = html;
 }
 
 function selectedMode() {
@@ -216,7 +222,7 @@ for (const tab of document.querySelectorAll(".tab")) {
   tab.addEventListener("click", () => {
     for (const other of document.querySelectorAll(".tab")) other.classList.toggle("active", other === tab);
     for (const panel of document.querySelectorAll(".tab-panel")) panel.classList.toggle("active", panel.id === tab.dataset.tab);
-    drawCharts();
+    if (state.latestSnapshot) render(state.latestSnapshot); // fill the newly visible panel now
   });
 }
 
@@ -253,27 +259,191 @@ for (const tab of document.querySelectorAll(".tab")) {
   });
 })();
 
+// ================================================================== tracks (chunked GPU polylines)
+// A track is split into fixed chunks of CHUNK points. Only chunks touched by an update are
+// re-uploaded: appending a point rewrites one small chunk instead of the whole line. The
+// newest segment is a separate "tip" that ends at the (interpolated) marker position.
+const CHUNK = 128;
+
+class ChunkedTrack {
+  constructor(width, material) {
+    this.width = width;
+    this.material = material;
+    this.points = [];
+    this.chunks = [];
+    this.visible = true;
+    this.tip = gpu.lines.add({ positions: [], width, material, show: false });
+  }
+
+  apply(reset, keep, xyz) {
+    if (reset) this.points = [];
+    else this.points.length = Math.min(keep, this.points.length);
+    const first = this.points.length;
+    for (let i = 0; i < xyz.length; i += 3) this.points.push(new Cesium.Cartesian3(xyz[i], xyz[i + 1], xyz[i + 2]));
+    this.rebuild(reset ? 0 : first);
+  }
+
+  rebuild(fromIndex) {
+    const body = Math.max(this.points.length - 1, 0); // the last point is drawn by the tip
+    const needed = body >= 2 ? Math.ceil((body - 1) / CHUNK) : 0;
+    const k0 = Math.floor(Math.max(fromIndex - 2, 0) / CHUNK);
+    for (let k = k0; k < needed; k += 1) {
+      const positions = this.points.slice(k * CHUNK, Math.min((k + 1) * CHUNK + 1, body));
+      let line = this.chunks[k];
+      if (!line) {
+        line = gpu.lines.add({ positions, width: this.width, material: this.material });
+        this.chunks[k] = line;
+      } else {
+        line.positions = positions;
+      }
+      line.show = this.visible && positions.length >= 2;
+    }
+    while (this.chunks.length > needed) gpu.lines.remove(this.chunks.pop());
+    this.setTip(null);
+    telemetry.vertexUploads += this.points.length - Math.min(k0 * CHUNK, this.points.length);
+  }
+
+  setTip(end) {
+    const n = this.points.length;
+    if (n < 1) {
+      this.tip.show = false;
+      return;
+    }
+    const start = n >= 2 ? this.points[n - 2] : this.points[0];
+    this.tip.positions = [start, end || this.points[n - 1]];
+    this.tip.show = this.visible && (n >= 2 || Boolean(end));
+  }
+
+  setVisible(visible) {
+    if (visible === this.visible) return;
+    this.visible = visible;
+    for (const line of this.chunks) line.show = visible && line.positions.length >= 2;
+    this.tip.show = visible && this.points.length >= 2;
+  }
+
+  dispose() {
+    for (const line of this.chunks) gpu.lines.remove(line);
+    gpu.lines.remove(this.tip);
+    this.chunks = [];
+  }
+}
+
+const tracks = new Map(); // key -> ChunkedTrack
+
+function trackFor(key) {
+  let track = tracks.get(key);
+  if (!track) {
+    if (key === "truth") track = new ChunkedTrack(2, colorMaterial(COLORS.truth.withAlpha(0.6)));
+    else if (key === "est:ONLINE") track = new ChunkedTrack(2, dashMaterial(COLORS.online.withAlpha(0.9), 12));
+    else if (key === "est:SMOOTHED") track = new ChunkedTrack(3, colorMaterial(COLORS.smoothed.withAlpha(0.85)));
+    else track = new ChunkedTrack(1, colorMaterial(COLORS.observer.withAlpha(0.45)));
+    tracks.set(key, track);
+  }
+  return track;
+}
+
+function applyTrackUpdates(updates) {
+  for (const update of updates) {
+    if (update.key === "*") {
+      for (const track of tracks.values()) track.dispose();
+      tracks.clear();
+      continue;
+    }
+    trackFor(update.key).apply(update.reset, update.keep, update.xyz);
+  }
+}
+
+// ================================================================== markers (smooth motion)
+// Data arrive at 1 Hz. With smooth display on, each marker glides from where it is drawn to
+// the new position over one update interval, rendered at up to TARGET_FPS; the track tip
+// follows the marker so line and marker stay joined.
+const TARGET_FPS = 30;
+viewer.targetFrameRate = TARGET_FPS;
+const anim = { enabled: true, active: new Set(), interval: 1000, lastArrival: 0, slowSince: null };
+
+class Marker {
+  constructor(point, label, trackKey) {
+    this.point = point;
+    this.label = label;
+    this.trackKey = trackKey;
+    this.pos = null;
+    this.from = new Cesium.Cartesian3();
+    this.to = new Cesium.Cartesian3();
+    this.t0 = 0;
+  }
+
+  set(position) {
+    if (!this.pos || !anim.enabled) {
+      this.pos = Cesium.Cartesian3.clone(position, this.pos || new Cesium.Cartesian3());
+      Cesium.Cartesian3.clone(position, this.to);
+      anim.active.delete(this);
+      this.draw();
+      return;
+    }
+    Cesium.Cartesian3.clone(this.pos, this.from);
+    Cesium.Cartesian3.clone(position, this.to);
+    this.t0 = performance.now();
+    anim.active.add(this);
+  }
+
+  step(now) {
+    const a = Math.min(1, (now - this.t0) / anim.interval);
+    Cesium.Cartesian3.lerp(this.from, this.to, a, this.pos);
+    this.draw();
+    return a < 1;
+  }
+
+  finish() {
+    if (this.pos) Cesium.Cartesian3.clone(this.to, this.pos);
+    this.draw();
+  }
+
+  draw() {
+    if (!this.pos) return;
+    this.point.position = this.pos;
+    if (this.label) this.label.position = this.pos;
+    if (this.trackKey && tracks.has(this.trackKey)) tracks.get(this.trackKey).setTip(anim.enabled ? this.pos : null);
+  }
+
+  show(visible) {
+    this.point.show = visible;
+    if (this.label) this.label.show = visible;
+  }
+}
+
+function setSmooth(enabled, reason = "") {
+  anim.enabled = enabled;
+  if ($("smooth-motion")) $("smooth-motion").checked = enabled;
+  if (!enabled) {
+    for (const marker of anim.active) marker.finish();
+    anim.active.clear();
+    for (const track of tracks.values()) track.setTip(null);
+  }
+  if (reason) setMessage(reason);
+  scene.requestRender();
+}
+
+scene.preRender.addEventListener(() => {
+  if (!anim.active.size) return;
+  const now = performance.now();
+  for (const marker of anim.active) if (!marker.step(now)) anim.active.delete(marker);
+  updateErrorLine();
+});
+
 // ================================================================== truth
 function updateTruth(target) {
   if (!target) return;
-  const last = state.truthTrack[state.truthTrack.length - 1];
-  if (!last || last.tick !== target.tick) {
-    state.truthTrack.push({ tick: target.tick, ...target.position });
-    if (state.truthTrack.length > MAX_TRUTH_POINTS) state.truthTrack.shift();
+  if (!state.truth) {
+    state.truth = new Marker(
+      gpu.points.add({ pixelSize: 10, color: COLORS.truth, outlineColor: Cesium.Color.BLACK, outlineWidth: 2, id: "truth" }),
+      gpu.labels.add({ text: "TRUTH", font: "12px sans-serif", fillColor: COLORS.truth, pixelOffset: new Cesium.Cartesian2(0, -18) }),
+      "truth",
+    );
   }
   const show = checked("show-truth");
-  if (!state.truth) {
-    state.truth = {
-      point: gpu.points.add({ pixelSize: 10, color: COLORS.truth, outlineColor: Cesium.Color.BLACK, outlineWidth: 2, id: "truth" }),
-      label: gpu.labels.add({ text: "TRUTH", font: "12px sans-serif", fillColor: COLORS.truth, pixelOffset: new Cesium.Cartesian2(0, -18) }),
-      track: gpu.lines.add({ positions: [], width: 2, material: colorMaterial(COLORS.truth.withAlpha(0.6)) }),
-    };
-  }
-  const position = cartOf(target.position);
-  state.truth.point.position = position;
-  state.truth.label.position = position;
-  state.truth.point.show = state.truth.label.show = state.truth.track.show = show;
-  if (state.truthTrack.length > 1) state.truth.track.positions = thin(state.truthTrack).map(cartOf);
+  state.truth.show(show);
+  if (tracks.has("truth")) tracks.get("truth").setVisible(show);
+  state.truth.set(cartOf(target.position));
 }
 
 // ================================================================== observers & bearings
@@ -285,27 +455,26 @@ function updateObservers(records, batch, config) {
     const observer = record.state;
     const id = observer.observer_id;
     active.add(id);
-    const track = state.observerTracks.get(id) || [];
-    const last = track[track.length - 1];
-    if (!last || last.tick !== observer.tick) track.push({ tick: observer.tick, ...observer.position });
-    if (track.length > MAX_TRUTH_POINTS) track.shift();
-    state.observerTracks.set(id, track);
-
     let item = state.observers.get(id);
     if (!item) {
       item = {
-        point: gpu.points.add({ pixelSize: 8, outlineColor: Cesium.Color.BLACK, outlineWidth: 1, id: `observer-${id}` }),
-        label: gpu.labels.add({ text: id, font: "11px sans-serif", fillColor: COLORS.observer, pixelOffset: new Cesium.Cartesian2(0, -14), scale: 0.9 }),
-        track: gpu.lines.add({ positions: [], width: 1, material: colorMaterial(COLORS.observer.withAlpha(0.45)) }),
+        marker: new Marker(
+          gpu.points.add({ pixelSize: 8, outlineColor: Cesium.Color.BLACK, outlineWidth: 1, id: `observer-${id}` }),
+          gpu.labels.add({ text: id, font: "11px sans-serif", fillColor: COLORS.observer, pixelOffset: new Cesium.Cartesian2(0, -14), scale: 0.9 }),
+          `obs:${id}`,
+        ),
         range: null,
+        detecting: null,
       };
       state.observers.set(id, item);
     }
     const position = cartOf(observer.position);
-    item.point.position = position;
-    item.label.position = position;
-    item.point.color = detecting.has(id) ? COLORS.detecting : COLORS.observer;
-    if (track.length > 1) item.track.positions = thin(track).map(cartOf);
+    item.marker.set(position);
+    const isDetecting = detecting.has(id);
+    if (item.detecting !== isDetecting) {
+      item.marker.point.color = isDetecting ? COLORS.detecting : COLORS.observer;
+      item.detecting = isDetecting;
+    }
     if (checked("show-range")) {
       if (!item.range) {
         item.range = viewer.entities.add({
@@ -327,8 +496,9 @@ function updateObservers(records, batch, config) {
     }
   }
   for (const [id, item] of state.observers) {
-    if (active.has(id)) continue;
-    item.point.color = COLORS.inactive; // evicted / expired: drift history stays visible
+    if (active.has(id) || item.detecting === "inactive") continue;
+    item.marker.point.color = COLORS.inactive; // evicted / expired: drift history stays visible
+    item.detecting = "inactive";
     if (item.range) item.range.show = false;
   }
   setText("observer-count", String(records.length));
@@ -343,14 +513,18 @@ function updateBearings(bearings, config) {
     seen.add(item.observer_id);
     let line = state.bearingLines.get(item.observer_id);
     if (!line) {
-      line = gpu.lines.add({ positions: [], width: 1.5, material: dashMaterial(COLORS.bearing.withAlpha(0.85), 8) });
+      line = { polyline: gpu.lines.add({ positions: [], width: 1.5, material: dashMaterial(COLORS.bearing.withAlpha(0.85), 8) }), key: "" };
       state.bearingLines.set(item.observer_id, line);
     }
-    const end = destination(item.observer_position, item.bearing_deg, length);
-    line.positions = [cartOf(item.observer_position), cart(end.longitude, end.latitude, item.observer_position.depth_ft)];
-    line.show = show;
+    const key = `${item.tick}-${exaggeration()}`;
+    if (line.key !== key) { // a bearing changes only every bearing interval
+      const end = destination(item.observer_position, item.bearing_deg, length);
+      line.polyline.positions = [cartOf(item.observer_position), cart(end.longitude, end.latitude, item.observer_position.depth_ft)];
+      line.key = key;
+    }
+    line.polyline.show = show;
   }
-  for (const [id, line] of state.bearingLines) if (!seen.has(id)) line.show = false;
+  for (const [id, line] of state.bearingLines) if (!seen.has(id)) line.polyline.show = false;
 }
 
 // ================================================================== forward deployment
@@ -364,8 +538,7 @@ function updateDeployment(deployment) {
     if (checked("show-drops")) {
       for (const record of status.history) {
         for (const position of record.positions) {
-          const at = cartOf(position);
-          gpu.drops.add({ position: at, pixelSize: 9, color: COLORS.drop.withAlpha(0.25), outlineColor: COLORS.drop, outlineWidth: 2 });
+          gpu.drops.add({ position: cartOf(position), pixelSize: 9, color: COLORS.drop.withAlpha(0.25), outlineColor: COLORS.drop, outlineWidth: 2 });
         }
         if (record.positions.length) {
           gpu.dropLabels.add({
@@ -379,14 +552,15 @@ function updateDeployment(deployment) {
       }
     }
   }
+  if (!tabVisible("tab-display")) return;
   const enabled = state.latestConfig?.forward?.enabled;
   const warn = status.pending_placements > status.standby_count
     ? `<span class="s-warn">▲ 待機観測者が不足（コンテナを追加してください）</span>` : "";
-  $("deploy-status").innerHTML = `自動前程配置 <b>${enabled ? "有効" : "無効"}</b>　待機観測者 ${status.standby_count}　` +
-    `投入待ち ${status.pending_placements}　最終配置 ${status.last_deploy_tick ?? "--"} s<br>${warn}`;
+  setHtml($("deploy-status"), `自動前程配置 <b>${enabled ? "有効" : "無効"}</b>　待機観測者 ${status.standby_count}　` +
+    `投入待ち ${status.pending_placements}　最終配置 ${status.last_deploy_tick ?? "--"} s<br>${warn}`);
   const rows = status.history.slice().reverse().map((r) =>
     `<tr><td>${r.tick} s</td><td>${r.positions.length}</td><td>${escapeHtml(r.reason)}</td></tr>`);
-  $("deploy-table").querySelector("tbody").innerHTML = rows.join("") || "<tr><td colspan='3'>配置なし</td></tr>";
+  setHtml($("deploy-table").querySelector("tbody"), rows.join("") || "<tr><td colspan='3'>配置なし</td></tr>");
 }
 
 $("deploy-now").addEventListener("click", async () => {
@@ -404,48 +578,46 @@ function estimateGraphics(mode) {
   state.estimates = state.estimates || {};
   if (state.estimates[mode]) return state.estimates[mode];
   const color = mode === "ONLINE" ? COLORS.online : COLORS.smoothed;
-  const graphics = {
-    point: gpu.points.add({ pixelSize: 11, color, outlineColor: Cesium.Color.BLACK, outlineWidth: 2, id: `estimate-${mode}` }),
-    label: gpu.labels.add({ text: mode === "ONLINE" ? "EST" : "", font: "12px sans-serif", fillColor: color, pixelOffset: new Cesium.Cartesian2(0, 20) }),
-    track: gpu.lines.add({
-      positions: [],
-      width: mode === "ONLINE" ? 2 : 3,
-      material: mode === "ONLINE" ? dashMaterial(color.withAlpha(0.9), 12) : colorMaterial(color.withAlpha(0.85)),
-    }),
-  };
+  const graphics = new Marker(
+    gpu.points.add({ pixelSize: 11, color, outlineColor: Cesium.Color.BLACK, outlineWidth: 2, id: `estimate-${mode}` }),
+    gpu.labels.add({ text: mode === "ONLINE" ? "EST" : "", font: "12px sans-serif", fillColor: color, pixelOffset: new Cesium.Cartesian2(0, 20) }),
+    `est:${mode}`,
+  );
   state.estimates[mode] = graphics;
   return graphics;
 }
 
-function updateEstimateLayers(estimates, target) {
+function updateEstimateLayers(estimates) {
   for (const mode of ["ONLINE", "SMOOTHED"]) {
-    const graphics = estimateGraphics(mode);
+    const marker = estimateGraphics(mode);
     const estimate = estimates.find((e) => e.mode === mode);
     const visible = checked(mode === "ONLINE" ? "show-online" : "show-smoothed");
     const has = Boolean(estimate?.current_position);
-    graphics.point.show = graphics.label.show = visible && has;
-    graphics.track.show = visible && Boolean(estimate) && estimate.track.length > 1;
-    if (has) {
-      const position = cartOf(estimate.current_position);
-      graphics.point.position = position;
-      graphics.label.position = position;
-    }
-    if (estimate && estimate.track.length > 1) {
-      graphics.track.positions = thin(estimate.track).map((p) => cart(p.longitude, p.latitude, p.depth_ft));
-    }
+    marker.show(visible && has);
+    if (tracks.has(`est:${mode}`)) tracks.get(`est:${mode}`).setVisible(visible);
+    if (has) marker.set(cartOf(estimate.current_position));
   }
   if (!state.errorLine) {
     state.errorLine = gpu.lines.add({ positions: [], width: 1.5, material: colorMaterial(COLORS.error.withAlpha(0.75)) });
   }
-  const selected = estimates.find((e) => e.mode === selectedMode());
-  const showError = Boolean(checked("show-error-line") && selected?.current_position && target);
-  state.errorLine.show = showError;
-  if (showError) state.errorLine.positions = [cartOf(selected.current_position), cartOf(target.position)];
+  updateErrorLine();
+}
+
+function updateErrorLine() {
+  if (!state.errorLine) return;
+  const marker = state.estimates?.[selectedMode()];
+  const show = Boolean(checked("show-error-line") && marker?.pos && marker.point.show && state.truth?.pos);
+  state.errorLine.show = show;
+  if (show) state.errorLine.positions = [marker.pos, state.truth.pos];
 }
 
 // ---------------------------------------------------------------- presence region (batched GPU geometry)
 const MAX_PENDING_MS = 15000;
-const telemetry = { frames: 0, pendingDropped: 0, swaps: 0, renderMs: 0, maxRenderMs: 0 };
+const telemetry = {
+  frames: 0, pendingDropped: 0, swaps: 0, renderMs: 0, maxRenderMs: 0,
+  frameIntervalMs: 0, updateMs: 0, maxUpdateMs: 0, bytes: 0, parseMs: 0, updates: 0,
+  vertexUploads: 0, quality: "", smooth: true, renderer: "", worker: false,
+};
 let frameStart = 0;
 scene.preRender.addEventListener(() => {
   frameStart = performance.now();
@@ -498,7 +670,7 @@ function replacePrimitive(slot, primitive) {
   }
 }
 
-function regionPrimitives(region) {
+function regionPrimitives(region, withBoxes = true) {
   const fill = [];
   const outline = [];
   const voxels = [];
@@ -524,6 +696,7 @@ function regionPrimitives(region) {
         attributes: { color: Cesium.ColorGeometryInstanceAttribute.fromColor(COLORS.region.withAlpha(0.85)) },
       }));
     }
+    if (!withBoxes) return;
     const n = component.voxels.length;
     const size = component.voxel_size_yd * YD_TO_M * 0.9;
     const tall = component.voxel_height_ft * FT_TO_M * exag * 0.9;
@@ -558,7 +731,8 @@ function regionPrimitives(region) {
 
 function updateRegion(estimate) {
   const region = estimate?.presence_region;
-  const settings = `${estimate?.mode}-${checked("show-region")}-${checked("show-voxels")}-${exaggeration()}-${state.runKey}`;
+  const voxelStyle = $("voxel-style") ? $("voxel-style").value : "box";
+  const settings = `${estimate?.mode}-${checked("show-region")}-${checked("show-voxels")}-${voxelStyle}-${exaggeration()}-${state.runKey}`;
   const key = `${estimate?.tick}-${settings}`;
   if (key === state.lastRegionKey) return;
   // display settings changed -> rebuild now; new estimate only -> at most every REGION_REBUILD_MS
@@ -569,16 +743,26 @@ function updateRegion(estimate) {
   state.lastRegionSettings = settings;
   state.lastRegionBuild = now;
   gpu.regionLabels.removeAll();
+  gpu.voxelPoints.removeAll();
   if (!region || !region.components.length) {
     replacePrimitive(gpu.region, null);
     replacePrimitive(gpu.regionOutline, null);
     replacePrimitive(gpu.voxels, null);
     return;
   }
-  const built = regionPrimitives(region);
+  const boxes = checked("show-voxels") && voxelStyle === "box";
+  const built = regionPrimitives(region, boxes);
   replacePrimitive(gpu.region, checked("show-region") ? built.fill : null);
   replacePrimitive(gpu.regionOutline, checked("show-region") ? built.outline : null);
-  replacePrimitive(gpu.voxels, checked("show-voxels") ? built.voxels : null);
+  replacePrimitive(gpu.voxels, boxes ? built.voxels : null);
+  if (checked("show-voxels") && voxelStyle === "point") {
+    for (const component of region.components) {
+      const n = component.voxels.length;
+      component.voxels.forEach((voxel, rank) => {
+        gpu.voxelPoints.add({ position: cart(voxel[0], voxel[1], voxel[2]), pixelSize: 4, color: COLORS.region.withAlpha(0.7 - 0.5 * (rank / Math.max(n - 1, 1))) });
+      });
+    }
+  }
   if (checked("show-region")) {
     for (const component of region.components) {
       gpu.regionLabels.add({
@@ -732,6 +916,103 @@ $("show-fps").addEventListener("change", () => {
   scene.requestRender();
 });
 
+// ================================================================== adaptive quality & performance display
+const QUALITY_LEVELS = [
+  { name: "高", res: Math.min(window.devicePixelRatio || 1, 2), msaa: 4, fxaa: true },
+  { name: "中", res: 1.0, msaa: 2, fxaa: true },
+  { name: "低", res: 0.75, msaa: 1, fxaa: true },
+  { name: "最低", res: 0.5, msaa: 1, fxaa: false },
+];
+const quality = { level: -1, lastFrame: 0, ema: 0, slowMs: 0, fastMs: 0 };
+const TARGET_INTERVAL = 1000 / TARGET_FPS;
+
+function applyQuality(level) {
+  if (level === quality.level) return;
+  quality.level = level;
+  const q = QUALITY_LEVELS[level];
+  viewer.resolutionScale = q.res;
+  scene.msaaSamples = q.msaa;
+  if (scene.postProcessStages && scene.postProcessStages.fxaa) scene.postProcessStages.fxaa.enabled = q.fxaa;
+  telemetry.quality = q.name;
+  scene.requestRender();
+}
+applyQuality(0);
+
+scene.postRender.addEventListener(() => {
+  const now = performance.now();
+  const dt = now - quality.lastFrame;
+  quality.lastFrame = now;
+  if (dt > 250) return; // idle (on-demand rendering): no frame-rate information
+  quality.ema = quality.ema ? 0.9 * quality.ema + 0.1 * dt : dt;
+  telemetry.frameIntervalMs = quality.ema;
+  quality.slowMs = quality.ema > 1.6 * TARGET_INTERVAL ? quality.slowMs + dt : 0;
+  quality.fastMs = quality.ema < 1.15 * TARGET_INTERVAL ? quality.fastMs + dt : 0;
+  if ($("quality").value === "auto") {
+    if (quality.slowMs > 1500 && quality.level < QUALITY_LEVELS.length - 1) {
+      applyQuality(quality.level + 1);
+      quality.slowMs = 0;
+    } else if (quality.fastMs > 6000 && quality.level > 0) {
+      applyQuality(quality.level - 1);
+      quality.fastMs = 0;
+    }
+  }
+  // smooth display needs ~10 fps at least; otherwise fall back to 1 Hz jumps automatically
+  if (anim.enabled && anim.active.size && quality.ema > 100) {
+    anim.slowSince = anim.slowSince || now;
+    if (now - anim.slowSince > 2000) setSmooth(false, "描画が追いつかないため、なめらか表示を自動で停止しました（品質を下げるか、GPUの有効化を確認してください）。");
+  } else {
+    anim.slowSince = null;
+  }
+  if (anim.active.size) scene.requestRender(); // keep animating until markers arrive
+  telemetry.smooth = anim.enabled;
+});
+
+$("quality").addEventListener("change", () => {
+  const value = $("quality").value;
+  quality.slowMs = quality.fastMs = 0;
+  applyQuality(value === "auto" ? 0 : Number(value));
+});
+$("smooth-motion").addEventListener("change", () => setSmooth(checked("smooth-motion")));
+$("show-sea").addEventListener("change", applyGlobe);
+$("voxel-style").addEventListener("change", () => {
+  state.lastRegionKey = "";
+  if (state.latestSnapshot) render(state.latestSnapshot);
+});
+
+(function detectRenderer() {
+  try {
+    const gl = scene.context._gl;
+    const info = gl.getExtension("WEBGL_debug_renderer_info");
+    telemetry.renderer = String(info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
+  } catch (error) {
+    telemetry.renderer = "unknown";
+  }
+  telemetry.software = /swiftshader|llvmpipe|software|basic render/i.test(telemetry.renderer);
+  if (telemetry.software) {
+    setMessage("ソフトウェア描画です（GPUが使われていません）。ブラウザのハードウェアアクセラレーション設定を確認してください。");
+  }
+})();
+
+let perfFrames = 0;
+setInterval(() => {
+  const frames = telemetry.frames - perfFrames;
+  perfFrames = telemetry.frames;
+  const hud = $("perf-hud");
+  if (!hud || !checked("show-perf")) {
+    if (hud) hud.hidden = true;
+    return;
+  }
+  hud.hidden = false;
+  hud.textContent = [
+    `描画     ${frames} fps（フレーム間隔 ${fmt(telemetry.frameIntervalMs, 0)} ms）`,
+    `更新処理 ${fmt(telemetry.updateMs, 1)} ms（最大 ${fmt(telemetry.maxUpdateMs, 0)} ms）`,
+    `解読     ${fmt(telemetry.parseMs, 1)} ms（${telemetry.worker ? "Worker" : "メインスレッド"}）`,
+    `受信     ${fmt(telemetry.bytes / 1024, 1)} KB/更新`,
+    `品質     ${telemetry.quality}${$("quality").value === "auto" ? "（自動）" : ""}　なめらか ${anim.enabled ? "オン" : "オフ"}`,
+    `GPU      ${telemetry.renderer}${telemetry.software ? "  ⚠ ソフトウェア描画" : ""}`,
+  ].join("\n");
+}, 1000);
+
 // ================================================================== estimation control
 function updateRunState(snapshot) {
   const control = snapshot.estimation || {};
@@ -748,8 +1029,6 @@ function updateRunState(snapshot) {
     state.history = [];
     state.trueCpa.clear();
     if (snapshot.generation !== state.generation) {
-      state.truthTrack = [];
-      state.observerTracks.clear();
       state.generation = snapshot.generation;
     }
   }
@@ -787,7 +1066,7 @@ function updateComparison(snapshot, estimate) {
   const target = snapshot.target;
   const container = $("compare-cards");
   if (!estimate || !estimate.current_position || !target) {
-    container.innerHTML = `<p class="empty">${snapshot.estimation?.running ? "探知待ち（推定前）" : "推定停止中"}</p>`;
+    setHtml(container, `<p class="empty">${snapshot.estimation?.running ? "探知待ち（推定前）" : "推定停止中"}</p>`);
     setText("region-check", "--");
     return;
   }
@@ -804,6 +1083,12 @@ function updateComparison(snapshot, estimate) {
   const stwErr = estimate.through_water_speed_kt - target.through_water_speed_kt;
   const sogErr = estimate.ground_speed_kt - target.ground_speed_kt;
   const biasErr = estimate.source_bias_hz - trueBias;
+  const last = state.history[state.history.length - 1];
+  if (!last || last.tick !== estimate.tick) { // the error history is kept even when hidden
+    state.history.push({ tick: estimate.tick, h: hErr, hs: u.horizontal_major_yd, d: depthErr, ds: u.depth_sigma_ft });
+    if (state.history.length > MAX_HISTORY) state.history.shift();
+  }
+  if (!tabVisible("tab-compare")) return;
   const cards = [
     card("水平位置", `${fmt(hErr, 0)} <small>YD</small>`, judge(hErr, u.horizontal_major_yd), [
       ["推定", `${latText(ep.latitude)}<br>${lonText(ep.longitude)}`],
@@ -833,20 +1118,14 @@ function updateComparison(snapshot, estimate) {
       ["推定", `${fmt(estimate.source_bias_hz, 3)} Hz`], ["真値", `${fmt(trueBias, 3)} Hz`], ["1σ", `${fmt(u.bias_sigma_hz, 3)} Hz`],
     ]),
   ];
-  container.innerHTML = cards.join("");
+  setHtml(container, cards.join(""));
 
   const region = estimate.presence_region;
   const inside = region.components.find((c) =>
     pointInPolygon(tp.longitude, tp.latitude, c.polygon) && tp.depth_ft >= c.min_depth_ft && tp.depth_ft <= c.max_depth_ft);
-  $("region-check").innerHTML = `<b>${escapeHtml(estimate.observability_status)}</b>　真値は推定存在圏（${fmt(region.probability_pct, 0)} %・${region.components.length} 領域）の` +
+  setHtml($("region-check"), `<b>${escapeHtml(estimate.observability_status)}</b>　真値は推定存在圏（${fmt(region.probability_pct, 0)} %・${region.components.length} 領域）の` +
     (inside ? `<span class="s-good">内側</span>` : `<span class="s-bad">外側</span>`) +
-    `<br><small>入力：${escapeHtml(estimate.metadata?.observation_inputs || "--")}</small>`;
-
-  const last = state.history[state.history.length - 1];
-  if (!last || last.tick !== estimate.tick) {
-    state.history.push({ tick: estimate.tick, h: hErr, hs: u.horizontal_major_yd, d: depthErr, ds: u.depth_sigma_ft });
-    if (state.history.length > MAX_HISTORY) state.history.shift();
-  }
+    `<br><small>入力：${escapeHtml(estimate.metadata?.observation_inputs || "--")}</small>`);
 }
 
 function pair(a, b) {
@@ -854,6 +1133,11 @@ function pair(a, b) {
 }
 
 function updateRelative(snapshot, estimate) {
+  for (const t of snapshot.doppler?.truth || []) { // true CPA is accumulated even when hidden
+    const best = state.trueCpa.get(t.observer_id);
+    if (!best || t.slant_range_yd < best.range) state.trueCpa.set(t.observer_id, { range: t.slant_range_yd, tick: t.tick });
+  }
+  if (!tabVisible("tab-compare")) return;
   const truth = new Map((snapshot.doppler?.truth || []).map((t) => [t.observer_id, t]));
   const bearings = new Map((snapshot.bearings || []).map((b) => [b.observer_id, b]));
   const estRel = new Map((estimate?.relative || []).map((r) => [r.observer_id, r]));
@@ -867,14 +1151,11 @@ function updateRelative(snapshot, estimate) {
       `<td>${pair(`${fmt(r.est?.relative_speed_kt)} kt`, `${fmt(r.tr?.relative_speed_kt)} kt`)}</td>` +
       `<td>${pair(`${fmt(r.est?.slant_range_yd, 0)} YD`, `${fmt(r.tr?.slant_range_yd, 0)} YD`)}</td>` +
       `<td>${pair(r.brg ? `${fmt(r.brg.bearing_deg)}°` : "--", `${fmt(r.tr?.true_bearing_deg)}°`)}</td></tr>`);
-  $("relative-table").querySelector("tbody").innerHTML = rows.join("") || "<tr><td colspan='4'>観測者なし</td></tr>";
-  for (const t of snapshot.doppler?.truth || []) {
-    const best = state.trueCpa.get(t.observer_id);
-    if (!best || t.slant_range_yd < best.range) state.trueCpa.set(t.observer_id, { range: t.slant_range_yd, tick: t.tick });
-  }
+  setHtml($("relative-table").querySelector("tbody"), rows.join("") || "<tr><td colspan='4'>観測者なし</td></tr>");
 }
 
 function updateCpa(cpa) {
+  if (!tabVisible("tab-compare")) return;
   const rows = cpa
     .slice()
     .sort((a, b) => b.cpa_tick - a.cpa_tick)
@@ -886,26 +1167,27 @@ function updateCpa(cpa) {
         `<td>${pair(`${fmt(item.cpa_slant_range_yd, 0)}±${fmt(item.cpa_slant_range_sigma_yd, 0)} YD`, `${tr ? fmt(tr.range, 0) : "--"} YD`)}</td>` +
         `<td>${fmt(item.relative_speed_kt, 2)}<br><small>±${fmt(item.relative_speed_sigma_kt, 2)} kt</small></td></tr>`;
     });
-  $("cpa-table").querySelector("tbody").innerHTML = rows.join("") || "<tr><td colspan='4'>最近接通過なし</td></tr>";
+  setHtml($("cpa-table").querySelector("tbody"), rows.join("") || "<tr><td colspan='4'>最近接通過なし</td></tr>");
 }
 
 function updateCurrent(current, config) {
+  if (!tabVisible("tab-compare")) return;
   const tbody = $("current-table").querySelector("tbody");
   const t = config.current_field;
   const dirSpeed = (e, n) => `${fmt((Math.atan2(e, n) * 180 / Math.PI + 360) % 360, 0)}° ${fmt(Math.hypot(e, n), 2)} kt`;
   if (!current) {
-    tbody.innerHTML = `<tr><td>基準流速</td><td>--</td><td>${dirSpeed(t.base_velocity.east_kt, t.base_velocity.north_kt)}</td></tr>`;
+    setHtml(tbody, `<tr><td>基準流速</td><td>--</td><td>${dirSpeed(t.base_velocity.east_kt, t.base_velocity.north_kt)}</td></tr>`);
     return;
   }
   const b = current.base_velocity;
   const g = current.gradient_per_nm;
   const tg = t.gradient_per_nm;
-  tbody.innerHTML = [
+  setHtml(tbody, [
     `<tr><td>流速</td><td>${dirSpeed(b.east_kt, b.north_kt)}</td><td>${dirSpeed(t.base_velocity.east_kt, t.base_velocity.north_kt)}</td></tr>`,
     `<tr><td>∂u/∂x, ∂v/∂y<br><small>kt/NM</small></td><td>${fmt(g[0][0], 3)}, ${fmt(g[1][1], 3)}</td><td>${fmt(tg[0][0], 3)}, ${fmt(tg[1][1], 3)}</td></tr>`,
     `<tr><td>観測者 / 期間</td><td>${current.observer_count} / ${fmt(current.window_seconds / 60, 0)} 分</td><td>--</td></tr>`,
     `<tr><td>当てはめ残差</td><td>${fmt(current.residual_kt, 3)} kt</td><td>--</td></tr>`,
-  ].join("");
+  ].join(""));
 }
 
 // ================================================================== charts (canvas)
@@ -1006,6 +1288,7 @@ const chartDefs = {
 };
 
 function drawCharts() {
+  if (!tabVisible("tab-compare")) return;
   for (const [id, opts] of Object.entries(chartDefs)) {
     const canvas = $(id);
     if (canvas) drawChart(canvas, state.history, opts);
@@ -1195,7 +1478,17 @@ handler.setInputAction((movement) => {
   }
 }, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
 
-for (const id of ["show-truth", "show-online", "show-smoothed", "show-region", "show-voxels", "show-range", "show-bearing", "show-error-line", "show-drops", "depth-exaggeration"]) {
+$("depth-exaggeration").addEventListener("change", () => {
+  // tracks are recomputed by the stream worker with the new vertical scale
+  stream.setExaggeration(exaggeration());
+  state.lastRegionKey = "";
+  state.dropKey = "";
+  for (const marker of [state.truth, ...Object.values(state.estimates || {}), ...[...state.observers.values()].map((o) => o.marker)]) {
+    if (marker) marker.pos = null; // jump, do not glide, to the rescaled position
+  }
+  if (state.latestSnapshot) render(state.latestSnapshot);
+});
+for (const id of ["show-truth", "show-online", "show-smoothed", "show-region", "show-voxels", "show-range", "show-bearing", "show-error-line", "show-drops"]) {
   $(id).addEventListener("change", () => {
     state.lastRegionKey = "";
     state.followAnchor = null;
@@ -1221,7 +1514,7 @@ function render(snapshot) {
   updateTruth(snapshot.target);
   updateObservers(snapshot.observers, snapshot.doppler, snapshot.config);
   updateBearings(snapshot.bearings || [], snapshot.config);
-  updateEstimateLayers(snapshot.estimates, snapshot.target);
+  updateEstimateLayers(snapshot.estimates);
   const estimate = selectedEstimate(snapshot);
   updateRegion(estimate);
   setText("observability", estimate?.observability_status || (snapshot.estimation?.running ? "--" : "推定停止中"));
@@ -1240,24 +1533,80 @@ function render(snapshot) {
   scene.requestRender();
 }
 
-function connect() {
+// ================================================================== stream (Web Worker)
+function handleUpdate(result, bytes, parseMs) {
+  const t0 = performance.now();
+  applyTrackUpdates(result.tracks);
+  if (result.regionChanged) state.region = result.region;
+  if (result.snapshot) {
+    for (const estimate of result.snapshot.estimates) {
+      estimate.presence_region = state.region || { probability_pct: 0, components: [], disconnected: false };
+    }
+    if (bytes) {
+      const now = performance.now();
+      if (anim.lastArrival) anim.interval = Math.min(2000, Math.max(400, 0.8 * anim.interval + 0.2 * (now - anim.lastArrival)));
+      anim.lastArrival = now;
+    }
+    render(result.snapshot);
+  }
+  const took = performance.now() - t0;
+  const ema = (old, value) => (telemetry.updates ? 0.85 * old + 0.15 * value : value);
+  if (bytes) {
+    telemetry.bytes = ema(telemetry.bytes, bytes);
+    telemetry.parseMs = ema(telemetry.parseMs, parseMs);
+    telemetry.updateMs = ema(telemetry.updateMs, took);
+    telemetry.maxUpdateMs = telemetry.updates > 5 ? Math.max(telemetry.maxUpdateMs, took) : 0;
+    telemetry.updates += 1;
+  }
+  scene.requestRender();
+}
+
+const stream = (() => {
   const protocol = location.protocol === "https:" ? "wss" : "ws";
-  const socket = new WebSocket(`${protocol}://${location.host}/ws`);
-  socket.addEventListener("open", () => setText("connection-status", "接続済み"));
-  socket.addEventListener("message", (event) => {
+  const url = `${protocol}://${location.host}/ws`;
+  const onStatus = (connected) => setText("connection-status", connected ? "接続済み" : "再接続中");
+  const guard = (fn) => {
     try {
-      render(JSON.parse(event.data));
+      fn();
     } catch (error) {
       setMessage(`描画エラー: ${error.message}`);
       if (window.console) console.error(error);
     }
-  });
-  socket.addEventListener("close", () => {
-    setText("connection-status", "再接続中");
-    setTimeout(connect, 1500);
-  });
-  socket.addEventListener("error", () => socket.close());
-}
+  };
+  if (typeof Worker !== "undefined") {
+    // decoding, delta merge and coordinate conversion run off the rendering thread
+    const worker = new Worker("/stream-worker.js");
+    telemetry.worker = true;
+    worker.onmessage = (event) => {
+      const msg = event.data;
+      if (msg.type === "status") onStatus(msg.connected);
+      else if (msg.type === "error") setMessage(`受信エラー: ${msg.message}`);
+      else if (msg.type === "update") guard(() => handleUpdate(msg.result, msg.bytes, msg.parseMs));
+    };
+    worker.postMessage({ type: "connect", url, exaggeration: exaggeration() });
+    return { setExaggeration: (value) => worker.postMessage({ type: "exaggeration", value }) };
+  }
+  // fallback: same decoder on the main thread
+  const decoder = AquaDecoder.createDecoder();
+  decoder.setExaggeration(exaggeration());
+  function connect() {
+    const socket = new WebSocket(url);
+    socket.addEventListener("open", () => onStatus(true));
+    socket.addEventListener("message", (event) => {
+      const t0 = performance.now();
+      guard(() => {
+        const result = decoder.decode(JSON.parse(event.data));
+        handleUpdate(result, event.data.length, performance.now() - t0);
+      });
+    });
+    socket.addEventListener("close", () => {
+      onStatus(false);
+      setTimeout(connect, 1500);
+    });
+    socket.addEventListener("error", () => socket.close());
+  }
+  connect();
+  return { setExaggeration: (value) => guard(() => handleUpdate({ snapshot: null, tracks: decoder.setExaggeration(value) }, 0, 0)) };
+})();
 
-window.aquaDrift = { viewer, state, applyView, centerOn, telemetry, gpu, baseMap, setBaseMap }; // diagnostics / E2E
-connect();
+window.aquaDrift = { viewer, state, applyView, centerOn, telemetry, gpu, baseMap, setBaseMap, tracks, anim }; // diagnostics / E2E

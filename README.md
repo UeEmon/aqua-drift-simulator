@@ -52,7 +52,12 @@ only, never the truth); the 表示・観測者 tab shows the status and has a "d
 The background map (Natural Earth II) is **off by default** to prioritise rendering; switch it
 on with 「背景地図」 in the view toolbar when needed.
 
-Rendering uses GPU-batched Cesium primitives, on-demand rendering and 4x MSAA. A hardware
+Rendering uses GPU-batched Cesium primitives, on-demand rendering and 4x MSAA. The GIS stream
+(WebSocket protocol v2) sends a full update once and compact deltas afterwards; a Web Worker
+decodes it and converts coordinates off the rendering thread; tracks are drawn in chunks so
+only changed chunks reach the GPU; quality adapts to the frame time; markers glide between
+the 1 Hz updates ("なめらか", switched off automatically on very slow GPUs). The 「性能」 toggle
+shows frame rate, update time, received bytes, quality level and the GPU in use. A hardware
 GPU with WebGL2 is recommended; the GIS also runs on software WebGL (used in CI).
 
 ## Start with Docker

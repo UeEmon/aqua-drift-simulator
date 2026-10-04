@@ -237,3 +237,19 @@ td .tru { color: #7fe3ff; }
 td small { color: #8faecb; }
 
 button.secondary { margin-top: 8px; }
+
+#perf-hud {
+  position: absolute;
+  left: 12px;
+  bottom: 60px;
+  margin: 0;
+  padding: 8px 10px;
+  color: #d7eaff;
+  background: rgba(3, 10, 18, 0.88);
+  border: 1px solid rgba(107, 181, 255, 0.28);
+  border-radius: 6px;
+  font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  pointer-events: none;
+  z-index: 2;
+}
+#view-toolbar select { max-width: 100%; }

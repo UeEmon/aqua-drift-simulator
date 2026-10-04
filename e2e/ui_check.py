@@ -130,7 +130,9 @@ def main() -> int:
             note(f"telemetry {label}: {fps:.1f} frames/s, render {t['renderMs']:.0f} ms avg / "
                  f"{t['maxRenderMs']:.0f} ms max, long tasks {data['long']}, pending {data['pending']}, "
                  f"swaps {t['swaps']}, dropped {t['pendingDropped']}")
-            if fps > 20:
+            # with smooth display on, markers glide (continuous frames by design); the idle-loop
+            # check applies when it is off (it switches off by itself on slow software WebGL)
+            if not t.get("smooth") and fps > 20:
                 fail(f"render loop not idle ({label}): {fps:.1f} frames/s with requestRenderMode")
 
         def overflow() -> None:
@@ -249,6 +251,29 @@ def main() -> int:
             page.wait_for_timeout(2000)
             page.screenshot(path=str(out / "07-forward-deployment.png"))
 
+        def perf() -> None:
+            full = page.evaluate("() => fetch('/api/snapshot').then(r => r.text()).then(t => t.length)")
+            t = page.evaluate("() => window.aquaDrift.telemetry")
+            truth_points = page.evaluate(
+                "() => (window.aquaDrift.tracks.get('truth') || { points: [] }).points.length"
+            )
+            ratio = full / max(t["bytes"], 1)
+            note(
+                f"perf: stream {t['bytes'] / 1024:.1f} KB/update vs full snapshot {full / 1024:.1f} KB "
+                f"({ratio:.1f}x smaller, before deflate); update {t['updateMs']:.1f} ms (max {t['maxUpdateMs']:.0f}); "
+                f"decode {t['parseMs']:.1f} ms in {'Web Worker' if t['worker'] else 'main thread'}; "
+                f"quality {t['quality']}; smooth {t['smooth']}; frame interval {t['frameIntervalMs']:.0f} ms; "
+                f"truth track {truth_points} pts"
+            )
+            if not t["worker"]:
+                fail("stream decoding is not running in the Web Worker")
+            if t["bytes"] > 0.35 * full:
+                fail(f"delta stream not smaller than the full snapshot: {t['bytes']:.0f} vs {full} bytes")
+            if t["updateMs"] > 100:
+                fail(f"main-thread update too slow: {t['updateMs']:.1f} ms")
+            if truth_points < 10:
+                fail(f"truth track not rendered from the stream ({truth_points} points)")
+
         stage("gpu info", gpu_info)
         stage("background map", base_map)
         stage("telemetry idle", lambda: telemetry("idle"))
@@ -256,6 +281,7 @@ def main() -> int:
         stage("default centre is truth", default_centre)
         stage("views", views)
         stage("telemetry after views", lambda: telemetry("after views"))
+        stage("stream performance", perf)
         stage("centre on estimate", centre)
         stage("follow", follow)
         stage("telemetry following", lambda: telemetry("following"))

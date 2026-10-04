@@ -92,3 +92,12 @@ def test_standby_assignment_and_deploy_now_without_estimate() -> None:
         assert client.post("/api/deployment/now").status_code == 409
         feed = client.get("/internal/deployment-feed").json()
         assert "target" not in feed and "truth" not in str(feed).lower()
+
+
+def test_websocket_stream_protocol_v2() -> None:
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as ws:
+            message = ws.receive_json()
+        assert message["v"] == 2
+        for key in ("t", "gen", "ctl", "obs", "est", "cfg"):
+            assert key in message  # first message of a connection is complete
