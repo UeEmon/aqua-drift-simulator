@@ -22,3 +22,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker compose config --quiet
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: [backend, compose]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Start the full stack
+        run: |
+          cp .env.example .env
+          docker compose up -d --build
+      - name: Wait for observers and the first estimate
+        run: python e2e/wait_for_stack.py http://localhost:8091
+      - name: Install headless Chromium
+        run: |
+          pip install "playwright>=1.47,<2"
+          python -m playwright install --with-deps chromium
+      - name: Browser check of the GIS
+        run: python e2e/ui_check.py --url http://localhost:8090 --out e2e-artifacts
+      - name: Collect container logs
+        if: always()
+        run: |
+          mkdir -p e2e-artifacts
+          docker compose ps > e2e-artifacts/compose-ps.txt
+          docker compose logs --no-color > e2e-artifacts/compose.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gis-e2e
+          path: e2e-artifacts

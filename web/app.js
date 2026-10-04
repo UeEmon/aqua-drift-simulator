@@ -10,6 +10,7 @@ const MAX_HISTORY = 3600;
 const $ = (id) => document.getElementById(id);
 const checked = (id) => Boolean($(id) && $(id).checked);
 
+// ================================================================== viewer (GPU settings)
 const viewer = new Cesium.Viewer("cesiumContainer", {
   animation: false,
   timeline: false,
@@ -18,23 +19,35 @@ const viewer = new Cesium.Viewer("cesiumContainer", {
   homeButton: true,
   sceneModePicker: true,
   navigationHelpButton: false,
-  infoBox: true,
-  selectionIndicator: true,
+  infoBox: false,
+  selectionIndicator: false,
   terrainProvider: new Cesium.EllipsoidTerrainProvider(),
   baseLayer: false,
+  // render only when something changed (data update, camera move, tile load):
+  // the GPU stays idle between the 1 Hz updates instead of redrawing at 60 fps
+  requestRenderMode: true,
+  maximumRenderTimeChange: Infinity,
+  msaaSamples: 4, // hardware multisample anti-aliasing (WebGL2)
+  contextOptions: { webgl: { powerPreference: "high-performance", alpha: false } },
 });
-viewer.scene.globe.depthTestAgainstTerrain = false;
-if (viewer.scene.globe.translucency) {
-  viewer.scene.globe.translucency.enabled = true;
-  viewer.scene.globe.translucency.frontFaceAlpha = 0.55;
-  viewer.scene.globe.translucency.backFaceAlpha = 0.55;
+const scene = viewer.scene;
+viewer.useBrowserRecommendedResolution = false; // full device-pixel resolution on HiDPI
+viewer.resolutionScale = Math.min(window.devicePixelRatio || 1, 2);
+if (scene.postProcessStages && scene.postProcessStages.fxaa) scene.postProcessStages.fxaa.enabled = true;
+scene.globe.depthTestAgainstTerrain = false;
+scene.globe.showGroundAtmosphere = false;
+if (scene.globe.translucency) {
+  scene.globe.translucency.enabled = true;
+  scene.globe.translucency.frontFaceAlpha = 0.55;
+  scene.globe.translucency.backFaceAlpha = 0.55;
 }
-viewer.scene.screenSpaceCameraController.enableCollisionDetection = false;
+scene.screenSpaceCameraController.enableCollisionDetection = false; // allow camera under the sea surface
 
-Cesium.TileMapServiceImageryProvider.fromUrl(
-  Cesium.buildModuleUrl("Assets/Textures/NaturalEarthII"),
-)
-  .then((provider) => viewer.imageryLayers.addImageryProvider(provider))
+Cesium.TileMapServiceImageryProvider.fromUrl(Cesium.buildModuleUrl("Assets/Textures/NaturalEarthII"))
+  .then((provider) => {
+    viewer.imageryLayers.addImageryProvider(provider);
+    scene.requestRender();
+  })
   .catch(() => setMessage("Natural Earth II の読込みに失敗しました。"));
 
 const COLORS = {
@@ -44,35 +57,56 @@ const COLORS = {
   region: Cesium.Color.fromCssColorString("#ff4fd8"),
   observer: Cesium.Color.GOLD,
   detecting: Cesium.Color.fromCssColorString("#5dff9d"),
+  inactive: Cesium.Color.GRAY,
   bearing: Cesium.Color.fromCssColorString("#ffe680"),
   error: Cesium.Color.WHITE,
 };
 
+// GPU-batched primitive collections: one draw call per collection instead of one per entity
+const gpu = {
+  lines: scene.primitives.add(new Cesium.PolylineCollection()),
+  points: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
+  labels: scene.primitives.add(new Cesium.LabelCollection()),
+  regionLabels: scene.primitives.add(new Cesium.LabelCollection()),
+  region: { current: null, pending: null },
+  regionOutline: { current: null, pending: null },
+  voxels: { current: null, pending: null },
+};
+
+function colorMaterial(color) {
+  return Cesium.Material.fromType("Color", { color });
+}
+function dashMaterial(color, dashLength = 12) {
+  return Cesium.Material.fromType("PolylineDash", { color, dashLength });
+}
+
 const state = {
   truthTrack: [],
   observerTracks: new Map(),
-  observerEntities: new Map(),
-  bearingEntities: [],
-  regionEntities: [],
-  voxelPoints: viewer.scene.primitives.add(new Cesium.PointPrimitiveCollection()),
-  estimateEntities: {},
+  observers: new Map(), // id -> {point, label, track, range}
+  bearingLines: new Map(),
   latestConfig: null,
   latestSnapshot: null,
   formsLoaded: false,
   firstFix: true,
   lastRegionKey: "",
   runKey: "",
+  generation: null,
   history: [],
   trueCpa: new Map(),
+  followAnchor: null,
 };
 
-// ------------------------------------------------------------------ helpers
+// ================================================================== helpers
 function exaggeration() {
   const value = Number($("depth-exaggeration").value);
   return Number.isFinite(value) && value >= 1 ? value : 1;
 }
+function heightOf(depthFt) {
+  return -depthFt * FT_TO_M * exaggeration();
+}
 function cart(longitude, latitude, depthFt) {
-  return Cesium.Cartesian3.fromDegrees(longitude, latitude, -depthFt * FT_TO_M * exaggeration());
+  return Cesium.Cartesian3.fromDegrees(longitude, latitude, heightOf(depthFt));
 }
 function cartOf(position) {
   return cart(position.longitude, position.latitude, position.depth_ft);
@@ -92,20 +126,17 @@ function setText(id, text) {
 function setMessage(text) {
   setText("message", text);
 }
-function latLonText(position) {
-  const ns = position.latitude >= 0 ? "N" : "S";
-  const ew = position.longitude >= 0 ? "E" : "W";
-  return `${Math.abs(position.latitude).toFixed(5)}°${ns} ${Math.abs(position.longitude).toFixed(5)}°${ew}`;
+function latText(lat) {
+  return `${Math.abs(lat).toFixed(5)}°${lat >= 0 ? "N" : "S"}`;
+}
+function lonText(lon) {
+  return `${Math.abs(lon).toFixed(5)}°${lon >= 0 ? "E" : "W"}`;
 }
 function offsetM(a, b) {
   const meanLat = ((a.latitude + b.latitude) / 2) * Math.PI / 180;
   const north = (b.latitude - a.latitude) * Math.PI / 180 * EARTH_R;
   const east = (b.longitude - a.longitude) * Math.PI / 180 * EARTH_R * Math.cos(meanLat);
   return { east, north };
-}
-function horizontalYd(a, b) {
-  const d = offsetM(a, b);
-  return Math.hypot(d.east, d.north) / YD_TO_M;
 }
 function angleDiff(a, b) {
   return ((a - b + 540) % 360) - 180;
@@ -130,19 +161,57 @@ function selectedMode() {
   const input = document.querySelector("input[name='panel-mode']:checked");
   return input ? input.value : "ONLINE";
 }
+function selectedEstimate(snapshot = state.latestSnapshot) {
+  if (!snapshot) return null;
+  return snapshot.estimates.find((item) => item.mode === selectedMode()) || snapshot.estimates[0] || null;
+}
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
 
-// ------------------------------------------------------------------ tabs
+// ================================================================== tabs & panel resizer
 for (const tab of document.querySelectorAll(".tab")) {
   tab.addEventListener("click", () => {
     for (const other of document.querySelectorAll(".tab")) other.classList.toggle("active", other === tab);
-    for (const panel of document.querySelectorAll(".tab-panel")) {
-      panel.classList.toggle("active", panel.id === tab.dataset.tab);
-    }
+    for (const panel of document.querySelectorAll(".tab-panel")) panel.classList.toggle("active", panel.id === tab.dataset.tab);
     drawCharts();
   });
 }
 
-// ------------------------------------------------------------------ truth
+(function setupResizer() {
+  const resizer = $("panel-resizer");
+  const app = $("app");
+  if (!resizer || !app || !app.style) return;
+  try {
+    const saved = Number(localStorage.getItem("aqua-panel-width"));
+    if (saved >= 340) app.style.setProperty("--panel-w", `${saved}px`);
+  } catch (error) {
+    /* storage unavailable: default width */
+  }
+  let dragging = false;
+  resizer.addEventListener("pointerdown", (event) => {
+    dragging = true;
+    resizer.setPointerCapture(event.pointerId);
+  });
+  resizer.addEventListener("pointermove", (event) => {
+    if (!dragging) return;
+    const width = Math.min(Math.max(window.innerWidth - event.clientX, 340), window.innerWidth * 0.65);
+    app.style.setProperty("--panel-w", `${Math.round(width)}px`);
+    viewer.resize();
+    scene.requestRender();
+    drawCharts();
+  });
+  resizer.addEventListener("pointerup", () => {
+    dragging = false;
+    try {
+      localStorage.setItem("aqua-panel-width", String(parseInt(getComputedStyle(app).getPropertyValue("--panel-w"), 10)));
+    } catch (error) {
+      /* ignore */
+    }
+  });
+})();
+
+// ================================================================== truth
 function updateTruth(target) {
   if (!target) return;
   const last = state.truthTrack[state.truthTrack.length - 1];
@@ -151,30 +220,25 @@ function updateTruth(target) {
     if (state.truthTrack.length > MAX_TRUTH_POINTS) state.truthTrack.shift();
   }
   const show = checked("show-truth");
-  const position = cartOf(target.position);
-  if (!state.truthEntity) {
-    state.truthEntity = viewer.entities.add({
-      id: "target-truth",
-      name: "目標（真値）",
-      position,
-      point: { pixelSize: 10, color: COLORS.truth, outlineColor: Cesium.Color.BLACK, outlineWidth: 2 },
-      label: { text: "TRUTH", font: "12px sans-serif", fillColor: COLORS.truth, pixelOffset: new Cesium.Cartesian2(0, -18) },
-    });
-    state.truthLine = viewer.entities.add({
-      id: "target-truth-track",
-      polyline: { positions: [], width: 2, material: COLORS.truth.withAlpha(0.6) },
-    });
+  if (!state.truth) {
+    state.truth = {
+      point: gpu.points.add({ pixelSize: 10, color: COLORS.truth, outlineColor: Cesium.Color.BLACK, outlineWidth: 2, id: "truth" }),
+      label: gpu.labels.add({ text: "TRUTH", font: "12px sans-serif", fillColor: COLORS.truth, pixelOffset: new Cesium.Cartesian2(0, -18) }),
+      track: gpu.lines.add({ positions: [], width: 2, material: colorMaterial(COLORS.truth.withAlpha(0.6)) }),
+    };
   }
-  state.truthEntity.position = position;
-  state.truthEntity.show = show;
-  state.truthLine.polyline.positions = state.truthTrack.map(cartOf);
-  state.truthLine.show = show;
+  const position = cartOf(target.position);
+  state.truth.point.position = position;
+  state.truth.label.position = position;
+  state.truth.point.show = state.truth.label.show = state.truth.track.show = show;
+  if (state.truthTrack.length > 1) state.truth.track.positions = state.truthTrack.map(cartOf);
 }
 
-// ------------------------------------------------------------------ observers
+// ================================================================== observers & bearings
 function updateObservers(records, batch, config) {
   const detecting = new Set((batch?.observations || []).filter((o) => o.detected).map((o) => o.observer_id));
   const active = new Set();
+  const r = config.max_slant_range_yd * YD_TO_M;
   for (const record of records) {
     const observer = record.state;
     const id = observer.observer_id;
@@ -185,169 +249,358 @@ function updateObservers(records, batch, config) {
     if (track.length > MAX_TRUTH_POINTS) track.shift();
     state.observerTracks.set(id, track);
 
-    let entities = state.observerEntities.get(id);
-    if (!entities) {
-      entities = {
-        marker: viewer.entities.add({
-          id: `observer-${id}`,
-          name: `観測者 ${id}`,
-          point: { pixelSize: 8, outlineColor: Cesium.Color.BLACK, outlineWidth: 1 },
-          label: { text: id, font: "11px sans-serif", fillColor: COLORS.observer, pixelOffset: new Cesium.Cartesian2(0, -14), scale: 0.9 },
-        }),
-        line: viewer.entities.add({
-          id: `observer-track-${id}`,
-          polyline: { positions: [], width: 1, material: COLORS.observer.withAlpha(0.45) },
-        }),
-        range: viewer.entities.add({
-          id: `observer-range-${id}`,
+    let item = state.observers.get(id);
+    if (!item) {
+      item = {
+        point: gpu.points.add({ pixelSize: 8, outlineColor: Cesium.Color.BLACK, outlineWidth: 1, id: `observer-${id}` }),
+        label: gpu.labels.add({ text: id, font: "11px sans-serif", fillColor: COLORS.observer, pixelOffset: new Cesium.Cartesian2(0, -14), scale: 0.9 }),
+        track: gpu.lines.add({ positions: [], width: 1, material: colorMaterial(COLORS.observer.withAlpha(0.45)) }),
+        range: null,
+      };
+      state.observers.set(id, item);
+    }
+    const position = cartOf(observer.position);
+    item.point.position = position;
+    item.label.position = position;
+    item.point.color = detecting.has(id) ? COLORS.detecting : COLORS.observer;
+    if (track.length > 1) item.track.positions = track.map(cartOf);
+    if (checked("show-range")) {
+      if (!item.range) {
+        item.range = viewer.entities.add({
           ellipsoid: {
-            radii: new Cesium.Cartesian3(1, 1, 1),
+            radii: new Cesium.Cartesian3(r, r, r * exaggeration()),
             material: COLORS.observer.withAlpha(0.05),
             outline: true,
             outlineColor: COLORS.observer.withAlpha(0.25),
             slicePartitions: 12,
             stackPartitions: 8,
           },
-        }),
-      };
-      state.observerEntities.set(id, entities);
+        });
+      }
+      item.range.position = position;
+      item.range.ellipsoid.radii = new Cesium.Cartesian3(r, r, r * exaggeration());
+      item.range.show = true;
+    } else if (item.range) {
+      item.range.show = false;
     }
-    const position = cartOf(observer.position);
-    entities.marker.show = true;
-    entities.line.show = true;
-    entities.marker.position = position;
-    entities.marker.point.color = detecting.has(id) ? COLORS.detecting : COLORS.observer;
-    entities.marker.description = `深度 ${fmt(observer.position.depth_ft, 0)} Ft<br>登録 ${record.registered_tick} s / 最終 ${record.last_tick} s`;
-    entities.line.polyline.positions = track.map(cartOf);
-    const r = config.max_slant_range_yd * YD_TO_M;
-    entities.range.position = position;
-    entities.range.ellipsoid.radii = new Cesium.Cartesian3(r, r, r * exaggeration());
-    entities.range.show = checked("show-range");
   }
-  for (const [id, entities] of state.observerEntities) {
+  for (const [id, item] of state.observers) {
     if (active.has(id)) continue;
-    entities.marker.point.color = Cesium.Color.GRAY; // evicted/expired: history stays visible
-    entities.range.show = false;
+    item.point.color = COLORS.inactive; // evicted / expired: drift history stays visible
+    if (item.range) item.range.show = false;
   }
   setText("observer-count", String(records.length));
   setText("detecting-count", String(detecting.size));
 }
 
 function updateBearings(bearings, config) {
-  for (const entity of state.bearingEntities) viewer.entities.remove(entity);
-  state.bearingEntities = [];
-  if (!checked("show-bearing")) return;
+  const show = checked("show-bearing");
+  const seen = new Set();
   const length = config.max_slant_range_yd * YD_TO_M;
   for (const item of bearings) {
+    seen.add(item.observer_id);
+    let line = state.bearingLines.get(item.observer_id);
+    if (!line) {
+      line = gpu.lines.add({ positions: [], width: 1.5, material: dashMaterial(COLORS.bearing.withAlpha(0.85), 8) });
+      state.bearingLines.set(item.observer_id, line);
+    }
     const end = destination(item.observer_position, item.bearing_deg, length);
-    const depth = item.observer_position.depth_ft;
-    state.bearingEntities.push(viewer.entities.add({
-      id: `bearing-${item.observer_id}`,
-      name: `方位 ${item.observer_id}`,
-      description: `観測方位 ${fmt(item.bearing_deg)}°T（${item.tick} s）`,
-      polyline: {
-        positions: [cartOf(item.observer_position), cart(end.longitude, end.latitude, depth)],
-        width: 1.5,
-        material: new Cesium.PolylineDashMaterialProperty({ color: COLORS.bearing.withAlpha(0.8), dashLength: 8 }),
-      },
-    }));
+    line.positions = [cartOf(item.observer_position), cart(end.longitude, end.latitude, item.observer_position.depth_ft)];
+    line.show = show;
   }
+  for (const [id, line] of state.bearingLines) if (!seen.has(id)) line.show = false;
 }
 
-// ------------------------------------------------------------------ estimates on the map
-function estimateEntities(mode) {
-  if (state.estimateEntities[mode]) return state.estimateEntities[mode];
+// ================================================================== estimates
+function estimateGraphics(mode) {
+  state.estimates = state.estimates || {};
+  if (state.estimates[mode]) return state.estimates[mode];
   const color = mode === "ONLINE" ? COLORS.online : COLORS.smoothed;
-  const entities = {
-    point: viewer.entities.add({
-      id: `estimate-${mode}`,
-      name: mode === "ONLINE" ? "推定（非更新）" : "推定（更新）",
-      point: { pixelSize: 11, color, outlineColor: Cesium.Color.BLACK, outlineWidth: 2 },
-      label: { text: mode === "ONLINE" ? "EST" : "", font: "12px sans-serif", fillColor: color, pixelOffset: new Cesium.Cartesian2(0, 20) },
-    }),
-    track: viewer.entities.add({
-      id: `estimate-track-${mode}`,
-      polyline: {
-        positions: [],
-        width: mode === "ONLINE" ? 2 : 3,
-        material: mode === "ONLINE"
-          ? new Cesium.PolylineDashMaterialProperty({ color: color.withAlpha(0.9), dashLength: 12 })
-          : color.withAlpha(0.85),
-      },
+  const graphics = {
+    point: gpu.points.add({ pixelSize: 11, color, outlineColor: Cesium.Color.BLACK, outlineWidth: 2, id: `estimate-${mode}` }),
+    label: gpu.labels.add({ text: mode === "ONLINE" ? "EST" : "", font: "12px sans-serif", fillColor: color, pixelOffset: new Cesium.Cartesian2(0, 20) }),
+    track: gpu.lines.add({
+      positions: [],
+      width: mode === "ONLINE" ? 2 : 3,
+      material: mode === "ONLINE" ? dashMaterial(color.withAlpha(0.9), 12) : colorMaterial(color.withAlpha(0.85)),
     }),
   };
-  state.estimateEntities[mode] = entities;
-  return entities;
+  state.estimates[mode] = graphics;
+  return graphics;
 }
 
 function updateEstimateLayers(estimates, target) {
-  for (const estimate of estimates) {
-    const entities = estimateEntities(estimate.mode);
-    const visible = checked(estimate.mode === "ONLINE" ? "show-online" : "show-smoothed");
-    const has = Boolean(estimate.current_position);
-    entities.point.show = visible && has;
-    entities.track.show = visible && estimate.track.length > 1;
-    if (has) entities.point.position = cartOf(estimate.current_position);
-    entities.track.polyline.positions = estimate.track.map((p) => cart(p.longitude, p.latitude, p.depth_ft));
+  for (const mode of ["ONLINE", "SMOOTHED"]) {
+    const graphics = estimateGraphics(mode);
+    const estimate = estimates.find((e) => e.mode === mode);
+    const visible = checked(mode === "ONLINE" ? "show-online" : "show-smoothed");
+    const has = Boolean(estimate?.current_position);
+    graphics.point.show = graphics.label.show = visible && has;
+    graphics.track.show = visible && Boolean(estimate) && estimate.track.length > 1;
+    if (has) {
+      const position = cartOf(estimate.current_position);
+      graphics.point.position = position;
+      graphics.label.position = position;
+    }
+    if (estimate && estimate.track.length > 1) {
+      graphics.track.positions = estimate.track.map((p) => cart(p.longitude, p.latitude, p.depth_ft));
+    }
+  }
+  if (!state.errorLine) {
+    state.errorLine = gpu.lines.add({ positions: [], width: 1.5, material: colorMaterial(COLORS.error.withAlpha(0.75)) });
   }
   const selected = estimates.find((e) => e.mode === selectedMode());
-  if (!state.errorLine) {
-    state.errorLine = viewer.entities.add({
-      id: "estimate-error-line",
-      name: "推定–真値",
-      polyline: { positions: [], width: 1.5, material: COLORS.error.withAlpha(0.7) },
-    });
+  const showError = Boolean(checked("show-error-line") && selected?.current_position && target);
+  state.errorLine.show = showError;
+  if (showError) state.errorLine.positions = [cartOf(selected.current_position), cartOf(target.position)];
+}
+
+// ---------------------------------------------------------------- presence region (batched GPU geometry)
+function swapWhenReady(slot) {
+  if (!slot.pending) return false;
+  if (!slot.pending.ready) return true;
+  if (slot.current) scene.primitives.remove(slot.current);
+  slot.current = slot.pending;
+  slot.pending = null;
+  return false;
+}
+scene.postRender.addEventListener(() => {
+  // async geometry is built in web workers; keep rendering until it is uploaded, then swap
+  const waiting = [gpu.region, gpu.regionOutline, gpu.voxels].map(swapWhenReady).some(Boolean);
+  if (waiting) scene.requestRender();
+});
+
+function replacePrimitive(slot, primitive) {
+  if (slot.pending) scene.primitives.remove(slot.pending);
+  slot.pending = primitive ? scene.primitives.add(primitive) : null;
+  if (!primitive && slot.current) {
+    scene.primitives.remove(slot.current);
+    slot.current = null;
   }
-  const showError = checked("show-error-line") && selected?.current_position && target;
-  state.errorLine.show = Boolean(showError);
-  if (showError) state.errorLine.polyline.positions = [cartOf(selected.current_position), cartOf(target.position)];
+}
+
+function regionPrimitives(region) {
+  const fill = [];
+  const outline = [];
+  const voxels = [];
+  const exag = exaggeration();
+  region.components.forEach((component) => {
+    if (component.polygon.length >= 3) {
+      const hierarchy = new Cesium.PolygonHierarchy(Cesium.Cartesian3.fromDegreesArray(component.polygon.flat()));
+      const height = heightOf(component.min_depth_ft);
+      const extrudedHeight = heightOf(component.max_depth_ft);
+      fill.push(new Cesium.GeometryInstance({
+        geometry: new Cesium.PolygonGeometry({
+          polygonHierarchy: hierarchy,
+          height,
+          extrudedHeight,
+          vertexFormat: Cesium.PerInstanceColorAppearance.VERTEX_FORMAT,
+        }),
+        attributes: { color: Cesium.ColorGeometryInstanceAttribute.fromColor(COLORS.region.withAlpha(0.12)) },
+      }));
+      outline.push(new Cesium.GeometryInstance({
+        geometry: new Cesium.PolygonOutlineGeometry({ polygonHierarchy: hierarchy, height, extrudedHeight }),
+        attributes: { color: Cesium.ColorGeometryInstanceAttribute.fromColor(COLORS.region.withAlpha(0.85)) },
+      }));
+    }
+    const n = component.voxels.length;
+    const size = component.voxel_size_yd * YD_TO_M * 0.9;
+    const tall = component.voxel_height_ft * FT_TO_M * exag * 0.9;
+    if (!(size > 0 && tall > 0)) return;
+    component.voxels.forEach((voxel, rank) => {
+      const alpha = 0.34 - 0.26 * (rank / Math.max(n - 1, 1)); // densest voxels most opaque
+      voxels.push(new Cesium.GeometryInstance({
+        geometry: Cesium.BoxGeometry.fromDimensions({
+          dimensions: new Cesium.Cartesian3(size, size, tall),
+          vertexFormat: Cesium.PerInstanceColorAppearance.VERTEX_FORMAT,
+        }),
+        modelMatrix: Cesium.Transforms.eastNorthUpToFixedFrame(cart(voxel[0], voxel[1], voxel[2])),
+        attributes: { color: Cesium.ColorGeometryInstanceAttribute.fromColor(COLORS.region.withAlpha(alpha)) },
+      }));
+    });
+  });
+  const translucent = () => new Cesium.PerInstanceColorAppearance({ translucent: true, closed: true });
+  return {
+    fill: fill.length ? new Cesium.Primitive({ geometryInstances: fill, appearance: translucent(), asynchronous: true, allowPicking: false }) : null,
+    outline: outline.length
+      ? new Cesium.Primitive({
+        geometryInstances: outline,
+        appearance: new Cesium.PerInstanceColorAppearance({ flat: true, translucent: false }),
+        asynchronous: true,
+        allowPicking: false,
+      })
+      : null,
+    voxels: voxels.length ? new Cesium.Primitive({ geometryInstances: voxels, appearance: translucent(), asynchronous: true, allowPicking: false }) : null,
+  };
 }
 
 function updateRegion(estimate) {
   const region = estimate?.presence_region;
-  const key = `${estimate?.tick}-${estimate?.mode}-${checked("show-region")}-${checked("show-voxels")}-${exaggeration()}`;
+  const key = `${estimate?.tick}-${estimate?.mode}-${checked("show-region")}-${checked("show-voxels")}-${exaggeration()}-${state.runKey}`;
   if (key === state.lastRegionKey) return;
   state.lastRegionKey = key;
-  for (const entity of state.regionEntities) viewer.entities.remove(entity);
-  state.regionEntities = [];
-  state.voxelPoints.removeAll();
-  if (!region) return;
-  region.components.forEach((component, index) => {
-    if (checked("show-region") && component.polygon.length >= 3) {
-      state.regionEntities.push(viewer.entities.add({
-        id: `region-${index}`,
-        name: `推定存在圏 ${index + 1}`,
-        description: `確率 ${fmt(component.probability_mass_pct)} %<br>深度 ${fmt(component.min_depth_ft, 0)}–${fmt(component.max_depth_ft, 0)} Ft`,
-        polygon: {
-          hierarchy: Cesium.Cartesian3.fromDegreesArray(component.polygon.flat()),
-          height: -component.min_depth_ft * FT_TO_M * exaggeration(),
-          extrudedHeight: -component.max_depth_ft * FT_TO_M * exaggeration(),
-          material: COLORS.region.withAlpha(0.12),
-          outline: true,
-          outlineColor: COLORS.region.withAlpha(0.8),
-        },
-        label: { text: `${fmt(component.probability_mass_pct, 0)}%`, font: "12px sans-serif", fillColor: COLORS.region },
+  gpu.regionLabels.removeAll();
+  if (!region || !region.components.length) {
+    replacePrimitive(gpu.region, null);
+    replacePrimitive(gpu.regionOutline, null);
+    replacePrimitive(gpu.voxels, null);
+    return;
+  }
+  const built = regionPrimitives(region);
+  replacePrimitive(gpu.region, checked("show-region") ? built.fill : null);
+  replacePrimitive(gpu.regionOutline, checked("show-region") ? built.outline : null);
+  replacePrimitive(gpu.voxels, checked("show-voxels") ? built.voxels : null);
+  if (checked("show-region")) {
+    for (const component of region.components) {
+      gpu.regionLabels.add({
         position: cartOf(component.centroid),
-      }));
+        text: `${fmt(component.probability_mass_pct, 0)}%`,
+        font: "12px sans-serif",
+        fillColor: COLORS.region,
+      });
     }
-    if (checked("show-voxels")) {
-      for (const voxel of component.voxels) {
-        state.voxelPoints.add({ position: cart(voxel[0], voxel[1], voxel[2]), pixelSize: 3, color: COLORS.region.withAlpha(0.45) });
-      }
-    }
-  });
+  }
 }
 
-// ------------------------------------------------------------------ estimation control
+// ================================================================== camera: views, centre, follow
+function viewRadiusM() {
+  const config = state.latestConfig;
+  return (config ? config.max_slant_range_yd : 6000) * YD_TO_M;
+}
+
+function focusPosition(prefer = "estimate") {
+  const snapshot = state.latestSnapshot;
+  if (!snapshot) return null;
+  const estimate = selectedEstimate(snapshot);
+  if (prefer === "estimate" && estimate?.current_position) return { position: estimate.current_position, source: "推定位置" };
+  if (snapshot.target) return { position: snapshot.target.position, source: "真値" };
+  if (estimate?.current_position) return { position: estimate.current_position, source: "推定位置" };
+  return null;
+}
+
+function setProjection(view) {
+  const camera = viewer.camera;
+  const wantOrtho = checked("orthographic") && view === "top";
+  const isOrtho = camera.frustum instanceof Cesium.OrthographicFrustum;
+  if (wantOrtho && !isOrtho) camera.switchToOrthographicFrustum();
+  if (!wantOrtho && isOrtho) camera.switchToPerspectiveFrustum();
+}
+
+function sideHeading(focus) {
+  const choice = $("side-direction").value;
+  if (choice !== "track") return Number(choice);
+  const estimate = selectedEstimate();
+  const course = estimate?.cog_deg ?? state.latestSnapshot?.target?.cog_deg ?? 0;
+  return (course + 90) % 360; // look across the track: the course runs left -> right
+}
+
+function applyView(view) {
+  const focus = focusPosition("estimate");
+  if (!focus) {
+    setMessage("表示対象（推定位置または真値）がまだありません。");
+    return;
+  }
+  const camera = viewer.camera;
+  camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+  setProjection(view);
+  const p = focus.position;
+  const radius = viewRadiusM();
+  const duration = 1.0;
+  if (view === "top") {
+    camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(p.longitude, p.latitude, heightOf(p.depth_ft) + radius * 2.6),
+      orientation: { heading: 0, pitch: -Cesium.Math.PI_OVER_TWO, roll: 0 },
+      duration,
+    });
+  } else if (view === "side") {
+    const heading = sideHeading(p);
+    const distance = radius * 2.4;
+    const from = destination(p, (heading + 180) % 360, distance);
+    camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(from.longitude, from.latitude, heightOf(p.depth_ft)),
+      orientation: { heading: Cesium.Math.toRadians(heading), pitch: 0, roll: 0 },
+      duration,
+    });
+  } else {
+    camera.flyToBoundingSphere(new Cesium.BoundingSphere(cartOf(p), radius), {
+      offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-40), radius * 3.2),
+      duration,
+    });
+  }
+  for (const button of document.querySelectorAll(".vt[data-view]")) button.classList.toggle("active", button.dataset.view === view);
+  state.followAnchor = null;
+  const names = { oblique: "斜視", top: "真上（垂直）", side: "水平（側面）" };
+  setMessage(`視点：${names[view]}（中心：${focus.source}）`);
+  scene.requestRender();
+}
+
+function centerOn(prefer) {
+  const focus = focusPosition(prefer);
+  if (!focus) {
+    setMessage("中心に置く対象がまだありません。");
+    return;
+  }
+  const camera = viewer.camera;
+  camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+  const target = cartOf(focus.position);
+  const range = Cesium.Math.clamp(Cesium.Cartesian3.distance(camera.positionWC, target), 300, viewRadiusM() * 6);
+  // keep the current viewing direction, move so that the target is in the screen centre
+  camera.flyToBoundingSphere(new Cesium.BoundingSphere(target, 1), {
+    offset: new Cesium.HeadingPitchRange(camera.heading, camera.pitch, range),
+    duration: 0.8,
+  });
+  state.followAnchor = null;
+  setMessage(`${focus.source}を画面中心にしました。`);
+  scene.requestRender();
+}
+
+function followEstimate() {
+  if (!checked("follow-estimate")) {
+    state.followAnchor = null;
+    return;
+  }
+  const estimate = selectedEstimate();
+  if (!estimate?.current_position) return;
+  const now = cartOf(estimate.current_position);
+  if (state.followAnchor) {
+    // translate the camera by the estimate's displacement: orientation and zoom stay as set
+    const delta = Cesium.Cartesian3.subtract(now, state.followAnchor, new Cesium.Cartesian3());
+    viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+    Cesium.Cartesian3.add(viewer.camera.position, delta, viewer.camera.position);
+  }
+  state.followAnchor = now;
+}
+
+for (const button of document.querySelectorAll(".vt[data-view]")) {
+  button.addEventListener("click", () => applyView(button.dataset.view));
+}
+$("center-estimate").addEventListener("click", () => centerOn("estimate"));
+$("center-truth").addEventListener("click", () => centerOn("truth"));
+$("follow-estimate").addEventListener("change", () => {
+  state.followAnchor = null;
+  if (checked("follow-estimate")) centerOn("estimate");
+});
+$("orthographic").addEventListener("change", () => {
+  const active = document.querySelector(".vt[data-view].active");
+  setProjection(active ? active.dataset.view : "oblique");
+  scene.requestRender();
+});
+$("show-fps").addEventListener("change", () => {
+  scene.debugShowFramesPerSecond = checked("show-fps");
+  // FPS needs continuous rendering to be meaningful
+  scene.requestRenderMode = !checked("show-fps");
+  scene.requestRender();
+});
+
+// ================================================================== estimation control
 function updateRunState(snapshot) {
   const control = snapshot.estimation || {};
   const badge = $("run-badge");
   badge.textContent = control.running ? "推定中" : "停止中";
   badge.className = `badge ${control.running ? "running" : "stopped"}`;
-  const elapsed = control.running ? snapshot.tick - control.started_tick : (control.stopped_tick ?? snapshot.tick) - control.started_tick;
-  setText("run-info", `Run #${control.run_id ?? 0}　開始 ${control.started_tick ?? 0} s　経過 ${Math.max(0, elapsed || 0)} s` +
+  const end = control.running ? snapshot.tick : (control.stopped_tick ?? snapshot.tick);
+  setText("run-info", `Run #${control.run_id ?? 0}　開始 ${control.started_tick ?? 0} s　経過 ${Math.max(0, end - (control.started_tick ?? 0))} s` +
     (control.running ? "" : `　停止 ${control.stopped_tick ?? "--"} s`));
-  $("est-start").disabled = false;
   $("est-stop").disabled = !control.running;
   const key = `${snapshot.generation}-${control.run_id}`;
   if (key !== state.runKey) {
@@ -369,24 +622,32 @@ async function postControl(path, message) {
   return response.json();
 }
 $("est-start").addEventListener("click", () => {
-  postControl("/api/estimation/start", "推定を開始しました（現在時刻以降の観測を使用）。")
-    .catch((error) => setMessage(`推定開始エラー: ${error.message}`));
+  postControl("/api/estimation/start", "推定を開始しました（現在時刻以降の観測を使用）。").catch((error) => setMessage(`推定開始エラー: ${error.message}`));
 });
 $("est-stop").addEventListener("click", () => {
-  postControl("/api/estimation/stop", "推定を停止しました（最後の推定結果を保持表示）。")
-    .catch((error) => setMessage(`推定停止エラー: ${error.message}`));
+  postControl("/api/estimation/stop", "推定を停止しました（最後の推定結果を保持表示）。").catch((error) => setMessage(`推定停止エラー: ${error.message}`));
 });
 
-// ------------------------------------------------------------------ comparison
-function rowHtml(label, est, truth, err, sigma) {
-  return `<tr><td>${label}</td><td>${est}</td><td>${truth}</td><td>${err}</td><td>${sigma}</td></tr>`;
+// ================================================================== comparison (cards, no horizontal scroll)
+function judge(error, sigma) {
+  if (error == null || !Number.isFinite(error) || !(sigma > 0)) return { cls: "s-none", text: "" };
+  const ratio = Math.abs(error) / sigma;
+  if (ratio <= 1) return { cls: "s-good", text: "● 1σ内" };
+  if (ratio <= 3) return { cls: "s-warn", text: "▲ 3σ内" };
+  return { cls: "s-bad", text: "■ 3σ超" };
+}
+
+function card(title, errorText, status, rows, wide = false) {
+  const body = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+  return `<div class="card${wide ? " wide" : ""}"><div class="card-head"><span class="card-title">${title}</span>` +
+    `<span class="status ${status.cls}">${status.text}</span></div><div class="card-err">${errorText}</div><dl>${body}</dl></div>`;
 }
 
 function updateComparison(snapshot, estimate) {
   const target = snapshot.target;
-  const tbody = $("compare-table").querySelector("tbody");
+  const container = $("compare-cards");
   if (!estimate || !estimate.current_position || !target) {
-    tbody.innerHTML = `<tr><td colspan="5">${snapshot.estimation?.running ? "探知待ち（推定前）" : "推定停止中"}</td></tr>`;
+    container.innerHTML = `<p class="empty">${snapshot.estimation?.running ? "探知待ち（推定前）" : "推定停止中"}</p>`;
     setText("region-check", "--");
     return;
   }
@@ -397,37 +658,59 @@ function updateComparison(snapshot, estimate) {
   const hErr = Math.hypot(d.east, d.north) / YD_TO_M;
   const trueVertical = target.through_water_velocity.vertical_fps;
   const trueBias = snapshot.config.source.shared_recognition_bias_hz;
-  const rows = [
-    rowHtml("位置", latLonText(ep), latLonText(tp), `${fmt(hErr, 0)} YD`, `${fmt(u.horizontal_major_yd, 0)}×${fmt(u.horizontal_minor_yd, 0)} YD`),
-    rowHtml("　東西 / 南北", "", "", `${signed(d.east / YD_TO_M, 0)} / ${signed(d.north / YD_TO_M, 0)} YD`, ""),
-    rowHtml("深度", `${fmt(estimate.depth_ft, 0)} Ft`, `${fmt(tp.depth_ft, 0)} Ft`, `${signed(estimate.depth_ft - tp.depth_ft, 0)} Ft`, `${fmt(u.depth_sigma_ft, 0)} Ft`),
-    rowHtml("HDG", `${fmt(estimate.hdg_deg)}°`, `${fmt(target.hdg_deg)}°`, `${signed(angleDiff(estimate.hdg_deg, target.hdg_deg))}°`, `${fmt(u.hdg_sigma_deg)}°`),
-    rowHtml("COG", `${fmt(estimate.cog_deg)}°`, `${fmt(target.cog_deg)}°`, `${signed(angleDiff(estimate.cog_deg, target.cog_deg))}°`, `${fmt(u.cog_sigma_deg)}°`),
-    rowHtml("対水速力", `${fmt(estimate.through_water_speed_kt)} kt`, `${fmt(target.through_water_speed_kt)} kt`, `${signed(estimate.through_water_speed_kt - target.through_water_speed_kt, 2)} kt`, `${fmt(u.through_water_speed_sigma_kt, 2)} kt`),
-    rowHtml("対地速力", `${fmt(estimate.ground_speed_kt)} kt`, `${fmt(target.ground_speed_kt)} kt`, `${signed(estimate.ground_speed_kt - target.ground_speed_kt, 2)} kt`, `${fmt(u.ground_speed_sigma_kt, 2)} kt`),
-    rowHtml("深度変化率", `${fmt(estimate.vertical_rate_fps, 2)} Ft/s`, `${fmt(trueVertical, 2)} Ft/s`, `${signed(estimate.vertical_rate_fps - trueVertical, 2)} Ft/s`, ""),
-    rowHtml("周波数偏り", `${fmt(estimate.source_bias_hz, 3)} Hz`, `${fmt(trueBias, 3)} Hz`, `${signed(estimate.source_bias_hz - trueBias, 3)} Hz`, `${fmt(u.bias_sigma_hz, 3)} Hz`),
+  const depthErr = estimate.depth_ft - tp.depth_ft;
+  const hdgErr = angleDiff(estimate.hdg_deg, target.hdg_deg);
+  const cogErr = angleDiff(estimate.cog_deg, target.cog_deg);
+  const stwErr = estimate.through_water_speed_kt - target.through_water_speed_kt;
+  const sogErr = estimate.ground_speed_kt - target.ground_speed_kt;
+  const biasErr = estimate.source_bias_hz - trueBias;
+  const cards = [
+    card("水平位置", `${fmt(hErr, 0)} <small>YD</small>`, judge(hErr, u.horizontal_major_yd), [
+      ["推定", `${latText(ep.latitude)}<br>${lonText(ep.longitude)}`],
+      ["真値", `${latText(tp.latitude)}<br>${lonText(tp.longitude)}`],
+      ["東西/南北", `${signed(d.east / YD_TO_M, 0)} / ${signed(d.north / YD_TO_M, 0)} YD`],
+      ["1σ 長×短", `${fmt(u.horizontal_major_yd, 0)} × ${fmt(u.horizontal_minor_yd, 0)} YD`],
+    ], true),
+    card("深度", `${signed(depthErr, 0)} <small>Ft</small>`, judge(depthErr, u.depth_sigma_ft), [
+      ["推定", `${fmt(estimate.depth_ft, 0)} Ft`], ["真値", `${fmt(tp.depth_ft, 0)} Ft`], ["1σ", `${fmt(u.depth_sigma_ft, 0)} Ft`],
+    ]),
+    card("HDG", `${signed(hdgErr)}<small>°</small>`, judge(hdgErr, u.hdg_sigma_deg), [
+      ["推定", `${fmt(estimate.hdg_deg)}°`], ["真値", `${fmt(target.hdg_deg)}°`], ["1σ", `${fmt(u.hdg_sigma_deg)}°`],
+    ]),
+    card("COG", `${signed(cogErr)}<small>°</small>`, judge(cogErr, u.cog_sigma_deg), [
+      ["推定", `${fmt(estimate.cog_deg)}°`], ["真値", `${fmt(target.cog_deg)}°`], ["1σ", `${fmt(u.cog_sigma_deg)}°`],
+    ]),
+    card("対水速力", `${signed(stwErr, 2)} <small>kt</small>`, judge(stwErr, u.through_water_speed_sigma_kt), [
+      ["推定", `${fmt(estimate.through_water_speed_kt)} kt`], ["真値", `${fmt(target.through_water_speed_kt)} kt`], ["1σ", `${fmt(u.through_water_speed_sigma_kt, 2)} kt`],
+    ]),
+    card("対地速力", `${signed(sogErr, 2)} <small>kt</small>`, judge(sogErr, u.ground_speed_sigma_kt), [
+      ["推定", `${fmt(estimate.ground_speed_kt)} kt`], ["真値", `${fmt(target.ground_speed_kt)} kt`], ["1σ", `${fmt(u.ground_speed_sigma_kt, 2)} kt`],
+    ]),
+    card("深度変化率", `${signed(estimate.vertical_rate_fps - trueVertical, 2)} <small>Ft/s</small>`, { cls: "s-none", text: "" }, [
+      ["推定", `${fmt(estimate.vertical_rate_fps, 2)} Ft/s`], ["真値", `${fmt(trueVertical, 2)} Ft/s`],
+    ]),
+    card("周波数偏り", `${signed(biasErr, 3)} <small>Hz</small>`, judge(biasErr, u.bias_sigma_hz), [
+      ["推定", `${fmt(estimate.source_bias_hz, 3)} Hz`], ["真値", `${fmt(trueBias, 3)} Hz`], ["1σ", `${fmt(u.bias_sigma_hz, 3)} Hz`],
+    ]),
   ];
-  tbody.innerHTML = rows.join("");
+  container.innerHTML = cards.join("");
 
   const region = estimate.presence_region;
   const inside = region.components.find((c) =>
     pointInPolygon(tp.longitude, tp.latitude, c.polygon) && tp.depth_ft >= c.min_depth_ft && tp.depth_ft <= c.max_depth_ft);
-  setText("region-check", `真値は推定存在圏（${fmt(region.probability_pct, 0)} %、${region.components.length} 領域）の` +
-    (inside ? `内側（確率 ${fmt(inside.probability_mass_pct, 0)} % の領域）` : "外側") +
-    `　｜　状態 ${estimate.observability_status}　｜　入力: ${estimate.metadata?.observation_inputs || "--"}`);
+  $("region-check").innerHTML = `<b>${escapeHtml(estimate.observability_status)}</b>　真値は推定存在圏（${fmt(region.probability_pct, 0)} %・${region.components.length} 領域）の` +
+    (inside ? `<span class="s-good">内側</span>` : `<span class="s-bad">外側</span>`) +
+    `<br><small>入力：${escapeHtml(estimate.metadata?.observation_inputs || "--")}</small>`;
 
   const last = state.history[state.history.length - 1];
   if (!last || last.tick !== estimate.tick) {
-    state.history.push({
-      tick: estimate.tick,
-      h: hErr,
-      hs: u.horizontal_major_yd,
-      d: estimate.depth_ft - tp.depth_ft,
-      ds: u.depth_sigma_ft,
-    });
+    state.history.push({ tick: estimate.tick, h: hErr, hs: u.horizontal_major_yd, d: depthErr, ds: u.depth_sigma_ft });
     if (state.history.length > MAX_HISTORY) state.history.shift();
   }
+}
+
+function pair(a, b) {
+  return `<span class="est">${a}</span><span class="tru">${b}</span>`;
 }
 
 function updateRelative(snapshot, estimate) {
@@ -435,18 +718,16 @@ function updateRelative(snapshot, estimate) {
   const bearings = new Map((snapshot.bearings || []).map((b) => [b.observer_id, b]));
   const estRel = new Map((estimate?.relative || []).map((r) => [r.observer_id, r]));
   const detected = new Set((snapshot.doppler?.observations || []).filter((o) => o.detected).map((o) => o.observer_id));
-  const ids = snapshot.observers.map((r) => r.state.observer_id);
-  const rows = ids
+  const rows = snapshot.observers
+    .map((r) => r.state.observer_id)
     .map((id) => ({ id, est: estRel.get(id), tr: truth.get(id), brg: bearings.get(id), det: detected.has(id) }))
     .sort((a, b) => Number(b.det) - Number(a.det) || (a.tr?.slant_range_yd ?? 1e9) - (b.tr?.slant_range_yd ?? 1e9))
     .slice(0, 40)
-    .map((r) => `<tr class="${r.det ? "det" : ""}"><td>${r.id}</td><td>${r.det ? "●" : "–"}</td>` +
-      `<td>${fmt(r.est?.relative_speed_kt)} / ${fmt(r.tr?.relative_speed_kt)} kt</td>` +
-      `<td>${fmt(r.est?.slant_range_yd, 0)} / ${fmt(r.tr?.slant_range_yd, 0)} YD</td>` +
-      `<td>${r.brg ? fmt(r.brg.bearing_deg) : "--"} / ${fmt(r.tr?.true_bearing_deg)}°</td></tr>`);
-  $("relative-table").querySelector("tbody").innerHTML = rows.join("") || "<tr><td colspan='5'>観測者なし</td></tr>";
-
-  // true CPA (minimum true slant range since the run started)
+    .map((r) => `<tr class="${r.det ? "det" : ""}"><td>${r.det ? "● " : "– "}${escapeHtml(r.id)}</td>` +
+      `<td>${pair(`${fmt(r.est?.relative_speed_kt)} kt`, `${fmt(r.tr?.relative_speed_kt)} kt`)}</td>` +
+      `<td>${pair(`${fmt(r.est?.slant_range_yd, 0)} YD`, `${fmt(r.tr?.slant_range_yd, 0)} YD`)}</td>` +
+      `<td>${pair(r.brg ? `${fmt(r.brg.bearing_deg)}°` : "--", `${fmt(r.tr?.true_bearing_deg)}°`)}</td></tr>`);
+  $("relative-table").querySelector("tbody").innerHTML = rows.join("") || "<tr><td colspan='4'>観測者なし</td></tr>";
   for (const t of snapshot.doppler?.truth || []) {
     const best = state.trueCpa.get(t.observer_id);
     if (!best || t.slant_range_yd < best.range) state.trueCpa.set(t.observer_id, { range: t.slant_range_yd, tick: t.tick });
@@ -460,10 +741,10 @@ function updateCpa(cpa) {
     .slice(0, 30)
     .map((item) => {
       const tr = state.trueCpa.get(item.observer_id);
-      return `<tr class="${item.final ? "" : "provisional"}"><td>${item.observer_id}#${item.pass_index}</td>` +
-        `<td>${fmt(item.cpa_tick, 0)}±${fmt(item.cpa_tick_sigma_s, 0)} / ${tr ? tr.tick : "--"} s</td>` +
-        `<td>${fmt(item.cpa_slant_range_yd, 0)}±${fmt(item.cpa_slant_range_sigma_yd, 0)} / ${tr ? fmt(tr.range, 0) : "--"} YD</td>` +
-        `<td>${fmt(item.relative_speed_kt, 2)}±${fmt(item.relative_speed_sigma_kt, 2)} kt</td></tr>`;
+      return `<tr class="${item.final ? "" : "provisional"}"><td>${escapeHtml(item.observer_id)}#${item.pass_index}</td>` +
+        `<td>${pair(`${fmt(item.cpa_tick, 0)}±${fmt(item.cpa_tick_sigma_s, 0)} s`, `${tr ? tr.tick : "--"} s`)}</td>` +
+        `<td>${pair(`${fmt(item.cpa_slant_range_yd, 0)}±${fmt(item.cpa_slant_range_sigma_yd, 0)} YD`, `${tr ? fmt(tr.range, 0) : "--"} YD`)}</td>` +
+        `<td>${fmt(item.relative_speed_kt, 2)}<br><small>±${fmt(item.relative_speed_sigma_kt, 2)} kt</small></td></tr>`;
     });
   $("cpa-table").querySelector("tbody").innerHTML = rows.join("") || "<tr><td colspan='4'>最近接通過なし</td></tr>";
 }
@@ -480,27 +761,25 @@ function updateCurrent(current, config) {
   const g = current.gradient_per_nm;
   const tg = t.gradient_per_nm;
   tbody.innerHTML = [
-    `<tr><td>流速（推定基準点）</td><td>${dirSpeed(b.east_kt, b.north_kt)}</td><td>${dirSpeed(t.base_velocity.east_kt, t.base_velocity.north_kt)}（基準点）</td></tr>`,
-    `<tr><td>∂u/∂x, ∂v/∂y (kt/NM)</td><td>${fmt(g[0][0], 3)}, ${fmt(g[1][1], 3)}</td><td>${fmt(tg[0][0], 3)}, ${fmt(tg[1][1], 3)}</td></tr>`,
-    `<tr><td>使用観測者 / 期間</td><td>${current.observer_count} / ${fmt(current.window_seconds / 60, 0)} 分</td><td></td></tr>`,
-    `<tr><td>当てはめ残差</td><td>${fmt(current.residual_kt, 3)} kt</td><td></td></tr>`,
+    `<tr><td>流速</td><td>${dirSpeed(b.east_kt, b.north_kt)}</td><td>${dirSpeed(t.base_velocity.east_kt, t.base_velocity.north_kt)}</td></tr>`,
+    `<tr><td>∂u/∂x, ∂v/∂y<br><small>kt/NM</small></td><td>${fmt(g[0][0], 3)}, ${fmt(g[1][1], 3)}</td><td>${fmt(tg[0][0], 3)}, ${fmt(tg[1][1], 3)}</td></tr>`,
+    `<tr><td>観測者 / 期間</td><td>${current.observer_count} / ${fmt(current.window_seconds / 60, 0)} 分</td><td>--</td></tr>`,
+    `<tr><td>当てはめ残差</td><td>${fmt(current.residual_kt, 3)} kt</td><td>--</td></tr>`,
   ].join("");
 }
 
-// ------------------------------------------------------------------ charts (canvas)
-const CHART = {
-  series: "#3987e5",
-  band: "rgba(160, 180, 200, 0.22)",
-  grid: "rgba(143, 174, 203, 0.16)",
-  axis: "#8faecb",
-  text: "#c9dcef",
-};
+// ================================================================== charts (canvas)
+const CHART = { series: "#3987e5", band: "rgba(160, 180, 200, 0.22)", grid: "rgba(143, 174, 203, 0.16)", axis: "#8faecb", text: "#c9dcef" };
 
 function niceMax(value) {
   if (!(value > 0)) return 1;
   const exp = Math.pow(10, Math.floor(Math.log10(value)));
   const f = value / exp;
   return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * exp;
+}
+
+function nearest(points, tick) {
+  return points.reduce((best, q) => (Math.abs(q.tick - tick) < Math.abs(best.tick - tick) ? q : best));
 }
 
 function drawChart(canvas, points, opts) {
@@ -532,8 +811,6 @@ function drawChart(canvas, points, opts) {
   const x = (t) => pad.l + ((t - t0) / Math.max(t1 - t0, 1)) * w;
   const y = (v) => pad.t + h - ((v - yMin) / (yMax - yMin)) * h;
   canvas._chart.x = x;
-  canvas._chart.y = y;
-  // grid + y labels
   ctx.strokeStyle = CHART.grid;
   ctx.lineWidth = 1;
   const steps = opts.symmetric ? [-yMax, -yMax / 2, 0, yMax / 2, yMax] : [0, yMax / 2, yMax];
@@ -550,33 +827,26 @@ function drawChart(canvas, points, opts) {
   ctx.fillText(`${t0} s`, pad.l, height - 5);
   ctx.textAlign = "right";
   ctx.fillText(`${t1} s`, pad.l + w, height - 5);
-  // sigma band
   ctx.fillStyle = CHART.band;
   ctx.beginPath();
   points.forEach((p, i) => (i ? ctx.lineTo(x(p.tick), y(opts.sigma(p))) : ctx.moveTo(x(p.tick), y(opts.sigma(p)))));
-  for (let i = points.length - 1; i >= 0; i -= 1) {
-    const p = points[i];
-    ctx.lineTo(x(p.tick), y(opts.symmetric ? -opts.sigma(p) : 0));
-  }
+  for (let i = points.length - 1; i >= 0; i -= 1) ctx.lineTo(x(points[i].tick), y(opts.symmetric ? -opts.sigma(points[i]) : 0));
   ctx.closePath();
   ctx.fill();
-  // series line
   ctx.strokeStyle = CHART.series;
   ctx.lineWidth = 2;
   ctx.lineJoin = "round";
   ctx.beginPath();
   points.forEach((p, i) => (i ? ctx.lineTo(x(p.tick), y(opts.value(p))) : ctx.moveTo(x(p.tick), y(opts.value(p)))));
   ctx.stroke();
-  // direct labels at the right end (text in text ink)
   const lastPoint = points[points.length - 1];
   ctx.fillStyle = CHART.text;
   ctx.textAlign = "left";
   ctx.fillText("誤差", pad.l + w + 3, y(opts.value(lastPoint)) + 3);
   ctx.fillStyle = CHART.axis;
   ctx.fillText("1σ", pad.l + w + 3, y(opts.sigma(lastPoint)) - 4);
-  // hover crosshair
   if (canvas._hoverTick != null) {
-    const p = points.reduce((best, q) => (Math.abs(q.tick - canvas._hoverTick) < Math.abs(best.tick - canvas._hoverTick) ? q : best));
+    const p = nearest(points, canvas._hoverTick);
     ctx.strokeStyle = CHART.axis;
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -609,11 +879,10 @@ for (const [id, opts] of Object.entries(chartDefs)) {
     const chart = canvas._chart;
     if (!chart || !chart.x || chart.points.length < 2) return;
     const rect = canvas.getBoundingClientRect();
-    const px = event.clientX - rect.left;
     const t0 = chart.points[0].tick;
     const t1 = chart.points[chart.points.length - 1].tick;
-    canvas._hoverTick = t0 + ((px - chart.pad.l) / chart.w) * (t1 - t0);
-    const p = chart.points.reduce((best, q) => (Math.abs(q.tick - canvas._hoverTick) < Math.abs(best.tick - canvas._hoverTick) ? q : best));
+    canvas._hoverTick = t0 + ((event.clientX - rect.left - chart.pad.l) / chart.w) * (t1 - t0);
+    const p = nearest(chart.points, canvas._hoverTick);
     const tip = $("chart-tooltip");
     tip.hidden = false;
     tip.textContent = `${p.tick} s　誤差 ${signed(opts.value(p), 0)} ${opts.unit}　1σ ${fmt(opts.sigma(p), 0)} ${opts.unit}`;
@@ -628,7 +897,7 @@ for (const [id, opts] of Object.entries(chartDefs)) {
   });
 }
 
-// ------------------------------------------------------------------ forms
+// ================================================================== forms
 function populateForms(config) {
   state.latestConfig = config;
   if (state.formsLoaded) return;
@@ -672,11 +941,7 @@ function populateForms(config) {
 async function putConfig(mutate) {
   const next = structuredClone(state.latestConfig);
   mutate(next);
-  const response = await fetch("/api/config", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(next),
-  });
+  const response = await fetch("/api/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next) });
   if (!response.ok) throw new Error(await response.text());
   state.latestConfig = await response.json();
 }
@@ -690,8 +955,7 @@ $("initial-form").addEventListener("submit", (event) => {
     t.initial_position = { latitude: num("init-lat"), longitude: num("init-lon"), depth_ft: num("init-depth") };
     t.initial_hdg_deg = num("init-hdg") % 360;
     t.initial_through_water_speed_kt = num("init-speed");
-    // the base motion starts as constant course/speed/depth = the initial state
-    t.desired_hdg_deg = t.initial_hdg_deg;
+    t.desired_hdg_deg = t.initial_hdg_deg; // base motion: constant course / speed / depth
     t.desired_through_water_speed_kt = t.initial_through_water_speed_kt;
     t.desired_depth_ft = t.initial_position.depth_ft;
     next.current_field.reference_position = { ...t.initial_position, depth_ft: 0 };
@@ -751,11 +1015,7 @@ $("config-form").addEventListener("submit", (event) => {
 $("placement-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const body = { position: { latitude: num("place-lat"), longitude: num("place-lon"), depth_ft: num("place-depth") } };
-  const response = await fetch("/api/observers/placements", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const response = await fetch("/api/observers/placements", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (response.ok) {
     const result = await response.json();
     setMessage(`配置を予約しました（待機 ${result.pending_placements} 件）。観測者コンテナを追加してください。`);
@@ -764,9 +1024,9 @@ $("placement-form").addEventListener("submit", async (event) => {
   }
 });
 
-const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+const handler = new Cesium.ScreenSpaceEventHandler(scene.canvas);
 handler.setInputAction((movement) => {
-  const cartesian = viewer.camera.pickEllipsoid(movement.position, viewer.scene.globe.ellipsoid);
+  const cartesian = viewer.camera.pickEllipsoid(movement.position, scene.globe.ellipsoid);
   if (!cartesian) return;
   const carto = Cesium.Cartographic.fromCartesian(cartesian);
   const lat = Cesium.Math.toDegrees(carto.latitude).toFixed(4);
@@ -783,10 +1043,10 @@ handler.setInputAction((movement) => {
   }
 }, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
 
-for (const id of ["show-truth", "show-online", "show-smoothed", "show-region", "show-voxels",
-  "show-range", "show-bearing", "show-error-line", "depth-exaggeration"]) {
+for (const id of ["show-truth", "show-online", "show-smoothed", "show-region", "show-voxels", "show-range", "show-bearing", "show-error-line", "depth-exaggeration"]) {
   $(id).addEventListener("change", () => {
     state.lastRegionKey = "";
+    state.followAnchor = null;
     if (state.latestSnapshot) render(state.latestSnapshot);
   });
 }
@@ -794,12 +1054,13 @@ for (const input of document.querySelectorAll("input[name='panel-mode']")) {
   input.addEventListener("change", () => {
     state.lastRegionKey = "";
     state.history = [];
+    state.followAnchor = null;
     if (state.latestSnapshot) render(state.latestSnapshot);
   });
 }
 if (window.addEventListener) window.addEventListener("resize", drawCharts);
 
-// ------------------------------------------------------------------ render loop
+// ================================================================== render loop
 function render(snapshot) {
   state.latestSnapshot = snapshot;
   setText("tick", snapshot.tick);
@@ -809,7 +1070,7 @@ function render(snapshot) {
   updateObservers(snapshot.observers, snapshot.doppler, snapshot.config);
   updateBearings(snapshot.bearings || [], snapshot.config);
   updateEstimateLayers(snapshot.estimates, snapshot.target);
-  const estimate = snapshot.estimates.find((item) => item.mode === selectedMode()) || snapshot.estimates[0];
+  const estimate = selectedEstimate(snapshot);
   updateRegion(estimate);
   setText("observability", estimate?.observability_status || (snapshot.estimation?.running ? "--" : "推定停止中"));
   setText("position-basis", estimate?.metadata?.position_basis || "--");
@@ -818,13 +1079,12 @@ function render(snapshot) {
   updateCpa(snapshot.cpa || []);
   updateCurrent(snapshot.current_estimate, snapshot.config);
   drawCharts();
+  followEstimate();
   if (state.firstFix && snapshot.target) {
-    viewer.camera.flyTo({
-      destination: Cesium.Cartesian3.fromDegrees(snapshot.target.position.longitude, snapshot.target.position.latitude - 0.12, 16000),
-      orientation: { heading: 0, pitch: Cesium.Math.toRadians(-45), roll: 0 },
-    });
     state.firstFix = false;
+    applyView("oblique");
   }
+  scene.requestRender();
 }
 
 function connect() {
@@ -836,6 +1096,7 @@ function connect() {
       render(JSON.parse(event.data));
     } catch (error) {
       setMessage(`描画エラー: ${error.message}`);
+      if (window.console) console.error(error);
     }
   });
   socket.addEventListener("close", () => {
@@ -845,4 +1106,5 @@ function connect() {
   socket.addEventListener("error", () => socket.close());
 }
 
+window.aquaDrift = { viewer, state, applyView, centerOn }; // for diagnostics / E2E tests
 connect();

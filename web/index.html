@@ -19,6 +19,29 @@
           <span><i class="sw observer"></i>観測者（探知中は緑）</span>
           <span><i class="sw bearing"></i>方位観測</span>
         </div>
+        <div id="view-toolbar" role="toolbar" aria-label="視点">
+          <div class="vt-row">
+            <button type="button" class="vt" data-view="oblique" title="斜め上から見る">斜視</button>
+            <button type="button" class="vt" data-view="top" title="真上から見下ろす（垂直方向）">真上</button>
+            <button type="button" class="vt" data-view="side" title="水平方向から見る（側面）">水平</button>
+            <select id="side-direction" aria-label="水平視点の方向" title="水平視点で見る方向">
+              <option value="track">進行方向の真横</option>
+              <option value="0">南から北を見る</option>
+              <option value="90">西から東を見る</option>
+              <option value="180">北から南を見る</option>
+              <option value="270">東から西を見る</option>
+            </select>
+          </div>
+          <div class="vt-row">
+            <button type="button" id="center-estimate" class="vt primary" title="推定位置を画面中心へ">◎ 推定位置を中心</button>
+            <button type="button" id="center-truth" class="vt" title="真値を画面中心へ">真値を中心</button>
+          </div>
+          <div class="vt-row checks">
+            <label><input id="follow-estimate" type="checkbox" />推定位置に追従</label>
+            <label><input id="orthographic" type="checkbox" />正射投影</label>
+            <label><input id="show-fps" type="checkbox" />FPS</label>
+          </div>
+        </div>
         <div id="status-strip">
           <span id="connection-status">接続中</span>
           <span>時刻 <strong id="tick">0</strong> s</span>
@@ -28,6 +51,7 @@
         </div>
       </section>
 
+      <div id="panel-resizer" role="separator" aria-orientation="vertical" title="ドラッグでパネル幅を変更"></div>
       <aside id="control-panel">
         <header>
           <h1>AQUA-DRIFT</h1>
@@ -60,13 +84,9 @@
         <div id="tab-compare" class="tab-panel active" role="tabpanel">
           <section>
             <h2>推定と真値の比較</h2>
-            <div class="table-wrap tall">
-              <table id="compare-table">
-                <thead><tr><th>項目</th><th>推定</th><th>真値</th><th>誤差</th><th>推定1σ</th></tr></thead>
-                <tbody></tbody>
-              </table>
-            </div>
-            <p class="note" id="region-check">--</p>
+            <p class="summary" id="region-check">--</p>
+            <div id="compare-cards" class="cards"></div>
+            <p class="note">判定：|誤差| ÷ 推定1σ が 1 以下「1σ内」、3 以下「3σ内」、それ以上「3σ超」。</p>
           </section>
 
           <section>
@@ -86,7 +106,8 @@
             <h2>観測者との相対量</h2>
             <div class="table-wrap">
               <table id="relative-table">
-                <thead><tr><th>観測者</th><th>探知</th><th>相対速力 推定/真値</th><th>斜距離 推定/真値</th><th>方位 観測/真値</th></tr></thead>
+                <colgroup><col style="width:24%" /><col style="width:24%" /><col style="width:28%" /><col style="width:24%" /></colgroup>
+                <thead><tr><th>観測者</th><th>相対速力<br /><small>推定 / 真値</small></th><th>斜距離<br /><small>推定 / 真値</small></th><th>方位<br /><small>観測 / 真値</small></th></tr></thead>
                 <tbody></tbody>
               </table>
             </div>
@@ -96,7 +117,8 @@
             <h2>最近接解析（ドップラー）</h2>
             <div class="table-wrap">
               <table id="cpa-table">
-                <thead><tr><th>観測者</th><th>最近接時刻 推定/真値</th><th>最近接斜距離 推定/真値</th><th>相対速力</th></tr></thead>
+                <colgroup><col style="width:22%" /><col style="width:26%" /><col style="width:30%" /><col style="width:22%" /></colgroup>
+                <thead><tr><th>観測者</th><th>最近接時刻<br /><small>推定 / 真値</small></th><th>最近接斜距離<br /><small>推定 / 真値</small></th><th>相対速力</th></tr></thead>
                 <tbody></tbody>
               </table>
             </div>
@@ -107,6 +129,7 @@
             <h2>流速場（観測者漂流から推定）</h2>
             <div class="table-wrap">
               <table id="current-table">
+                <colgroup><col style="width:34%" /><col style="width:33%" /><col style="width:33%" /></colgroup>
                 <thead><tr><th>項目</th><th>推定</th><th>真値</th></tr></thead>
                 <tbody></tbody>
               </table>
@@ -190,7 +213,7 @@
             <label class="check"><input id="show-online" type="checkbox" checked />推定（過去航跡非更新）</label>
             <label class="check"><input id="show-smoothed" type="checkbox" checked />推定（過去航跡更新）</label>
             <label class="check"><input id="show-region" type="checkbox" checked />推定存在圏</label>
-            <label class="check"><input id="show-voxels" type="checkbox" checked />存在圏ボクセル</label>
+            <label class="check"><input id="show-voxels" type="checkbox" checked />存在圏ボクセル（GPU描画の立体）</label>
             <label class="check"><input id="show-bearing" type="checkbox" checked />方位観測線</label>
             <label class="check"><input id="show-error-line" type="checkbox" checked />推定–真値の誤差線</label>
             <label class="check"><input id="show-range" type="checkbox" />観測者の上限斜距離</label>
