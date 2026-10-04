@@ -97,59 +97,25 @@ def main() -> int:
         except Exception:  # noqa: BLE001
             fail("comparison cards did not appear within 4 min")
         page.wait_for_timeout(3000)
-        gl = page.evaluate(
-            """() => { const s = window.aquaDrift.viewer.scene; return {
-              webgl2: !!s.context.webgl2, msaa: s.msaaSamples, requestRenderMode: s.requestRenderMode,
-              resolutionScale: window.aquaDrift.viewer.resolutionScale,
-              primitives: s.primitives.length }; }"""
-        )
-        note(f"GPU: {json.dumps(gl)}")
-        if not gl["webgl2"]:
-            fail("WebGL2 context not active")
-        if gl["msaa"] < 2:
-            fail(f"MSAA not active (msaaSamples={gl['msaa']})")
-        if not gl["requestRenderMode"]:
-            fail("requestRenderMode is off")
-        message = page.inner_text("#message")
-        if message.startswith("描画エラー"):
-            fail(f"render error shown: {message}")
-        page.screenshot(path=str(out / "01-initial.png"))
-
-        for width in (1600, 1280):
-            page.set_viewport_size({"width": width, "height": 1000})
-            page.wait_for_timeout(800)
-            overflow = page.evaluate(OVERFLOW_JS)
-            if overflow:
-                fail(f"horizontal overflow at {width}px: {overflow}")
-            else:
-                note(f"no horizontal overflow at viewport {width}px")
-        page.set_viewport_size({"width": 1600, "height": 1000})
-
-        expected_pitch = {"top": -90.0, "side": 0.0, "oblique": None}
-        for view in ("top", "side", "oblique"):
-            page.click(f".vt[data-view='{view}']")
-            page.wait_for_timeout(2500)
-            pitch = page.evaluate("() => Cesium.Math.toDegrees(window.aquaDrift.viewer.camera.pitch)")
-            note(f"view {view}: camera pitch {pitch:.1f} deg")
-            target = expected_pitch[view]
-            if target is not None and abs(pitch - target) > 3:
-                fail(f"view '{view}' pitch {pitch:.1f} deg, expected {target}")
-            if view == "oblique" and not (-80 < pitch < -10):
-                fail(f"oblique pitch {pitch:.1f} deg out of range")
-            page.screenshot(path=str(out / f"02-view-{view}.png"))
-
-        page.click("#center-estimate")
-        page.wait_for_timeout(2000)
-        pos = page.evaluate(CENTER_JS)
-        if pos is None:
-            fail("could not project the estimate to the screen")
-        else:
-            dx = pos["x"] - pos["cw"] / 2
-            dy = pos["y"] - pos["ch"] / 2
-            note(f"centre-on-estimate offset from screen centre: {dx:.0f}, {dy:.0f} px")
-            if math.hypot(dx, dy) > 0.05 * max(pos["cw"], pos["ch"]):
-                fail(f"estimate not centred after button: offset {dx:.0f},{dy:.0f} px")
-        page.screenshot(path=str(out / "03-centered.png"))
+        def gpu_info() -> None:
+            gl = page.evaluate(
+                """() => { const s = window.aquaDrift.viewer.scene; return {
+                  webgl2: !!s.context.webgl2, msaa: s.msaaSamples, requestRenderMode: s.requestRenderMode,
+                  resolutionScale: window.aquaDrift.viewer.resolutionScale, primitives: s.primitives.length,
+                  renderer: (() => { try { const g = s.context._gl; const d = g.getExtension('WEBGL_debug_renderer_info');
+                    return d ? g.getParameter(d.UNMASKED_RENDERER_WEBGL) : g.getParameter(g.RENDERER); } catch (e) { return '?'; } })() }; }"""
+            )
+            note(f"GPU: {json.dumps(gl)}")
+            if not gl["webgl2"]:
+                fail("WebGL2 context not active")
+            if gl["msaa"] < 2:
+                fail(f"MSAA not active (msaaSamples={gl['msaa']})")
+            if not gl["requestRenderMode"]:
+                fail("requestRenderMode is off")
+            message = page.inner_text("#message")
+            if message.startswith("描画エラー"):
+                fail(f"render error shown: {message}")
+            page.screenshot(path=str(out / "01-initial.png"))
 
         def telemetry(label: str) -> None:
             t0 = page.evaluate("() => window.aquaDrift.telemetry.frames")
@@ -159,29 +125,75 @@ def main() -> int:
                   pending: ['region','regionOutline','voxels'].map(k => !!window.aquaDrift.gpu[k].pending) })"""
             )
             fps = (data["t"]["frames"] - t0) / 3.0
-            note(f"telemetry {label}: {fps:.1f} frames/s, long tasks {data['long']}, "
-                 f"pending {data['pending']}, swaps {data['t']['swaps']}, dropped {data['t']['pendingDropped']}")
+            t = data["t"]
+            note(f"telemetry {label}: {fps:.1f} frames/s, render {t['renderMs']:.0f} ms avg / "
+                 f"{t['maxRenderMs']:.0f} ms max, long tasks {data['long']}, pending {data['pending']}, "
+                 f"swaps {t['swaps']}, dropped {t['pendingDropped']}")
             if fps > 20:
                 fail(f"render loop not idle ({label}): {fps:.1f} frames/s with requestRenderMode")
 
-        def follow_and_capture() -> None:
-            telemetry("before follow")
+        def overflow() -> None:
+            for width in (1600, 1280):
+                page.set_viewport_size({"width": width, "height": 1000})
+                page.wait_for_timeout(800)
+                found = page.evaluate(OVERFLOW_JS)
+                if found:
+                    fail(f"horizontal overflow at {width}px: {found}")
+                else:
+                    note(f"no horizontal overflow at viewport {width}px")
+            page.set_viewport_size({"width": 1600, "height": 1000})
+
+        def views() -> None:
+            expected = {"top": -90.0, "side": 0.0, "oblique": None}
+            for view in ("top", "side", "oblique"):
+                page.evaluate(f"() => document.querySelector(\".vt[data-view='{view}']\").click()")
+                page.wait_for_timeout(3000)
+                pitch = page.evaluate("() => Cesium.Math.toDegrees(window.aquaDrift.viewer.camera.pitch)")
+                note(f"view {view}: camera pitch {pitch:.1f} deg")
+                target = expected[view]
+                if target is not None and abs(pitch - target) > 3:
+                    fail(f"view '{view}' pitch {pitch:.1f} deg, expected {target}")
+                if view == "oblique" and not (-80 < pitch < -10):
+                    fail(f"oblique pitch {pitch:.1f} deg out of range")
+                page.screenshot(path=str(out / f"02-view-{view}.png"))
+
+        def check_centred(label: str, limit: float) -> None:
+            pos = page.evaluate(CENTER_JS)
+            if pos is None:
+                fail(f"{label}: could not project the estimate to the screen")
+                return
+            dx = pos["x"] - pos["cw"] / 2
+            dy = pos["y"] - pos["ch"] / 2
+            note(f"{label}: estimate offset from screen centre {dx:.0f}, {dy:.0f} px")
+            if math.hypot(dx, dy) > limit * max(pos["cw"], pos["ch"]):
+                fail(f"{label}: estimate not centred, offset {dx:.0f},{dy:.0f} px")
+
+        def centre() -> None:
+            page.evaluate("() => document.getElementById('center-estimate').click()")
+            page.wait_for_timeout(3000)
+            check_centred("centre-on-estimate", 0.05)
+            page.screenshot(path=str(out / "03-centered.png"))
+
+        def follow() -> None:
             page.evaluate("() => document.getElementById('follow-estimate').click()")
             page.wait_for_function("() => document.getElementById('follow-estimate').checked", timeout=10_000)
-            page.wait_for_timeout(5000)
-            telemetry("following")
-            pos = page.evaluate(CENTER_JS)
-            if pos:
-                dx = pos["x"] - pos["cw"] / 2
-                dy = pos["y"] - pos["ch"] / 2
-                note(f"follow mode: estimate offset from centre {dx:.0f}, {dy:.0f} px")
-                if math.hypot(dx, dy) > 0.08 * max(pos["cw"], pos["ch"]):
-                    fail(f"follow mode lost the estimate: offset {dx:.0f},{dy:.0f} px")
-            page.click(".tab[data-tab='tab-compare']")
+            page.wait_for_timeout(8000)
+            check_centred("follow mode", 0.08)
+
+        def final_screens() -> None:
+            page.evaluate("() => document.querySelector(\".tab[data-tab='tab-compare']\").click()")
             page.screenshot(path=str(out / "04-follow.png"))
             page.screenshot(path=str(out / "05-full-page.png"), full_page=True)
 
-        stage("follow / final screenshots", follow_and_capture)
+        stage("gpu info", gpu_info)
+        stage("telemetry idle", lambda: telemetry("idle"))
+        stage("overflow", overflow)
+        stage("views", views)
+        stage("telemetry after views", lambda: telemetry("after views"))
+        stage("centre on estimate", centre)
+        stage("follow", follow)
+        stage("telemetry following", lambda: telemetry("following"))
+        stage("final screenshots", final_screens)
         browser.close()
 
     unique = list(dict.fromkeys(errors))

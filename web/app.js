@@ -357,7 +357,11 @@ function updateEstimateLayers(estimates, target) {
 
 // ---------------------------------------------------------------- presence region (batched GPU geometry)
 const MAX_PENDING_MS = 4000;
-const telemetry = { frames: 0, pendingDropped: 0, swaps: 0 };
+const telemetry = { frames: 0, pendingDropped: 0, swaps: 0, renderMs: 0, maxRenderMs: 0 };
+let frameStart = 0;
+scene.preRender.addEventListener(() => {
+  frameStart = performance.now();
+});
 
 function swapWhenReady(slot, now) {
   if (!slot.pending) return false;
@@ -381,6 +385,9 @@ function swapWhenReady(slot, now) {
 let pendingRenderScheduled = false;
 scene.postRender.addEventListener(() => {
   telemetry.frames += 1;
+  const took = performance.now() - frameStart;
+  telemetry.renderMs = telemetry.renderMs ? 0.9 * telemetry.renderMs + 0.1 * took : took;
+  telemetry.maxRenderMs = Math.max(telemetry.maxRenderMs, took);
   // async geometry is built in web workers; poll at a modest rate until it is uploaded, then swap
   const now = performance.now();
   const waiting = [gpu.region, gpu.regionOutline, gpu.voxels].map((slot) => swapWhenReady(slot, now)).some(Boolean);
