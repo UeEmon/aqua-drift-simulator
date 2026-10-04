@@ -29,9 +29,17 @@ def fail(message: str) -> None:
     print(f"::error::{_escape(message)}", flush=True)
 
 
+KEY_NOTES = ("perf:", "GPU:", "forward deployment:", "follow mode", "default view centre",
+             "centre-on-estimate", "background map:", "view oblique", "telemetry following")
+
+
 def note(message: str) -> None:
+    # GitHub shows at most 10 annotations of a kind per step: annotate only the key results
     notes.append(message)
-    print(f"::notice::{_escape(message)}", flush=True)
+    if message.startswith(KEY_NOTES):
+        print(f"::notice::{_escape(message)}", flush=True)
+    else:
+        print(message, flush=True)
 
 
 def stage(name: str, func) -> None:
