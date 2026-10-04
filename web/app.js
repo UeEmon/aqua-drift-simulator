@@ -5,6 +5,9 @@ const FT_TO_M = 0.3048;
 const YD_TO_M = 0.9144;
 const EARTH_R = 6371008.8;
 const MAX_TRUTH_POINTS = 4000;
+const MAX_DRAWN_TRACK_POINTS = 1200; // GPU upload budget per polyline per update
+const REGION_REBUILD_MS = 3000; // presence-region geometry rebuild throttle
+const MAX_VOXEL_BOXES = 900; // densest voxels drawn as boxes
 const MAX_HISTORY = 3600;
 
 const $ = (id) => document.getElementById(id);
@@ -157,6 +160,16 @@ function pointInPolygon(lon, lat, polygon) {
   }
   return inside;
 }
+function thin(points) {
+  // keep the recent part at full rate, decimate the older part: bounded GPU upload per update
+  if (points.length <= MAX_DRAWN_TRACK_POINTS) return points;
+  const recent = Math.floor(MAX_DRAWN_TRACK_POINTS / 2);
+  const older = points.slice(0, points.length - recent);
+  const step = Math.ceil(older.length / (MAX_DRAWN_TRACK_POINTS - recent));
+  const kept = older.filter((_, i) => i % step === 0);
+  return kept.concat(points.slice(points.length - recent));
+}
+
 function selectedMode() {
   const input = document.querySelector("input[name='panel-mode']:checked");
   return input ? input.value : "ONLINE";
@@ -231,7 +244,7 @@ function updateTruth(target) {
   state.truth.point.position = position;
   state.truth.label.position = position;
   state.truth.point.show = state.truth.label.show = state.truth.track.show = show;
-  if (state.truthTrack.length > 1) state.truth.track.positions = state.truthTrack.map(cartOf);
+  if (state.truthTrack.length > 1) state.truth.track.positions = thin(state.truthTrack).map(cartOf);
 }
 
 // ================================================================== observers & bearings
@@ -263,7 +276,7 @@ function updateObservers(records, batch, config) {
     item.point.position = position;
     item.label.position = position;
     item.point.color = detecting.has(id) ? COLORS.detecting : COLORS.observer;
-    if (track.length > 1) item.track.positions = track.map(cartOf);
+    if (track.length > 1) item.track.positions = thin(track).map(cartOf);
     if (checked("show-range")) {
       if (!item.range) {
         item.range = viewer.entities.add({
@@ -343,7 +356,7 @@ function updateEstimateLayers(estimates, target) {
       graphics.label.position = position;
     }
     if (estimate && estimate.track.length > 1) {
-      graphics.track.positions = estimate.track.map((p) => cart(p.longitude, p.latitude, p.depth_ft));
+      graphics.track.positions = thin(estimate.track).map((p) => cart(p.longitude, p.latitude, p.depth_ft));
     }
   }
   if (!state.errorLine) {
@@ -356,7 +369,7 @@ function updateEstimateLayers(estimates, target) {
 }
 
 // ---------------------------------------------------------------- presence region (batched GPU geometry)
-const MAX_PENDING_MS = 4000;
+const MAX_PENDING_MS = 15000;
 const telemetry = { frames: 0, pendingDropped: 0, swaps: 0, renderMs: 0, maxRenderMs: 0 };
 let frameStart = 0;
 scene.preRender.addEventListener(() => {
@@ -396,7 +409,7 @@ scene.postRender.addEventListener(() => {
     setTimeout(() => {
       pendingRenderScheduled = false;
       scene.requestRender();
-    }, 50);
+    }, 250); // ~4 Hz polling while web workers build geometry
   }
 });
 
@@ -415,6 +428,8 @@ function regionPrimitives(region) {
   const outline = [];
   const voxels = [];
   const exag = exaggeration();
+  const totalVoxels = region.components.reduce((n, c) => n + c.voxels.length, 0);
+  const voxelShare = Math.min(1, MAX_VOXEL_BOXES / Math.max(totalVoxels, 1));
   region.components.forEach((component) => {
     if (component.polygon.length >= 3) {
       const hierarchy = new Cesium.PolygonHierarchy(Cesium.Cartesian3.fromDegreesArray(component.polygon.flat()));
@@ -438,7 +453,8 @@ function regionPrimitives(region) {
     const size = component.voxel_size_yd * YD_TO_M * 0.9;
     const tall = component.voxel_height_ft * FT_TO_M * exag * 0.9;
     if (!(size > 0 && tall > 0)) return;
-    component.voxels.forEach((voxel, rank) => {
+    const drawn = component.voxels.slice(0, Math.max(1, Math.round(n * voxelShare))); // densest first
+    drawn.forEach((voxel, rank) => {
       const alpha = 0.34 - 0.26 * (rank / Math.max(n - 1, 1)); // densest voxels most opaque
       voxels.push(new Cesium.GeometryInstance({
         geometry: Cesium.BoxGeometry.fromDimensions({
@@ -467,9 +483,16 @@ function regionPrimitives(region) {
 
 function updateRegion(estimate) {
   const region = estimate?.presence_region;
-  const key = `${estimate?.tick}-${estimate?.mode}-${checked("show-region")}-${checked("show-voxels")}-${exaggeration()}-${state.runKey}`;
+  const settings = `${estimate?.mode}-${checked("show-region")}-${checked("show-voxels")}-${exaggeration()}-${state.runKey}`;
+  const key = `${estimate?.tick}-${settings}`;
   if (key === state.lastRegionKey) return;
+  // display settings changed -> rebuild now; new estimate only -> at most every REGION_REBUILD_MS
+  const now = performance.now();
+  const settingsChanged = settings !== state.lastRegionSettings;
+  if (!settingsChanged && now - (state.lastRegionBuild || 0) < REGION_REBUILD_MS) return;
   state.lastRegionKey = key;
+  state.lastRegionSettings = settings;
+  state.lastRegionBuild = now;
   gpu.regionLabels.removeAll();
   if (!region || !region.components.length) {
     replacePrimitive(gpu.region, null);
