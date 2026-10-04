@@ -19,14 +19,26 @@ failures: list[str] = []
 notes: list[str] = []
 
 
+def _escape(message: str) -> str:
+    # GitHub workflow-command escaping so multi-line messages still become annotations
+    return message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def fail(message: str) -> None:
     failures.append(message)
-    print(f"::error::{message}")
+    print(f"::error::{_escape(message)}", flush=True)
 
 
 def note(message: str) -> None:
     notes.append(message)
-    print(f"::notice::{message}")
+    print(f"::notice::{_escape(message)}", flush=True)
+
+
+def stage(name: str, func) -> None:
+    try:
+        func()
+    except Exception as error:  # noqa: BLE001 - report and continue with the other checks
+        fail(f"{name}: {type(error).__name__}: {error}"[:800])
 
 
 OVERFLOW_JS = """() => {
@@ -133,20 +145,30 @@ def main() -> int:
                 fail(f"estimate not centred after button: offset {dx:.0f},{dy:.0f} px")
         page.screenshot(path=str(out / "03-centered.png"))
 
-        page.check("#follow-estimate")
-        page.wait_for_timeout(5000)
-        page.click(".tab[data-tab='tab-compare']")
-        page.locator("#tab-compare").screenshot(path=str(out / "04-compare-panel.png"))
+        def follow_and_capture() -> None:
+            page.check("#follow-estimate")
+            page.wait_for_timeout(5000)
+            page.click(".tab[data-tab='tab-compare']")
+            page.screenshot(path=str(out / "04-follow.png"))
+            page.screenshot(path=str(out / "05-full-page.png"), full_page=True)
+
+        stage("follow / final screenshots", follow_and_capture)
         browser.close()
 
-    for error in errors:
-        fail(error[:500])
+    unique = list(dict.fromkeys(errors))
+    if unique:
+        note(f"{len(errors)} console/page errors ({len(unique)} distinct)")
+    for error in unique[:8]:
+        fail(error[:600])
+    (out / "result.json").write_text(
+        json.dumps({"failures": failures, "notes": notes, "errors": unique}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as handle:
             handle.write("## GIS E2E\n\n")
-            for line in notes:
-                handle.write(f"- {line}\n")
+            handle.writelines(f"- {line}\n" for line in notes)
             for line in failures:
                 handle.write(f"- ❌ {line}\n")
     print("FAILURES:", len(failures))
