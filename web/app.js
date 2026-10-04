@@ -46,12 +46,38 @@ if (scene.globe.translucency) {
 }
 scene.screenSpaceCameraController.enableCollisionDetection = false; // allow camera under the sea surface
 
-Cesium.TileMapServiceImageryProvider.fromUrl(Cesium.buildModuleUrl("Assets/Textures/NaturalEarthII"))
-  .then((provider) => {
-    viewer.imageryLayers.addImageryProvider(provider);
-    scene.requestRender();
-  })
-  .catch(() => setMessage("Natural Earth II の読込みに失敗しました。"));
+// Rendering priority: no sky box, atmosphere, sun, moon or fog; plain dark sea-surface globe.
+if (scene.skyBox) scene.skyBox.show = false;
+if (scene.skyAtmosphere) scene.skyAtmosphere.show = false;
+if (scene.sun) scene.sun.show = false;
+if (scene.moon) scene.moon.show = false;
+if (scene.fog) scene.fog.enabled = false;
+scene.backgroundColor = Cesium.Color.fromCssColorString("#03080f");
+scene.globe.baseColor = Cesium.Color.fromCssColorString("#0b2238");
+
+// Background map (Natural Earth II): off by default, loaded only when first switched on.
+const baseMap = { layer: null, loading: null };
+async function setBaseMap(on) {
+  for (const id of ["show-basemap", "show-basemap-2"]) if ($(id)) $(id).checked = on;
+  if (on && !baseMap.layer) {
+    baseMap.loading = baseMap.loading || Cesium.TileMapServiceImageryProvider.fromUrl(
+      Cesium.buildModuleUrl("Assets/Textures/NaturalEarthII"),
+    );
+    try {
+      const provider = await baseMap.loading;
+      baseMap.layer = baseMap.layer || viewer.imageryLayers.addImageryProvider(provider);
+    } catch (error) {
+      setMessage("背景地図（Natural Earth II）の読込みに失敗しました。");
+      baseMap.loading = null;
+      return;
+    }
+  }
+  if (baseMap.layer) baseMap.layer.show = on;
+  scene.requestRender();
+}
+for (const id of ["show-basemap", "show-basemap-2"]) {
+  if ($(id)) $(id).addEventListener("change", () => setBaseMap($(id).checked));
+}
 
 const COLORS = {
   truth: Cesium.Color.CYAN,
@@ -62,6 +88,7 @@ const COLORS = {
   detecting: Cesium.Color.fromCssColorString("#5dff9d"),
   inactive: Cesium.Color.GRAY,
   bearing: Cesium.Color.fromCssColorString("#ffe680"),
+  drop: Cesium.Color.fromCssColorString("#ff9f43"),
   error: Cesium.Color.WHITE,
 };
 
@@ -71,6 +98,8 @@ const gpu = {
   points: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
   labels: scene.primitives.add(new Cesium.LabelCollection()),
   regionLabels: scene.primitives.add(new Cesium.LabelCollection()),
+  drops: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
+  dropLabels: scene.primitives.add(new Cesium.LabelCollection()),
   region: { current: null, pending: null },
   regionOutline: { current: null, pending: null },
   voxels: { current: null, pending: null },
@@ -323,6 +352,52 @@ function updateBearings(bearings, config) {
   }
   for (const [id, line] of state.bearingLines) if (!seen.has(id)) line.show = false;
 }
+
+// ================================================================== forward deployment
+function updateDeployment(deployment) {
+  const status = deployment || { history: [], standby_count: 0, pending_placements: 0 };
+  const key = `${status.history.length}-${status.last_deploy_tick}-${checked("show-drops")}-${exaggeration()}`;
+  if (key !== state.dropKey) {
+    state.dropKey = key;
+    gpu.drops.removeAll();
+    gpu.dropLabels.removeAll();
+    if (checked("show-drops")) {
+      for (const record of status.history) {
+        for (const position of record.positions) {
+          const at = cartOf(position);
+          gpu.drops.add({ position: at, pixelSize: 9, color: COLORS.drop.withAlpha(0.25), outlineColor: COLORS.drop, outlineWidth: 2 });
+        }
+        if (record.positions.length) {
+          gpu.dropLabels.add({
+            position: cartOf(record.positions[0]),
+            text: `前程 ${record.tick}s`,
+            font: "11px sans-serif",
+            fillColor: COLORS.drop,
+            pixelOffset: new Cesium.Cartesian2(0, -14),
+          });
+        }
+      }
+    }
+  }
+  const enabled = state.latestConfig?.forward?.enabled;
+  const warn = status.pending_placements > status.standby_count
+    ? `<span class="s-warn">▲ 待機観測者が不足（コンテナを追加してください）</span>` : "";
+  $("deploy-status").innerHTML = `自動前程配置 <b>${enabled ? "有効" : "無効"}</b>　待機観測者 ${status.standby_count}　` +
+    `投入待ち ${status.pending_placements}　最終配置 ${status.last_deploy_tick ?? "--"} s<br>${warn}`;
+  const rows = status.history.slice().reverse().map((r) =>
+    `<tr><td>${r.tick} s</td><td>${r.positions.length}</td><td>${escapeHtml(r.reason)}</td></tr>`);
+  $("deploy-table").querySelector("tbody").innerHTML = rows.join("") || "<tr><td colspan='3'>配置なし</td></tr>";
+}
+
+$("deploy-now").addEventListener("click", async () => {
+  const response = await fetch("/api/deployment/now", { method: "POST" });
+  if (response.ok) {
+    const result = await response.json();
+    setMessage(`推定位置の前程に ${result.deployed} 点の配置を指示しました（待機観測者 ${result.standby}）。`);
+  } else {
+    setMessage(`前程配置できません: ${await response.text()}`);
+  }
+});
 
 // ================================================================== estimates
 function estimateGraphics(mode) {
@@ -988,6 +1063,11 @@ function populateForms(config) {
   };
   for (const [id, value] of Object.entries(values)) if ($(id)) $(id).value = value;
   $("bearing-enabled").checked = config.bearing.enabled;
+  const f = config.forward;
+  $("fwd-enabled").checked = f.enabled;
+  const fwdValues = { "fwd-lead": f.lead_time_s, "fwd-min": f.min_coverage, "fwd-ahead": f.ahead_distance_yd,
+    "fwd-lateral": f.lateral_offset_yd, "fwd-count": f.observers_per_drop, "fwd-cooldown": f.cooldown_s };
+  for (const [id, value] of Object.entries(fwdValues)) $(id).value = value;
   $("use-bearing").checked = config.estimator.use_bearing;
   state.formsLoaded = true;
 }
@@ -1061,6 +1141,13 @@ $("config-form").addEventListener("submit", (event) => {
     next.presence_probability_pct = num("probability");
     next.smoothing_window_seconds = num("smoothing-window");
     next.estimator.particle_count = num("particles");
+    next.forward.enabled = checked("fwd-enabled");
+    next.forward.lead_time_s = num("fwd-lead");
+    next.forward.min_coverage = num("fwd-min");
+    next.forward.ahead_distance_yd = num("fwd-ahead");
+    next.forward.lateral_offset_yd = num("fwd-lateral");
+    next.forward.observers_per_drop = num("fwd-count");
+    next.forward.cooldown_s = num("fwd-cooldown");
   })
     .then(() => setMessage("観測・推定条件を反映しました。"))
     .catch((error) => setMessage(`設定エラー: ${error.message}`));
@@ -1097,7 +1184,7 @@ handler.setInputAction((movement) => {
   }
 }, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
 
-for (const id of ["show-truth", "show-online", "show-smoothed", "show-region", "show-voxels", "show-range", "show-bearing", "show-error-line", "depth-exaggeration"]) {
+for (const id of ["show-truth", "show-online", "show-smoothed", "show-region", "show-voxels", "show-range", "show-bearing", "show-error-line", "show-drops", "depth-exaggeration"]) {
   $(id).addEventListener("change", () => {
     state.lastRegionKey = "";
     state.followAnchor = null;
@@ -1132,6 +1219,7 @@ function render(snapshot) {
   updateRelative(snapshot, estimate);
   updateCpa(snapshot.cpa || []);
   updateCurrent(snapshot.current_estimate, snapshot.config);
+  updateDeployment(snapshot.deployment);
   drawCharts();
   followEstimate();
   if (state.firstFix && snapshot.target) {
@@ -1160,5 +1248,5 @@ function connect() {
   socket.addEventListener("error", () => socket.close());
 }
 
-window.aquaDrift = { viewer, state, applyView, centerOn, telemetry, gpu }; // diagnostics / E2E
+window.aquaDrift = { viewer, state, applyView, centerOn, telemetry, gpu, baseMap, setBaseMap }; // diagnostics / E2E
 connect();

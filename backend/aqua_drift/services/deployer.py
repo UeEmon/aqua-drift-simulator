@@ -1,0 +1,53 @@
+"""Forward-deployment container: places standby observers ahead (前程) of the ESTIMATED
+target. It reads /internal/deployment-feed (estimates and observer positions; no truth)."""
+from __future__ import annotations
+
+import asyncio
+import logging
+
+import httpx
+
+from aqua_drift.forward_deployment import plan_forward_deployment
+from aqua_drift.models import DeploymentFeed, DeploymentRequest
+from aqua_drift.services.common import API_URL, post, wait_for_api
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s deployer %(message)s")
+log = logging.getLogger(__name__)
+CHECK_INTERVAL_S = 5.0
+
+
+async def run() -> None:
+    async with httpx.AsyncClient(trust_env=False) as client:
+        await wait_for_api(client)
+        last_reason = ""
+        while True:
+            response = await client.get(f"{API_URL}/internal/deployment-feed", timeout=10)
+            response.raise_for_status()
+            feed = DeploymentFeed.model_validate(response.json())
+            estimate = next((e for e in feed.estimates if e.mode.value == "ONLINE"), None)
+            positions, reason = plan_forward_deployment(
+                feed.tick,
+                estimate,
+                feed.observer_positions,
+                feed.pending_positions,
+                feed.config,
+                feed.max_slant_range_yd,
+                feed.last_deploy_tick,
+                feed.depth_step_ft,
+            )
+            if positions:
+                request = DeploymentRequest(tick=feed.tick, positions=positions, reason=reason)
+                result = await post(client, "/internal/deploy", request.model_dump(mode="json"))
+                result.raise_for_status()
+                log.info("tick=%s deployed %d observers (%s); standby=%d",
+                         feed.tick, len(positions), reason, feed.standby_count)
+                if feed.standby_count < len(positions):
+                    log.warning("not enough standby observers: scale up the observer service")
+            elif reason != last_reason:
+                log.info("tick=%s no deployment: %s", feed.tick, reason)
+            last_reason = reason
+            await asyncio.sleep(CHECK_INTERVAL_S)
+
+
+if __name__ == "__main__":
+    asyncio.run(run())

@@ -11,8 +11,9 @@ The operator starts/stops the estimator; the GIS shows estimate and truth side b
 |---|---|
 | `clock` | Shared 1 s time base |
 | `target` | Constant HDG / through-water speed / depth; changes follow the configured rates (deg/s, kt/s, Ft/s); moved by the current |
-| `observer` (×1..100) | One observer per container; drifts with the water; exact time/position/depth. Start position from env, a queued placement, or the default pattern |
+| `observer` (×1..100) | One observer per container; drifts with the water; exact time/position/depth. Start position from env, a queued placement (operator or forward deployment), or the default pattern for the first four; further containers wait in standby |
 | `current-field` | Truth affine current field `v(p) = a + G (p − p_ref)` |
+| `deployer` | Forward (前程) deployment: every 5 s reads `/internal/deployment-feed` (estimates, observer and pending positions; no truth) and queues placements ahead of the estimated target for standby observer containers |
 | `doppler` | Acoustic source / Doppler + bearing engine. Waits until target and all observers reach the tick, then emits one synchronized batch: frequency when slant range ≤ R_max, explicit non-detection otherwise. Truth is attached separately |
 | `estimator` | Pulls `/internal/estimator-feed` (observations only, truth stripped) and publishes ONLINE / SMOOTHED estimates, CPA results and the current estimate |
 | `api` | FastAPI + WebSocket, single writer of the immutable PostgreSQL/PostGIS event history |

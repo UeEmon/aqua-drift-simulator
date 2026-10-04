@@ -185,7 +185,47 @@ def main() -> int:
             page.screenshot(path=str(out / "04-follow.png"))
             page.screenshot(path=str(out / "05-full-page.png"), full_page=True)
 
+        def base_map() -> None:
+            info = page.evaluate(
+                "() => ({ layers: window.aquaDrift.viewer.imageryLayers.length, "
+                "loaded: !!window.aquaDrift.baseMap.layer, checked: document.getElementById('show-basemap').checked })"
+            )
+            note(f"base map at start: {info}")
+            if info["layers"] != 0 or info["loaded"] or info["checked"]:
+                fail(f"background map should be off and not loaded at start: {info}")
+            page.evaluate("() => document.getElementById('show-basemap').click()")
+            page.wait_for_function(
+                "() => window.aquaDrift.baseMap.layer && window.aquaDrift.baseMap.layer.show", timeout=30_000
+            )
+            page.wait_for_timeout(2000)
+            page.screenshot(path=str(out / "06-basemap-on.png"))
+            page.evaluate("() => document.getElementById('show-basemap').click()")
+            page.wait_for_timeout(500)
+            if page.evaluate("() => window.aquaDrift.baseMap.layer.show"):
+                fail("background map did not switch off")
+            note("background map: off at start, loads on demand, switches off again")
+
+        def forward_deployment() -> None:
+            snap = page.evaluate("() => window.aquaDrift.state.latestSnapshot")
+            before = len(snap["observers"])
+            standby = snap["deployment"]["standby_count"]
+            note(f"forward deployment: {before} active observers, {standby} standby before request")
+            if standby < 2:
+                fail(f"expected standby observers for forward deployment, got {standby}")
+                return
+            page.evaluate("() => document.querySelector(\".tab[data-tab='tab-display']\").click()")
+            page.evaluate("() => document.getElementById('deploy-now').click()")
+            page.wait_for_function(
+                f"() => window.aquaDrift.state.latestSnapshot.observers.length >= {before + 2}", timeout=30_000
+            )
+            snap = page.evaluate("() => window.aquaDrift.state.latestSnapshot")
+            note(f"forward deployment: {len(snap['observers'])} active observers after 'deploy now', "
+                 f"history {len(snap['deployment']['history'])}")
+            page.wait_for_timeout(2000)
+            page.screenshot(path=str(out / "07-forward-deployment.png"))
+
         stage("gpu info", gpu_info)
+        stage("background map", base_map)
         stage("telemetry idle", lambda: telemetry("idle"))
         stage("overflow", overflow)
         stage("views", views)
@@ -193,6 +233,7 @@ def main() -> int:
         stage("centre on estimate", centre)
         stage("follow", follow)
         stage("telemetry following", lambda: telemetry("following"))
+        stage("forward deployment", forward_deployment)
         stage("final screenshots", final_screens)
         browser.close()
 

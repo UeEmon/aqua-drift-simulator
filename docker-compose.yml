@@ -74,12 +74,17 @@ services:
     <<: *worker
     command: ["python", "-m", "aqua_drift.services.observer"]
     deploy:
-      replicas: ${OBSERVER_REPLICAS:-4}
+      replicas: ${OBSERVER_REPLICAS:-12}  # 4 initial + standby for forward deployment
 
   # acoustic source / Doppler computation (音源演算部): separate container
   doppler:
     <<: *worker
     command: ["python", "-m", "aqua_drift.services.doppler"]
+
+  # forward (前程) deployment: places standby observers ahead of the ESTIMATED target
+  deployer:
+    <<: *worker
+    command: ["python", "-m", "aqua_drift.services.deployer"]
 
   # receives observations only (no truth) through /internal/estimator-feed
   estimator:

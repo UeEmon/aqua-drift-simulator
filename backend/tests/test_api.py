@@ -78,3 +78,17 @@ def test_estimation_control_endpoints() -> None:
         assert started["run_id"] > stopped["run_id"] - 1
         assert client.get("/api/snapshot").json()["estimation"]["running"] is True
         assert client.post("/api/reset", params={"replace_observers": "false"}).status_code == 200
+
+
+def test_standby_assignment_and_deploy_now_without_estimate() -> None:
+    with TestClient(app) as client:
+        statuses = [
+            client.get("/internal/observer/assignment", params={"observer_id": f"sb-{i}"}).status_code
+            for i in range(8)
+        ]
+        assert 204 in statuses  # beyond deployment.initial_count -> standby
+        client.post("/api/estimation/stop")
+        client.post("/api/estimation/start")  # clears estimates
+        assert client.post("/api/deployment/now").status_code == 409
+        feed = client.get("/internal/deployment-feed").json()
+        assert "target" not in feed and "truth" not in str(feed).lower()

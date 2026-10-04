@@ -1,6 +1,8 @@
 """Observer container (one per observer). It moves only with the water (passive drift) and
 knows its time, position and depth exactly. Initial position: OBSERVER_LAT/LON/DEPTH_FT env,
-otherwise assigned by the API (queued placement, else the configured default pattern)."""
+otherwise assigned by the API (queued placement, else the default pattern for the first
+deployment.initial_count observers). Further containers wait as standby observers until the
+forward deployment places them ahead of the estimated target."""
 from __future__ import annotations
 
 import asyncio
@@ -15,6 +17,8 @@ from aqua_drift.services.common import API_URL, current_vector, post, snapshot, 
 
 
 async def initial_position(client: httpx.AsyncClient, observer_id: str) -> Position:
+    """Fixed position from env, otherwise ask the API. HTTP 204 means standby: keep waiting
+    until the forward deployment (or the operator) queues a placement."""
     lat, lon = os.getenv("OBSERVER_LAT"), os.getenv("OBSERVER_LON")
     if lat and lon:
         return Position(
@@ -22,11 +26,14 @@ async def initial_position(client: httpx.AsyncClient, observer_id: str) -> Posit
             longitude=float(lon),
             depth_ft=float(os.getenv("OBSERVER_DEPTH_FT", "200")),
         )
-    response = await client.get(
-        f"{API_URL}/internal/observer/assignment", params={"observer_id": observer_id}, timeout=5
-    )
-    response.raise_for_status()
-    return Position.model_validate(response.json())
+    while True:
+        response = await client.get(
+            f"{API_URL}/internal/observer/assignment", params={"observer_id": observer_id}, timeout=5
+        )
+        response.raise_for_status()
+        if response.status_code == 200:
+            return Position.model_validate(response.json())
+        await asyncio.sleep(1.0)
 
 
 async def run() -> None:

@@ -58,6 +58,7 @@ body { overflow: hidden; }
 .sw.smoothed { background: #00ff00; }
 .sw.region { background: #ff4fd8; height: 10px; opacity: 0.7; }
 .sw.bearing { background: repeating-linear-gradient(90deg, #ffe680 0 5px, transparent 5px 8px); }
+.sw.drop { background: transparent; border: 2px solid #ff9f43; width: 10px; height: 10px; border-radius: 50%; }
 .sw.observer { background: #ffd700; height: 8px; width: 8px; border-radius: 50%; }
 
 #control-panel {
@@ -234,3 +235,5 @@ th small { color: #7f9bb5; font-weight: 400; }
 td .est, td .tru { display: block; }
 td .tru { color: #7fe3ff; }
 td small { color: #8faecb; }
+
+button.secondary { margin-top: 8px; }

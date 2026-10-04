@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 
 from aqua_drift.deployment import default_position
 from aqua_drift.estimation.engine import TrackingEngine
+from aqua_drift.forward_deployment import plan_forward_deployment
 from aqua_drift.models import (
     DopplerBatch,
     EstimatorOutput,
@@ -46,6 +47,10 @@ class ScenarioRun:
     truth_track: list[TargetState] = field(default_factory=list)
     tick: int = 0
     rng: random.Random | None = None
+    forward: bool = False  # automatic forward (前程) deployment from the estimate
+    deploy_check_s: int = 10
+    deployments: list[tuple[int, int]] = field(default_factory=list)  # (tick, count)
+    last_deploy_tick: int | None = None
 
     def __post_init__(self) -> None:
         self.target = initial_target(self.config)
@@ -74,7 +79,34 @@ class ScenarioRun:
         batch = DopplerBatch(tick=self.tick, observations=observations, truth=truth)
         self.truth_track.append(self.target)
         self.engine.process(batch)
+        if self.forward and self.tick % self.deploy_check_s == 0:
+            self._forward_deploy()
         return batch
+
+    def _forward_deploy(self) -> None:
+        output = self.engine.output()
+        estimate = next((e for e in output.estimates if e.mode.value == "ONLINE"), None)
+        positions, _ = plan_forward_deployment(
+            self.tick,
+            estimate,
+            [o.position for o in self.observers],
+            [],
+            self.config.forward,
+            self.config.max_slant_range_yd,
+            self.last_deploy_tick,
+            self.config.deployment.depth_step_ft,
+        )
+        if not positions:
+            return
+        for position in positions:
+            self.observers.append(
+                ObserverState(observer_id=f"fwd-{len(self.deployments):02d}-{len(self.observers):03d}",
+                              tick=self.tick, position=position)
+            )
+        while len(self.observers) > self.config.observer_limit:
+            self.observers.pop(0)  # oldest first; its history stays in the engine
+        self.deployments.append((self.tick, len(positions)))
+        self.last_deploy_tick = self.tick
 
     def run(self, seconds: int, output_every: int = 0) -> EstimatorOutput:
         for _ in range(seconds):
@@ -125,6 +157,7 @@ def main() -> None:
     parser.add_argument("--bias-hz", type=float, default=0.0)
     parser.add_argument("--particles", type=int, default=None)
     parser.add_argument("--no-bearing", action="store_true", help="estimator ignores bearings")
+    parser.add_argument("--forward", action="store_true", help="automatic forward deployment")
     args = parser.parse_args()
     config = ScenarioConfig()
     config.source.shared_recognition_bias_hz = args.bias_hz
@@ -132,7 +165,7 @@ def main() -> None:
         config.estimator.use_bearing = False
     if args.particles:
         config.estimator.particle_count = args.particles
-    run = ScenarioRun(config, args.observers)
+    run = ScenarioRun(config, args.observers, forward=args.forward)
     output = run.run(args.seconds, args.report_every)
     for cpa in output.cpa:
         print(

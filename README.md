@@ -44,7 +44,13 @@ Documentation:
   (direction selectable), orthographic top view, **centre on estimate**, centre on truth,
   follow estimate, FPS overlay
 
-By default four observers surround the target's initial position.
+By default four observers surround the target's initial position; the remaining observer
+containers wait in standby. The `deployer` service places them **ahead (前程) of the estimated
+target** whenever the estimate predicts it will leave the current observer field (estimate
+only, never the truth); the 表示・観測者 tab shows the status and has a "deploy now" button.
+
+The background map (Natural Earth II) is **off by default** to prioritise rendering; switch it
+on with 「背景地図」 in the view toolbar when needed.
 
 Rendering uses GPU-batched Cesium primitives, on-demand rendering and 4x MSAA. A hardware
 GPU with WebGL2 is recommended; the GIS also runs on software WebGL (used in CI).
@@ -56,7 +62,8 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Four observers start by default (`OBSERVER_REPLICAS`). Open <http://localhost:8090>. API health: <http://localhost:8091/health>.
+Twelve observer containers start by default (`OBSERVER_REPLICAS`): four active around the
+target and eight in standby for forward deployment. Open <http://localhost:8090>. API health: <http://localhost:8091/health>.
 
 Add observers (1–100). To place the next one at a specific point, double-click the map (or enter
 coordinates) and press 「配置を予約」, then scale up:

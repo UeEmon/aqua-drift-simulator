@@ -92,6 +92,29 @@ class BearingConfig(BaseModel):
     random_seed: int = 11
 
 
+class ForwardDeploymentConfig(BaseModel):
+    """Automatic deployment of observers ahead (前程) of the ESTIMATED target position.
+
+    Uses only the estimate (position, HDG, through-water speed, status), never the truth.
+    Observers and target drift with the same water, so the geometry is planned in the water
+    frame: the target's predicted relative position after lead_time_s is
+    estimate + through-water velocity x lead_time_s. When fewer than min_coverage observers
+    (active or pending) lie within coverage_fraction x R_max of that point, observers_per_drop
+    observers are placed ahead_distance_yd ahead on the estimated heading, lateral_offset_yd to
+    either side, using standby observer containers."""
+
+    enabled: bool = True
+    lead_time_s: int = Field(default=600, ge=30, le=7200)
+    coverage_fraction: float = Field(default=0.8, gt=0, le=1.0)
+    min_coverage: int = Field(default=2, ge=1, le=10)
+    observers_per_drop: int = Field(default=2, ge=1, le=6)
+    ahead_distance_yd: float = Field(default=4000.0, gt=0)
+    lateral_offset_yd: float = Field(default=2000.0, ge=0)
+    cooldown_s: int = Field(default=120, ge=0, le=3600)
+    min_speed_kt: float = Field(default=0.5, ge=0)
+    max_sigma_fraction: float = Field(default=0.5, gt=0)  # skip if 1σ major > fraction x R_max
+
+
 class ObserverDeploymentConfig(BaseModel):
     """Default placement for observer containers that are not given an explicit position.
 
@@ -100,6 +123,7 @@ class ObserverDeploymentConfig(BaseModel):
     wider ring."""
 
     pattern: str = Field(default="surround", pattern="^(surround|grid|line|ring|random)$")
+    initial_count: int = Field(default=4, ge=1, le=100)  # further containers wait as standby
     surround_radius_yd: float = Field(default=3000.0, gt=0)
     spacing_yd: float = Field(default=3000.0, gt=0)
     line_bearing_deg: float = Field(default=0.0, ge=0, lt=360)
@@ -149,6 +173,7 @@ class ScenarioConfig(BaseModel):
     current_field: CurrentFieldConfig = CurrentFieldConfig()
     source: SourceFrequencyConfig = SourceFrequencyConfig()
     bearing: BearingConfig = BearingConfig()
+    forward: ForwardDeploymentConfig = ForwardDeploymentConfig()
     deployment: ObserverDeploymentConfig = ObserverDeploymentConfig()
     estimator: EstimatorConfig = EstimatorConfig()
 
@@ -204,6 +229,7 @@ class ObserverPlacement(BaseModel):
 
     position: Position
     observer_id: str | None = None
+    source: str = "manual"  # manual (operator) | forward (automatic 前程 deployment)
 
 
 class DopplerObservation(BaseModel):
@@ -261,6 +287,40 @@ class BearingReport(BaseModel):
     tick: int
     bearing_deg: float
     observer_position: Position
+
+
+class DeploymentRecord(BaseModel):
+    tick: int
+    positions: list[Position]
+    reason: str
+    source: str = "forward"
+
+
+class DeploymentRequest(BaseModel):
+    tick: int
+    positions: list[Position]
+    reason: str
+
+
+class DeploymentFeed(BaseModel):
+    """What the deployer may see: estimates and observer positions only (no truth)."""
+
+    tick: int
+    config: ForwardDeploymentConfig
+    max_slant_range_yd: float
+    depth_step_ft: float
+    estimates: list[TrackEstimate]
+    observer_positions: list[Position]
+    pending_positions: list[Position]
+    standby_count: int
+    last_deploy_tick: int | None
+
+
+class DeploymentStatus(BaseModel):
+    standby_count: int = 0
+    pending_placements: int = 0
+    last_deploy_tick: int | None = None
+    history: list[DeploymentRecord] = Field(default_factory=list)
 
 
 class EstimatorFeed(BaseModel):
@@ -403,6 +463,7 @@ class SimState(BaseModel):
 class Snapshot(BaseModel):
     tick: int
     generation: int = 0
+    deployment: DeploymentStatus = DeploymentStatus()
     estimation: EstimationControl = EstimationControl()
     bearings: list[BearingReport] = Field(default_factory=list)
     config: ScenarioConfig

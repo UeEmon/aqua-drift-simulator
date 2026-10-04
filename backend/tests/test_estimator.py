@@ -182,3 +182,14 @@ def test_default_surround_with_bearings_tracks_from_start() -> None:
     run = ScenarioRun(_config(), 4)
     output = run.run(300)
     assert run.error(output)["horizontal_error_yd"] < 250
+
+
+def test_forward_deployment_keeps_target_in_detection() -> None:
+    config = _config()
+    run = ScenarioRun(config, 4, forward=True)
+    output = run.run(2200)  # the fixed 4-point field alone loses the target after ~1700 s
+    assert run.deployments, "no forward deployment happened"
+    detecting = sum(1 for row in run.engine.last_rows if row.detected)
+    assert detecting >= 1
+    assert output.estimates[0].observability_status.startswith("TRACKING")
+    assert run.error(output)["horizontal_error_yd"] < 300

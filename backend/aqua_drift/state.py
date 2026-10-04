@@ -8,6 +8,10 @@ from aqua_drift.models import (
     BearingReport,
     CpaResult,
     CurrentEstimate,
+    DeploymentFeed,
+    DeploymentRecord,
+    DeploymentRequest,
+    DeploymentStatus,
     DopplerBatch,
     EstimationControl,
     EstimatorFeed,
@@ -53,6 +57,9 @@ class SimulationState:
         self.explicit_ids: set[str] = set()
         self.generation = 0
         self.estimation = EstimationControl(running=autostart_estimation)
+        self.standby: dict[str, int] = {}  # observer_id -> tick of last assignment poll
+        self.deploy_history: deque[DeploymentRecord] = deque(maxlen=20)
+        self.last_deploy_tick: int | None = None
         self.bearings: dict[str, BearingReport] = {}
 
     async def set_config(self, config: ScenarioConfig) -> None:
@@ -77,20 +84,66 @@ class SimulationState:
             self.placements.append(placement)
             return len(self.placements)
 
-    async def assign_position(self, observer_id: str) -> Position:
-        """Initial position for an observer container: an explicitly queued placement first,
-        otherwise the configured default pattern. Stable for a given observer id."""
+    async def assign_position(self, observer_id: str) -> Position | None:
+        """Start position for an observer container, stable per observer id:
+        1. a queued placement (operator or forward deployment),
+        2. the default pattern for the first `deployment.initial_count` observers,
+        3. otherwise None: the container waits as a standby observer until a placement
+           is queued (used by the forward deployment)."""
         async with self.lock:
             if observer_id in self.assignments:
                 return self.assignments[observer_id]
             if self.placements:
-                position = self.placements.popleft().position
-                self.explicit_ids.add(observer_id)
-            else:
+                placement = self.placements.popleft()
+                position = placement.position
+                if placement.source == "manual":
+                    self.explicit_ids.add(observer_id)
+            elif self.assignment_counter < self.config.deployment.initial_count:
                 position = default_position(self.config, self.assignment_counter)
                 self.assignment_counter += 1
+            else:
+                self.standby[observer_id] = self.tick
+                return None
+            self.standby.pop(observer_id, None)
             self.assignments[observer_id] = position
             return position
+
+    def _standby_count(self) -> int:
+        return sum(1 for last in self.standby.values() if self.tick - last <= 10)
+
+    # ---------------------------------------------------------------- forward deployment
+    async def queue_deployment(self, request: DeploymentRequest) -> DeploymentRecord:
+        async with self.lock:
+            for position in request.positions:
+                self.placements.append(ObserverPlacement(position=position, source="forward"))
+            record = DeploymentRecord(
+                tick=request.tick, positions=request.positions, reason=request.reason
+            )
+            self.deploy_history.append(record)
+            self.last_deploy_tick = request.tick
+            return record
+
+    async def deployment_feed(self) -> DeploymentFeed:
+        async with self.lock:
+            return DeploymentFeed(
+                tick=self.tick,
+                config=self.config.forward,
+                max_slant_range_yd=self.config.max_slant_range_yd,
+                depth_step_ft=self.config.deployment.depth_step_ft,
+                estimates=list(self.estimates),
+                observer_positions=[r.state.position for r in self.observers.values()],
+                pending_positions=[p.position for p in self.placements],
+                standby_count=self._standby_count(),
+                last_deploy_tick=self.last_deploy_tick,
+            )
+
+    def _deployment_status(self) -> DeploymentStatus:
+        return DeploymentStatus(
+            standby_count=self._standby_count(),
+            pending_placements=len(self.placements),
+            last_deploy_tick=self.last_deploy_tick,
+            history=list(self.deploy_history),
+        )
 
     async def set_observer(self, observer: ObserverState) -> str | None:
         """Register/update an observer. When a new observer exceeds the limit (1..100) the
@@ -198,6 +251,7 @@ class SimulationState:
             return Snapshot(
                 tick=self.tick,
                 generation=self.generation,
+                deployment=self._deployment_status(),
                 estimation=self.estimation,
                 bearings=[
                     b for b in self.bearings.values()
@@ -232,6 +286,11 @@ class SimulationState:
             self.target = None
             self.batches.clear()
             self.bearings.clear()
+            # automatic (forward) placements belong to the old run; operator placements stay
+            self.placements = deque(p for p in self.placements if p.source == "manual")
+            self.deploy_history.clear()
+            self.last_deploy_tick = None
+            self.standby.clear()
             if replace_observers:
                 explicit = {k: v for k, v in self.assignments.items() if k in self.explicit_ids}
                 self.assignments = explicit

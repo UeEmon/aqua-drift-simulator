@@ -18,6 +18,7 @@
           <span><i class="sw region"></i>推定存在圏</span>
           <span><i class="sw observer"></i>観測者（探知中は緑）</span>
           <span><i class="sw bearing"></i>方位観測</span>
+          <span><i class="sw drop"></i>前程配置の投入点</span>
         </div>
         <div id="view-toolbar" role="toolbar" aria-label="視点">
           <div class="vt-row">
@@ -40,6 +41,7 @@
             <label><input id="follow-estimate" type="checkbox" />推定位置に追従</label>
             <label><input id="orthographic" type="checkbox" />正射投影</label>
             <label><input id="show-fps" type="checkbox" />FPS</label>
+            <label title="背景地図（Natural Earth II）。描画優先のため通常はオフ"><input id="show-basemap" type="checkbox" />背景地図</label>
           </div>
         </div>
         <div id="status-strip">
@@ -199,9 +201,17 @@
               <label>存在確率 (%)<input id="probability" type="number" min="1" max="99.9" step="0.1" required /></label>
               <label>過去航跡再計算範囲 (秒)<input id="smoothing-window" type="number" min="1" max="10800" step="1" required /></label>
               <label>粒子数<input id="particles" type="number" min="500" max="50000" step="500" required /></label>
+              <h3 class="span2">前程配置（推定位置にもとづく観測者の自動追加）</h3>
+              <label class="check span2"><input id="fwd-enabled" type="checkbox" />前程配置を自動で行う</label>
+              <label>先行時間 (秒)<input id="fwd-lead" type="number" min="30" max="7200" step="30" required /></label>
+              <label>最小カバー観測者数<input id="fwd-min" type="number" min="1" max="10" step="1" required /></label>
+              <label>前方距離 (YD)<input id="fwd-ahead" type="number" min="100" step="100" required /></label>
+              <label>横間隔 (YD)<input id="fwd-lateral" type="number" min="0" step="100" required /></label>
+              <label>1回の配置数<input id="fwd-count" type="number" min="1" max="6" step="1" required /></label>
+              <label>最短間隔 (秒)<input id="fwd-cooldown" type="number" min="0" max="3600" step="10" required /></label>
               <button type="submit" class="span2">条件を反映</button>
             </form>
-            <p class="note">粒子数の変更は推定を再初期化します。</p>
+            <p class="note">粒子数の変更は推定を再初期化します。前程配置は推定値（位置・針路・対水速力）のみで判断し、真値は使いません。</p>
           </section>
         </div>
 
@@ -217,18 +227,33 @@
             <label class="check"><input id="show-bearing" type="checkbox" checked />方位観測線</label>
             <label class="check"><input id="show-error-line" type="checkbox" checked />推定–真値の誤差線</label>
             <label class="check"><input id="show-range" type="checkbox" />観測者の上限斜距離</label>
+            <label class="check"><input id="show-drops" type="checkbox" checked />前程配置の投入点</label>
+            <label class="check"><input id="show-basemap-2" type="checkbox" />背景地図（Natural Earth II、通常はオフ）</label>
             <label>深度強調倍率<input id="depth-exaggeration" type="number" min="1" max="50" step="1" value="10" /></label>
           </section>
 
           <section>
-            <h2>観測者の追加配置</h2>
+            <h2>前程配置の状況</h2>
+            <p class="summary" id="deploy-status">--</p>
+            <div class="table-wrap">
+              <table id="deploy-table">
+                <colgroup><col style="width:22%" /><col style="width:14%" /><col style="width:64%" /></colgroup>
+                <thead><tr><th>時刻</th><th>数</th><th>理由</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <button id="deploy-now" type="button" class="secondary">今すぐ推定位置の前程に配置</button>
+          </section>
+
+          <section>
+            <h2>観測者の追加配置（手動）</h2>
             <form id="placement-form" class="grid2">
               <label>緯度<input id="place-lat" type="number" step="0.0001" required /></label>
               <label>経度<input id="place-lon" type="number" step="0.0001" required /></label>
               <label>深度 (Ft)<input id="place-depth" type="number" min="0" step="10" value="200" required /></label>
               <button type="submit">配置を予約</button>
             </form>
-            <p class="note">初期観測者は目標を囲む4点に自動配置。追加は予約後に <code>docker compose up -d --scale observer=N</code>。上限超過時は最古の観測者から削除（履歴は保持）。</p>
+            <p class="note">初期観測者は目標を囲む4点。残りの観測者コンテナは待機し、前程配置または手動配置で投入されます。待機が足りない場合は <code>docker compose up -d --scale observer=N</code>。上限超過時は最古の観測者から削除（履歴は保持）。</p>
           </section>
         </div>
 

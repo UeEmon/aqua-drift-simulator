@@ -80,3 +80,25 @@ async def test_reset_replaces_default_observers_around_new_target() -> None:
     assert (east**2 + north**2) ** 0.5 < 4000
     await state.reset_runtime(replace_observers=False)
     assert await state.assign_position("a") == second
+
+
+@pytest.mark.asyncio
+async def test_standby_observers_take_forward_deployments() -> None:
+    from aqua_drift.models import DeploymentRequest
+
+    config = ScenarioConfig()
+    config.deployment.initial_count = 2
+    state = SimulationState(config)
+    assert await state.assign_position("a") is not None
+    assert await state.assign_position("b") is not None
+    assert await state.assign_position("c") is None  # standby
+    assert (await state.snapshot()).deployment.standby_count == 1
+    drop = Position(latitude=35.05, longitude=140.05, depth_ft=300.0)
+    await state.queue_deployment(DeploymentRequest(tick=10, positions=[drop], reason="test"))
+    assert await state.assign_position("c") == drop
+    status = (await state.snapshot()).deployment
+    assert status.last_deploy_tick == 10 and len(status.history) == 1 and status.standby_count == 0
+    await state.queue_deployment(DeploymentRequest(tick=20, positions=[drop], reason="test"))
+    await state.reset_runtime()
+    status = (await state.snapshot()).deployment
+    assert status.pending_placements == 0 and status.history == []  # automatic drops dropped

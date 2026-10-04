@@ -1,0 +1,22 @@
+@startuml
+title Forward (前程) deployment
+participant Deployer
+participant API
+participant "Observer (standby)" as Standby
+loop every 5 s
+  Deployer -> API : GET /internal/deployment-feed\n(estimate, observer & pending positions)
+  Deployer -> Deployer : predicted point = estimate + u_water x lead time
+  alt TRACKING and < min_coverage observers within 0.8 R_max of predicted point\nand cooldown elapsed
+    Deployer -> API : POST /internal/deploy\n(N positions ahead, left/right of the track)
+  end
+end
+loop every 1 s while standby
+  Standby -> API : GET /internal/observer/assignment
+  alt placement queued
+    API --> Standby : position
+    Standby -> Standby : start drifting / observing
+  else
+    API --> Standby : 204 (keep waiting)
+  end
+end
+@enduml
