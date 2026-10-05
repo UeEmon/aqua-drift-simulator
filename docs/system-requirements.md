@@ -9,7 +9,7 @@ AQUA-DRIFT Simulator を動かすための環境要件です。数値の根拠�
 | 項目 | 内容 |
 |---|---|
 | 実行方式 | Docker Compose による複数コンテナ構成（サーバー）＋ Web ブラウザ（表示端末） |
-| コンテナ | `db`（PostgreSQL 16 / PostGIS 3.4）、`api`、`clock`、`current-field`、`target`、`observer` ×N（既定 12 = 初期 4＋待機 8）、`doppler`、`deployer`、`estimator`、`web`（nginx＋CesiumJS 1.129） |
+| コンテナ | `db`（PostgreSQL 16 / PostGIS 3.4）、`api`、`clock`、`current-field`、`target`、`doppler`、`deployer`、`estimator`、`orchestrator`、`web`（nginx＋CesiumJS 1.129）。観測者コンテナ（obs-01〜obs-99）は `orchestrator` が必要時に起動・削除（初期 4 台） |
 | サーバーと表示端末 | 同一 PC でも、LAN 上の別 PC でも可 |
 | 通信 | ブラウザ → サーバーの TCP 8090（画面・API・WebSocket）。8091（API 直接）は既定でサーバー自身からのみ |
 
@@ -21,16 +21,17 @@ AQUA-DRIFT Simulator を動かすための環境要件です。数値の根拠�
 |---|---|---|
 | OS | Linux（x86-64）、Windows 10/11（Docker Desktop・WSL 2）、macOS（Docker Desktop） | Linux x86-64 は CI で起動まで検証済み |
 | Docker Engine | 24 以上 | |
-| Docker Compose | v2.20 以上（`docker compose` コマンド） | `deploy.replicas`・`cpus`・`healthcheck.start_period` を使用 |
+| Docker Compose | v2.20 以上（`docker compose` コマンド） | `profiles`・`cpus`・`healthcheck.start_period` を使用 |
+| Docker ソケット | `orchestrator` に `/var/run/docker.sock` をマウント（観測者コンテナの可変起動に使用） | Linux・Docker Desktop で標準的に利用可。**ソケットはホストの管理者権限に相当**するため、共有サーバーでは静的構成（下記）を推奨 |
 | CPU アーキテクチャ | x86-64 推奨 | Apple Silicon（arm64）では、公式 `postgis/postgis` イメージに arm64 版がないタグがあり、エミュレーションで動作し遅くなる場合がある（未検証） |
 | インターネット接続 | **初回ビルド時のみ必要**（Docker Hub・PyPI・npm からイメージとパッケージを取得） | 実行時はオフラインで動作（背景地図 Natural Earth II は同梱、外部タイル不使用） |
 
 ### 2.2 ハードウェア
 
-| 項目 | 最小（観測者 12 台・既定構成） | 推奨（観測者 12〜30 台） | 観測者 100 台 |
+| 項目 | 最小（観測者 4〜12 台） | 推奨（観測者 12〜30 台） | 観測者 99 台 |
 |---|---|---|---|
 | CPU | 4 コア（x86-64、2 GHz 以上） | 4〜8 コア | 8 コア以上 |
-| メモリ（Docker に割当） | 4 GB | 8 GB | 12 GB 以上（ホスト 16 GB 以上） |
+| メモリ（Docker に割当） | 3 GB | 4〜8 GB | 12 GB 以上（ホスト 16 GB 以上） |
 | ストレージ空き | 10 GB | 20 GB 以上（SSD） | 40 GB 以上（SSD） |
 
 **根拠**
@@ -41,17 +42,20 @@ AQUA-DRIFT Simulator を動かすための環境要件です。数値の根拠�
   既定で CPU 2 コアに制限（`ESTIMATOR_CPUS`）しており、残りのコアを API・観測者・DB・ブラウザに使う。
   このため 2 コアの PC では、同じ PC でブラウザを使うと画面がカクつきやすい。
 - **その他のコンテナのメモリ（試算）**：Python のシミュレーション部品だけで 1 プロセス約 33 MB（実測）。
-  通信ライブラリを含め 1 コンテナ 50〜80 MB とすると、既定構成の軽量コンテナ 17 個で約 1〜1.4 GB、
-  API 約 0.2〜0.3 GB、推定 約 0.4 GB、DB 約 0.2 GB、合計 約 2〜2.5 GB。観測者 100 台では約 +5〜7 GB。
-- **観測者 100 台の上限要因（試算）**：各観測者コンテナは毎秒 10 回、全観測者を含む状態（100 台で約 31 KB）を
-  API から取得する。100 台では毎秒約 1000 回・約 30 MB の応答生成となり、推定処理より **API の CPU が先に
-  上限** になる見込み。Docker 上での 100 台の通し動作は**未検証**。
+  通信ライブラリを含め 1 コンテナ 50〜80 MB とすると、観測者以外の軽量コンテナ 6 個で約 0.3〜0.5 GB、
+  API 約 0.2〜0.3 GB、推定 約 0.4 GB、DB 約 0.2 GB。観測者コンテナは**使っている台数分だけ**起動し
+  （1 台あたり上限 192 MB、実使用 50〜80 MB の見込み）、初期 4 台なら合計 約 1.5〜2 GB。
+  以前の構成（待機を含め常時 12 台）に比べ、待機 8 台分（約 0.4〜0.6 GB）が不要になった。
+  観測者 99 台では約 +5〜7 GB。CI での実測値は CI の `e2e` ジョブの注記（containers / total memory）を参照。
+- **観測者 99 台の上限要因（試算）**：各観測者コンテナは毎秒 10 回、全観測者を含む状態（99 台で約 31 KB）を
+  API から取得する。99 台では毎秒約 1000 回・約 30 MB の応答生成となり、推定処理より **API の CPU が先に
+  上限** になる見込み。Docker 上での 99 台の通し動作は**未検証**。
 
 ### 2.3 ストレージの増え方（試算）
 
 イベント履歴（DB）は追記のみで、自動では削除されません。
 
-| 記録 | 観測者 12 台 | 観測者 100 台 |
+| 記録 | 観測者 12 台 | 観測者 99 台 |
 |---|---|---|
 | 推定結果（10 秒ごと、航跡を含む。長時間運転時は 1 件最大約 1 MB） | 最大 約 0.4 GB/時 | 最大 約 0.4 GB/時 |
 | 観測者の状態・航跡（毎秒） | 約 0.03 GB/時 | 約 0.25 GB/時 |
@@ -111,7 +115,10 @@ Docker イメージとビルドキャッシュに約 2〜3 GB（試算）。履�
 
 | 変数 | 既定 | 内容 |
 |---|---|---|
-| `OBSERVER_REPLICAS` | 12 | 観測者コンテナ数（初期 4 台＋待機）。1〜100 |
+| `OBSERVER_WARM_STANDBY` | 0 | 常駐させる待機観測者コンテナ数（0 = 必要時のみ起動、メモリ最小） |
+| `OBSERVER_MEMORY_MB` | 192 | 観測者コンテナ 1 台のメモリ上限 |
+| `OBSERVER_STANDBY_TIMEOUT_S` | 120 | 割り当てがないまま待った観測者コンテナが終了するまでの秒数 |
+| `OBSERVER_REPLICAS` | 12 | 静的構成（`--profile static-observers`）のときの観測者コンテナ数 |
 | `ESTIMATOR_CPUS` | 2 | 推定コンテナの CPU 上限 |
 | `ESTIMATOR_THREADS` | 2 | 推定の数値計算スレッド数 |
 | `WEB_BIND` / `WEB_PORT` | 0.0.0.0 / 8090 | Web 画面の公開先 |
@@ -124,4 +131,13 @@ Docker イメージとビルドキャッシュに約 2〜3 GB（試算）。履�
 - 実機 GPU での描画性能（推奨 GPU は未計測の推奨値）
 - Windows・macOS（特に Apple Silicon）での Docker 動作
 - Chrome 系以外のブラウザ
-- 観測者 100 台構成の Docker 上での通し動作（API 負荷が上限要因になる見込み）
+- 観測者 99 台構成の Docker 上での通し動作（API 負荷が上限要因になる見込み）
+
+## 6. 観測者コンテナの起動方式
+
+| 方式 | 起動方法 | 特徴 |
+|---|---|---|
+| 可変起動（既定） | `docker compose up --build` | `orchestrator` が観測者コンテナを必要な台数だけ起動・削除（番号 obs-01〜obs-99 を再利用）。メモリは使用中の観測者分だけ。Docker ソケットが必要 |
+| 静的構成 | `docker compose --profile static-observers up --build --scale observer=N` | 起動時に N 台を常駐（4 台が初期配置、残りは待機）。Docker ソケット不要だがメモリは N 台分を常に使用。`orchestrator` は Docker ソケットがなければ何もしない |
+
+停止は `docker compose down --remove-orphans`（`orchestrator` が起動した観測者コンテナもまとめて削除）。

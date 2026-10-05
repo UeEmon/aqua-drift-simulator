@@ -44,10 +44,11 @@
 | 4.2 | 水平位置・深度・時刻は誤差なし | ✅ | 観測に厳密な `observer_position` と `tick` を付与 | — |
 | 4.3 | 観測者深度を計算に加味 | ✅ | 斜距離・視線ベクトルはすべて3次元、既定配置で深度を交互に変化 | — |
 | 4.4 | 全観測者が同じ対象・同じ音源成分を観測 | ✅ | 単一音源周波数・単一目標 | — |
-| 4.5 | 観測者数 1〜100 | ✅ | `observer_limit`（1..100）、観測者は1コンテナ1観測者で `--scale` | `test_fifo_evicts_oldest_and_retains_archive` |
-| 4.6 | 上限超過時は最古から削除、観測履歴は保持 | ✅ | `SimulationState.set_observer`（FIFO）、DB `simulation_events` は追記のみ | 同上 |
+| 4.5 | **観測者は1〜99、番号は再利用可能**（以前の1〜100から変更） | ✅ | 観測者番号 obs-01〜obs-99（`observer_limit` 1..99）。観測を終えた番号（3時間経過・最古削除）は空きとなり、最も小さい空き番号から再利用。番号ごとに回数（session）を持ち、履歴は「obs-03#1」の形で区別して保持。終了した回の観測者からの送信は拒否 | `test_observer_slot_is_reused_with_new_session`、`test_orchestration.py`、CI（実コンテナで番号再利用を確認） |
+| 4.6 | 上限超過時は最古から削除、観測履歴は保持 | ✅ | `SimulationState.set_observer`／`evict_oldest`（FIFO）。99番まで埋まっている時に新たな観測者が必要になると、最古の観測者を削除して番号を空ける、DB `simulation_events` は追記のみ | 同上 |
 | 4.7 | 各観測者の観測時間は最大3時間 | ✅ | `max_observation_seconds = 10800`、超過で 410 → コンテナ終了 | `test_observer_expires_after_three_hours` |
 | 4.8 | **初期観測者は目標を囲む4点** | ✅ | 既定パターン `surround`：目標初期位置から半径 3000 YD、HDG±45°/135° の4点（深度は 200/350/500 Ft 交互）。5台目以降は外側のリング。再スタート時は新しい初期位置の周囲に再配置（選択可） | `test_default_observers_surround_target`, `test_reset_replaces_default_observers_around_new_target` |
+| 4.11 | **コンテナの起動を可変にしてメモリ消費を抑える** | ✅ | `orchestrator` コンテナが Docker Engine API で観測者コンテナを必要時に起動（初期4台・前程配置・手動配置）し、観測終了後は自動削除。待機コンテナは既定で常駐させない（`OBSERVER_WARM_STANDBY`=0）。観測者コンテナにメモリ上限（`OBSERVER_MEMORY_MB`=192）。Docker ソケットを使わない静的構成（`--profile static-observers`）も選択可 | `test_orchestration.py`、CI（実コンテナの起動・停止とメモリ使用量を記録） |
 | 4.10 | **目標推定位置の前程に適宜観測者を配置** | ✅ | `forward_deployment.plan_forward_deployment`（推定値のみ使用、真値は不使用）。水の座標系で、推定位置＋対水速度×先行時間（既定600秒）の予測点を最小カバー数（既定2）未満の観測者しか覆っていなければ、推定針路の前方4000 YD・左右2000 YDに観測者を投入（既定2点）。`deployer` コンテナが5秒ごとに判断し、待機中の観測者コンテナを投入。状態がTRACKINGでない・不確かさが大きい・最短間隔内のときは配置しない。GUI から即時配置も可能 | `test_forward_deployment.py`、`test_standby_observers_take_forward_deployments`、`test_forward_deployment_keeps_target_in_detection`（固定4点では約1700秒で探知が途切れる条件で、2200秒時点も探知・追尾を継続）、E2E |
 | 4.9 | 観測者の追加配置 | 🔧 | GIS から座標予約、環境変数 `OBSERVER_LAT/LON/DEPTH_FT`、他パターン（grid/line/ring/random） | `test_observer_placement_queue` |
 
@@ -168,7 +169,7 @@
 | 存在圏の描画形式 | 外形立体＋ボクセル |
 | 推定開始時に過去の観測を使うか | 使わない（開始時刻以降の観測のみ） |
 | 前程配置の既定値 | 先行600秒、前方4000 YD、左右2000 YD、2点、最短間隔120秒、最小カバー2 |
-| 待機観測者数 | 既定コンテナ数12（初期4＋待機8）。`OBSERVER_REPLICAS` で変更 |
+| 待機観測者数 | 既定0（必要時に起動）。`OBSERVER_WARM_STANDBY` で常駐数を指定可 |
 | 周囲4点の半径・向き | 3000 YD、目標針路に対して斜め45°（設定 `deployment.surround_radius_yd`） |
 | 位置・距離観測の誤差（比較用） | 位置 50 YD / 30 Ft、距離 2 %（比較ツールの仮定値） |
 | シミュレーター名称 | リポジトリ名に合わせ「AQUA-DRIFT」 |

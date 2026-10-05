@@ -65,7 +65,7 @@ GPU with WebGL2 is recommended; the GIS also runs on software WebGL (used in CI)
 
 | | Minimum (default, 12 observer containers) | Recommended |
 |---|---|---|
-| Server | Docker Engine 24+ / Compose v2.20+, x86-64, 4 cores, 4 GB RAM for Docker, 10 GB free | 4–8 cores, 8 GB, 20 GB SSD |
+| Server | Docker Engine 24+ / Compose v2.20+, x86-64, 4 cores, 3 GB RAM for Docker, 10 GB free | 4–8 cores, 4–8 GB, 20 GB SSD |
 | Browser | Chrome / Edge 98+, Firefox 94+, Safari 15.4+, WebGL 2, hardware acceleration on, 1280 px wide | Latest Chrome / Edge, recent GPU, 1600 px+ |
 
 Internet is needed only for the first build; the system runs offline. There is no
@@ -79,18 +79,20 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Twelve observer containers start by default (`OBSERVER_REPLICAS`): four active around the
-target and eight in standby for forward deployment. Open <http://localhost:8090>. API health: <http://localhost:8091/health>.
+Observers are numbered obs-01 .. obs-99. The `orchestrator` service starts an observer
+container only when an observer is needed (the initial four around the target, each forward
+or manual placement) and the container is removed when the observer ends, so memory is used
+only for observers in service; a freed number is reused (history kept as `obs-03#1`). It needs
+the Docker socket; without it, use the static mode
+`docker compose --profile static-observers up --build --scale observer=12`.
+Stop with `docker compose down --remove-orphans`.
 
-Add observers (1–100). To place the next one at a specific point, double-click the map (or enter
-coordinates) and press 「配置を予約」, then scale up:
+Open <http://localhost:8090>. API health: <http://localhost:8091/health>.
 
-```bash
-docker compose up -d --scale observer=5
-```
-
-When a new observer exceeds the limit, the oldest active observer is removed; its history stays
-in the database. Each observer observes for at most three hours.
+To add an observer at a specific point, double-click the map (or enter coordinates) and press
+「配置を予約」: the orchestrator starts a container for it automatically (1–99 observers).
+When all 99 numbers are in use, the oldest observer is removed to free a number; its history
+stays in the database. Each observer observes for at most three hours.
 
 ## Configuration (GIS panel or `PUT /api/config`)
 
