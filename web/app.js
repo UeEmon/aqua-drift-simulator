@@ -554,10 +554,9 @@ function updateDeployment(deployment) {
   }
   if (!tabVisible("tab-display")) return;
   const enabled = state.latestConfig?.forward?.enabled;
-  const warn = status.pending_placements > status.standby_count
-    ? `<span class="s-warn">▲ 待機観測者が不足（コンテナを追加してください）</span>` : "";
-  setHtml($("deploy-status"), `自動前程配置 <b>${enabled ? "有効" : "無効"}</b>　待機観測者 ${status.standby_count}　` +
-    `投入待ち ${status.pending_placements}　最終配置 ${status.last_deploy_tick ?? "--"} s<br>${warn}`);
+  const starting = status.pending_placements > 0 ? "（観測者コンテナを起動中）" : "";
+  setHtml($("deploy-status"), `自動前程配置 <b>${enabled ? "有効" : "無効"}</b>　投入待ち ${status.pending_placements}${starting}　` +
+    `待機中 ${status.standby_count}　最終配置 ${status.last_deploy_tick ?? "--"} s`);
   const rows = status.history.slice().reverse().map((r) =>
     `<tr><td>${r.tick} s</td><td>${r.positions.length}</td><td>${escapeHtml(r.reason)}</td></tr>`);
   setHtml($("deploy-table").querySelector("tbody"), rows.join("") || "<tr><td colspan='3'>配置なし</td></tr>");

@@ -202,7 +202,7 @@
             <h2>観測条件</h2>
             <form id="config-form" class="grid2">
               <label>上限斜距離 (YD)<input id="max-range" type="number" min="100" step="100" required /></label>
-              <label>観測者上限 (1–100)<input id="observer-limit" type="number" min="1" max="100" step="1" required /></label>
+              <label>観測者上限 (1–99)<input id="observer-limit" type="number" min="1" max="99" step="1" required /></label>
               <label>音源周波数 (Hz)<input id="source-frequency" type="number" min="1" step="0.1" required /></label>
               <label>共通周波数認識偏り (Hz)<input id="frequency-bias" type="number" step="0.01" required /></label>
               <label class="check span2"><input id="bearing-enabled" type="checkbox" />方位観測を生成する</label>
@@ -278,7 +278,7 @@
               <label>深度 (Ft)<input id="place-depth" type="number" min="0" step="10" value="200" required /></label>
               <button type="submit">配置を予約</button>
             </form>
-            <p class="note">初期観測者は目標を囲む4点。残りの観測者コンテナは待機し、前程配置または手動配置で投入されます。待機が足りない場合は <code>docker compose up -d --scale observer=N</code>。上限超過時は最古の観測者から削除（履歴は保持）。</p>
+            <p class="note">観測者は obs-01〜obs-99。初期は目標を囲む4点で、前程配置・手動配置のたびに観測者コンテナが自動で起動し、観測を終えると停止します（番号は再利用、履歴は保持）。上限超過時は最古の観測者から削除。</p>
           </section>
         </div>
 

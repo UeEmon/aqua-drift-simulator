@@ -17,10 +17,12 @@ from aqua_drift.models import (
     EstimatorFeed,
     EstimatorOutput,
     EstimatorSettings,
+    ObserverAssignment,
     ObserverFix,
     ObserverPlacement,
     ObserverRecord,
     ObserverState,
+    OrchestratorFeed,
     Position,
     ScenarioConfig,
     SimState,
@@ -45,8 +47,9 @@ class SimulationState:
         self.tick = 0
         self.target: TargetState | None = None
         self.observers: OrderedDict[str, ObserverRecord] = OrderedDict()
-        self.archived_observer_ids: list[str] = []
+        self.archived_observer_ids: list[str] = []  # "obs-03#1" = slot obs-03, session 1
         self._archived_set: set[str] = set()
+        self.sessions: dict[str, int] = {}  # observer slot -> current session
         self.batches: deque[DopplerBatch] = deque(maxlen=BATCH_RETENTION_TICKS)
         self.estimates: list[TrackEstimate] = []
         self.cpa: list[CpaResult] = []
@@ -84,15 +87,23 @@ class SimulationState:
             self.placements.append(placement)
             return len(self.placements)
 
-    async def assign_position(self, observer_id: str) -> Position | None:
-        """Start position for an observer container, stable per observer id:
+    async def assign_position(self, observer_id: str) -> ObserverAssignment | None:
+        """Start position for an observer container, stable per observer id and session:
         1. a queued placement (operator or forward deployment),
         2. the default pattern for the first `deployment.initial_count` observers,
         3. otherwise None: the container waits as a standby observer until a placement
-           is queued (used by the forward deployment)."""
+           is queued (used by the forward deployment).
+        A slot whose current session ended (evicted / 3 h limit) is reused with a new session;
+        the history of the old session stays archived as "<slot>#<session>"."""
         async with self.lock:
+            session = self.sessions.setdefault(observer_id, 0)
+            if self._session_key(observer_id, session) in self._archived_set:
+                session += 1  # reuse the slot
+                self.sessions[observer_id] = session
+                self.assignments.pop(observer_id, None)
+                self.explicit_ids.discard(observer_id)
             if observer_id in self.assignments:
-                return self.assignments[observer_id]
+                return self._assignment(observer_id, self.assignments[observer_id])
             if self.placements:
                 placement = self.placements.popleft()
                 position = placement.position
@@ -106,7 +117,39 @@ class SimulationState:
                 return None
             self.standby.pop(observer_id, None)
             self.assignments[observer_id] = position
-            return position
+            return self._assignment(observer_id, position)
+
+    def _assignment(self, observer_id: str, position: Position) -> ObserverAssignment:
+        return ObserverAssignment(
+            **position.model_dump(), observer_id=observer_id, session=self.sessions[observer_id]
+        )
+
+    @staticmethod
+    def _session_key(observer_id: str, session: int) -> str:
+        return f"{observer_id}#{session}"
+
+    async def evict_oldest(self, count: int = 1) -> list[str]:
+        """Free observer slots: archive the oldest active observers (history kept)."""
+        async with self.lock:
+            evicted = []
+            for _ in range(min(count, len(self.observers))):
+                observer_id, _record = self.observers.popitem(last=False)
+                self._archive(observer_id)
+                evicted.append(observer_id)
+            return evicted
+
+    async def orchestrator_feed(self) -> OrchestratorFeed:
+        async with self.lock:
+            return OrchestratorFeed(
+                tick=self.tick,
+                limit=self.config.observer_limit,
+                active_ids=list(self.observers),
+                standby_ids=[k for k, last in self.standby.items() if self.tick - last <= 10],
+                pending_placements=len(self.placements),
+                initial_remaining=max(
+                    0, self.config.deployment.initial_count - self.assignment_counter
+                ),
+            )
 
     def _standby_count(self) -> int:
         return sum(1 for last in self.standby.values() if self.tick - last <= 10)
@@ -146,13 +189,18 @@ class SimulationState:
         )
 
     async def set_observer(self, observer: ObserverState) -> str | None:
-        """Register/update an observer. When a new observer exceeds the limit (1..100) the
+        """Register/update an observer. When a new observer exceeds the limit (1..99) the
         oldest is evicted; each observer may observe for at most max_observation_seconds.
-        Evicted / expired observers are archived and their history is kept."""
+        Evicted / expired observers are archived and their history is kept; posts from an
+        ended session (a container that should have stopped) are rejected."""
         async with self.lock:
             observer_id = observer.observer_id
-            if observer_id in self._archived_set:
-                raise ObserverRejected(f"observer {observer_id} is archived")
+            current = self.sessions.setdefault(observer_id, observer.session)
+            if self._session_key(observer_id, observer.session) in self._archived_set:
+                raise ObserverRejected(f"observer {observer_id} session {observer.session} ended")
+            if observer.session < current:
+                raise ObserverRejected(f"observer {observer_id} session {observer.session} is stale")
+            self.sessions[observer_id] = observer.session
 
             evicted_id: str | None = None
             record = self.observers.get(observer_id)
@@ -305,6 +353,7 @@ class SimulationState:
             self.current_estimate = None
 
     def _archive(self, observer_id: str) -> None:
-        if observer_id not in self._archived_set:
-            self._archived_set.add(observer_id)
-            self.archived_observer_ids.append(observer_id)
+        key = self._session_key(observer_id, self.sessions.get(observer_id, 0))
+        if key not in self._archived_set:
+            self._archived_set.add(key)
+            self.archived_observer_ids.append(key)

@@ -163,7 +163,7 @@ class EstimatorConfig(BaseModel):
 
 class ScenarioConfig(BaseModel):
     scenario_name: str = "AQUA-DRIFT default"
-    observer_limit: int = Field(default=100, ge=1, le=100)
+    observer_limit: int = Field(default=99, ge=1, le=99)  # observer slots obs-01 .. obs-99
     max_slant_range_yd: float = Field(default=6000.0, gt=0)
     max_observation_seconds: int = Field(default=10800, ge=1, le=10800)
     doppler_interval_seconds: int = Field(default=1, ge=1)
@@ -222,6 +222,7 @@ class ObserverState(BaseModel):
     position: Position
     ground_velocity: Velocity = Velocity()  # truth drift (display only)
     status: ObserverStatus = ObserverStatus.ACTIVE
+    session: int = Field(default=0, ge=0)  # increments each time the observer slot is reused
 
 
 class ObserverPlacement(BaseModel):
@@ -230,6 +231,24 @@ class ObserverPlacement(BaseModel):
     position: Position
     observer_id: str | None = None
     source: str = "manual"  # manual (operator) | forward (automatic 前程 deployment)
+
+
+class ObserverAssignment(Position):
+    """Start position for an observer container plus its session for this slot."""
+
+    observer_id: str
+    session: int = 0
+
+
+class OrchestratorFeed(BaseModel):
+    """What the container orchestrator needs to decide how many observer containers to run."""
+
+    tick: int
+    limit: int
+    active_ids: list[str]
+    standby_ids: list[str]
+    pending_placements: int
+    initial_remaining: int
 
 
 class DopplerObservation(BaseModel):

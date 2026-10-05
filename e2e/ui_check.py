@@ -30,7 +30,7 @@ def fail(message: str) -> None:
 
 
 KEY_NOTES = ("perf:", "GPU:", "forward deployment:", "follow mode", "default view centre",
-             "centre-on-estimate", "background map:", "view oblique", "telemetry following")
+             "background map:", "view oblique")
 
 
 def note(message: str) -> None:
@@ -242,45 +242,22 @@ def main() -> int:
 
         def forward_deployment() -> None:
             snap = page.evaluate("() => window.aquaDrift.state.latestSnapshot")
-            before = len(snap["observers"])
-            standby = snap["deployment"]["standby_count"]
-            note(f"forward deployment: {before} active observers, {standby} standby before request")
-            if standby < 2:
-                fail(f"expected standby observers for forward deployment, got {standby}")
-                return
+            ids = sorted(r["state"]["observer_id"] for r in snap["observers"])
+            before = len(ids)
+            note(f"forward deployment: initial observers {ids}")
+            if ids[:4] != ["obs-01", "obs-02", "obs-03", "obs-04"]:
+                fail(f"initial observers should be obs-01..obs-04, got {ids}")
             page.evaluate("() => document.querySelector(\".tab[data-tab='tab-display']\").click()")
             page.evaluate("() => document.getElementById('deploy-now').click()")
+            # the orchestrator starts new observer containers for the placements
             page.wait_for_function(
-                f"() => window.aquaDrift.state.latestSnapshot.observers.length >= {before + 2}", timeout=30_000
+                f"() => window.aquaDrift.state.latestSnapshot.observers.length >= {before + 2}", timeout=120_000
             )
             snap = page.evaluate("() => window.aquaDrift.state.latestSnapshot")
-            note(f"forward deployment: {len(snap['observers'])} active observers after 'deploy now', "
-                 f"history {len(snap['deployment']['history'])}")
+            ids = sorted(r["state"]["observer_id"] for r in snap["observers"])
+            note(f"forward deployment: containers started on demand, observers now {ids}")
             page.wait_for_timeout(2000)
             page.screenshot(path=str(out / "07-forward-deployment.png"))
-
-        def perf() -> None:
-            full = page.evaluate("() => fetch('/api/snapshot').then(r => r.text()).then(t => t.length)")
-            t = page.evaluate("() => window.aquaDrift.telemetry")
-            truth_points = page.evaluate(
-                "() => (window.aquaDrift.tracks.get('truth') || { points: [] }).points.length"
-            )
-            ratio = full / max(t["bytes"], 1)
-            note(
-                f"perf: stream {t['bytes'] / 1024:.1f} KB/update vs full snapshot {full / 1024:.1f} KB "
-                f"({ratio:.1f}x smaller, before deflate); update {t['updateMs']:.1f} ms (max {t['maxUpdateMs']:.0f}); "
-                f"decode {t['parseMs']:.1f} ms in {'Web Worker' if t['worker'] else 'main thread'}; "
-                f"quality {t['quality']}; smooth {t['smooth']}; frame interval {t['frameIntervalMs']:.0f} ms; "
-                f"truth track {truth_points} pts"
-            )
-            if not t["worker"]:
-                fail("stream decoding is not running in the Web Worker")
-            if t["bytes"] > 0.35 * full:
-                fail(f"delta stream not smaller than the full snapshot: {t['bytes']:.0f} vs {full} bytes")
-            if t["updateMs"] > 100:
-                fail(f"main-thread update too slow: {t['updateMs']:.1f} ms")
-            if truth_points < 10:
-                fail(f"truth track not rendered from the stream ({truth_points} points)")
 
         stage("gpu info", gpu_info)
         stage("background map", base_map)

@@ -61,12 +61,17 @@ jobs:
           python -m playwright install --with-deps chromium
       - name: Browser check of the GIS
         run: python e2e/ui_check.py --url http://localhost:8090 --out e2e-artifacts
+      - name: Observer slot reuse and on-demand containers
+        run: python e2e/reuse_check.py
       - name: Collect container logs
         if: always()
         run: |
           mkdir -p e2e-artifacts
           docker compose ps > e2e-artifacts/compose-ps.txt
           docker compose logs --no-color > e2e-artifacts/compose.log
+          docker ps -a > e2e-artifacts/docker-ps.txt
+          docker stats --no-stream > e2e-artifacts/docker-stats.txt || true
+          docker compose down --remove-orphans
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -17,9 +17,10 @@ from aqua_drift.models import (
     EstimationControl,
     EstimatorFeed,
     EstimatorOutput,
+    ObserverAssignment,
     ObserverPlacement,
     ObserverState,
-    Position,
+    OrchestratorFeed,
     ScenarioConfig,
     SimState,
     Snapshot,
@@ -141,12 +142,27 @@ async def set_target(target: TargetState) -> dict[str, int]:
 
 
 @app.get("/internal/observer/assignment", response_model=None)
-async def observer_assignment(observer_id: str) -> Position | Response:
-    """Start position for an observer container; 204 = stay in standby and ask again."""
-    position = await state.assign_position(observer_id)
-    if position is None:
+async def observer_assignment(observer_id: str) -> ObserverAssignment | Response:
+    """Start position and session for an observer container; 204 = stay in standby."""
+    assignment = await state.assign_position(observer_id)
+    if assignment is None:
         return Response(status_code=204)
-    return position
+    return assignment
+
+
+@app.get("/internal/orchestrator-feed", response_model=OrchestratorFeed)
+async def orchestrator_feed() -> OrchestratorFeed:
+    return await state.orchestrator_feed()
+
+
+@app.post("/internal/observers/evict-oldest")
+async def evict_oldest(count: int = 1) -> dict[str, list[str]]:
+    """Free observer slots (oldest first) when all 99 are in use; history is kept."""
+    evicted = await state.evict_oldest(count)
+    for observer_id in evicted:
+        await store.archive_observer(observer_id)
+        await store.append_event("observer_evicted", state.tick, {"observer_id": observer_id}, observer_id)
+    return {"evicted": evicted}
 
 
 @app.get("/internal/deployment-feed", response_model=DeploymentFeed)

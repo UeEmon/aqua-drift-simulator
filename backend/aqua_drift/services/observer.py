@@ -16,24 +16,31 @@ from aqua_drift.physics import advance_observer
 from aqua_drift.services.common import API_URL, current_vector, post, snapshot, wait_for_api
 
 
-async def initial_position(client: httpx.AsyncClient, observer_id: str) -> Position:
+async def initial_position(client: httpx.AsyncClient, observer_id: str) -> tuple[Position, int] | None:
     """Fixed position from env, otherwise ask the API. HTTP 204 means standby: keep waiting
-    until the forward deployment (or the operator) queues a placement."""
+    until the forward deployment (or the operator) queues a placement. Returns None when the
+    standby timeout passes (the container then exits and frees its memory)."""
     lat, lon = os.getenv("OBSERVER_LAT"), os.getenv("OBSERVER_LON")
     if lat and lon:
         return Position(
             latitude=float(lat),
             longitude=float(lon),
             depth_ft=float(os.getenv("OBSERVER_DEPTH_FT", "200")),
-        )
+        ), 0
+    timeout = float(os.getenv("OBSERVER_STANDBY_TIMEOUT_S", "0"))  # 0 = wait forever
+    waited = 0.0
     while True:
         response = await client.get(
             f"{API_URL}/internal/observer/assignment", params={"observer_id": observer_id}, timeout=5
         )
         response.raise_for_status()
         if response.status_code == 200:
-            return Position.model_validate(response.json())
+            data = response.json()
+            return Position.model_validate(data), int(data.get("session", 0))
+        if timeout and waited >= timeout:
+            return None
         await asyncio.sleep(1.0)
+        waited += 1.0
 
 
 async def run() -> None:
@@ -51,10 +58,12 @@ async def run() -> None:
                 state = None  # runtime reset: return to the assigned start position
             generation = data.get("generation")
             if state is None:
+                start = await initial_position(client, observer_id)
+                if start is None:
+                    return  # standby timeout: nothing to do, free the container
+                position, session = start
                 state = ObserverState(
-                    observer_id=observer_id,
-                    tick=tick,
-                    position=await initial_position(client, observer_id),
+                    observer_id=observer_id, tick=tick, position=position, session=session
                 )
                 last_tick = tick - 1
             if tick > last_tick:
@@ -64,7 +73,7 @@ async def run() -> None:
                 state.tick = tick
                 response = await post(client, "/internal/observer", state.model_dump(mode="json"))
                 if response.status_code == 410:
-                    return  # evicted or 3 h observation limit reached; history retained
+                    return  # evicted or 3 h limit reached: slot is freed for reuse
                 response.raise_for_status()
                 last_tick = tick
             await asyncio.sleep(0.1)

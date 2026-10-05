@@ -160,6 +160,7 @@ def advance_observer(
         position=move_position(state.position, current, seconds),
         ground_velocity=current,
         status=state.status,
+        session=state.session,
     )
 
 

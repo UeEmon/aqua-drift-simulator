@@ -73,11 +73,29 @@ services:
     <<: *worker
     command: ["python", "-m", "aqua_drift.services.target"]
 
+  # Observer containers (obs-01 .. obs-99) are started and removed on demand by the
+  # orchestrator: only observers in use occupy memory. It needs the Docker Engine socket.
+  orchestrator:
+    <<: *worker
+    command: ["python", "-m", "aqua_drift.services.orchestrator"]
+    stop_grace_period: 30s  # time to stop the observer containers it started
+    environment:
+      API_URL: http://api:8000
+      CURRENT_FIELD_URL: http://current-field:8001
+      OBSERVER_WARM_STANDBY: ${OBSERVER_WARM_STANDBY:-0}
+      OBSERVER_MEMORY_MB: ${OBSERVER_MEMORY_MB:-192}
+      OBSERVER_STANDBY_TIMEOUT_S: ${OBSERVER_STANDBY_TIMEOUT_S:-120}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # Static alternative without the Docker socket:
+  #   docker compose --profile static-observers up --scale observer=N
   observer:
     <<: *worker
+    profiles: ["static-observers"]
     command: ["python", "-m", "aqua_drift.services.observer"]
     deploy:
-      replicas: ${OBSERVER_REPLICAS:-12}  # 4 initial + standby for forward deployment
+      replicas: ${OBSERVER_REPLICAS:-12}
 
   # acoustic source / Doppler computation (音源演算部): separate container
   doppler:

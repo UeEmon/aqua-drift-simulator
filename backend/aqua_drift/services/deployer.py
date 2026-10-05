@@ -39,10 +39,8 @@ async def run() -> None:
                 request = DeploymentRequest(tick=feed.tick, positions=positions, reason=reason)
                 result = await post(client, "/internal/deploy", request.model_dump(mode="json"))
                 result.raise_for_status()
-                log.info("tick=%s deployed %d observers (%s); standby=%d",
-                         feed.tick, len(positions), reason, feed.standby_count)
-                if feed.standby_count < len(positions):
-                    log.warning("not enough standby observers: scale up the observer service")
+                log.info("tick=%s deployed %d observers (%s); the orchestrator starts their containers",
+                         feed.tick, len(positions), reason)
             elif reason != last_reason:
                 log.info("tick=%s no deployment: %s", feed.tick, reason)
             last_reason = reason
