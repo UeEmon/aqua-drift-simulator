@@ -212,10 +212,24 @@ def main() -> int:
             page.screenshot(path=str(out / "03-centered.png"))
 
         def follow() -> None:
-            page.evaluate("() => document.getElementById('follow-estimate').click()")
-            page.wait_for_function("() => document.getElementById('follow-estimate').checked", timeout=10_000)
-            page.wait_for_timeout(8000)
-            check_centred("follow mode (default: truth)", 0.08, "truth")
+            mode = page.evaluate("() => document.getElementById('follow-mode').value")
+            if mode != "center":
+                fail(f"default follow mode is '{mode}', expected 'center'")
+            # default: no action needed, the truth stays in the screen centre while it moves
+            page.evaluate("() => document.getElementById('center-truth').click()")
+            page.wait_for_timeout(10_000)
+            check_centred("follow mode center (default, after 10 s)", 0.08, "truth")
+            # edge mode: pan the target out of the frame, it must come back into view by itself
+            page.evaluate("""() => { const el = document.getElementById('follow-mode');
+                el.value = 'edge'; el.dispatchEvent(new Event('change')); }""")
+            page.wait_for_timeout(3000)
+            page.evaluate("""() => { const c = window.aquaDrift.viewer.camera;
+                c.moveRight(c.positionCartographic.height * 3); window.aquaDrift.viewer.scene.requestRender(); }""")
+            page.wait_for_timeout(6000)
+            check_centred("follow mode edge (after panning away)", 0.32, "truth")
+            page.evaluate("""() => { const el = document.getElementById('follow-mode');
+                el.value = 'center'; el.dispatchEvent(new Event('change')); }""")
+            page.wait_for_timeout(3000)
 
         def final_screens() -> None:
             page.evaluate("() => document.querySelector(\".tab[data-tab='tab-compare']\").click()")

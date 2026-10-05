@@ -42,7 +42,13 @@
             </select>
           </div>
           <div class="vt-row checks">
-            <label title="中心の対象（既定は真値）に追従"><input id="follow-estimate" type="checkbox" />中心対象に追従</label>
+            <label title="中心の対象（既定は真値）が画面から外れないようにする">追従
+              <select id="follow-mode">
+                <option value="center" selected>常に中心</option>
+                <option value="edge">端で中心へ戻す</option>
+                <option value="off">しない</option>
+              </select>
+            </label>
             <label><input id="orthographic" type="checkbox" />正射投影</label>
             <label title="1秒ごとの更新の間をなめらかに補間（描画が追いつかない場合は自動停止）"><input id="smooth-motion" type="checkbox" checked />なめらか</label>
             <label title="背景地図（Natural Earth II）。描画優先のため通常はオフ"><input id="show-basemap" type="checkbox" />背景地図</label>

@@ -423,11 +423,14 @@ function setSmooth(enabled, reason = "") {
   scene.requestRender();
 }
 
-scene.preRender.addEventListener(() => {
-  if (!anim.active.size) return;
-  const now = performance.now();
-  for (const marker of anim.active) if (!marker.step(now)) anim.active.delete(marker);
-  updateErrorLine();
+scene.preUpdate.addEventListener(() => {
+  // runs before the camera is updated: markers move first, then the camera follows them
+  if (anim.active.size) {
+    const now = performance.now();
+    for (const marker of anim.active) if (!marker.step(now)) anim.active.delete(marker);
+    updateErrorLine();
+  }
+  followTick();
 });
 
 // ================================================================== truth
@@ -811,6 +814,17 @@ function sideHeading(focus) {
   return (course + 90) % 360; // look across the track: the course runs left -> right
 }
 
+function flightOptions(options) {
+  // follow mode pauses while the camera flies, then re-anchors on the target
+  state.flying = (state.flying || 0) + 1;
+  const done = () => {
+    state.flying = Math.max(0, (state.flying || 1) - 1);
+    state.followAnchor = null;
+    scene.requestRender();
+  };
+  return { ...options, complete: done, cancel: done };
+}
+
 function applyView(view) {
   const focus = focusPosition(centreTarget());
   if (!focus) {
@@ -824,25 +838,25 @@ function applyView(view) {
   const radius = viewRadiusM();
   const duration = 1.0;
   if (view === "top") {
-    camera.flyTo({
+    camera.flyTo(flightOptions({
       destination: Cesium.Cartesian3.fromDegrees(p.longitude, p.latitude, heightOf(p.depth_ft) + radius * 2.6),
       orientation: { heading: 0, pitch: -Cesium.Math.PI_OVER_TWO, roll: 0 },
       duration,
-    });
+    }));
   } else if (view === "side") {
     const heading = sideHeading(p);
     const distance = radius * 2.4;
     const from = destination(p, (heading + 180) % 360, distance);
-    camera.flyTo({
+    camera.flyTo(flightOptions({
       destination: Cesium.Cartesian3.fromDegrees(from.longitude, from.latitude, heightOf(p.depth_ft)),
       orientation: { heading: Cesium.Math.toRadians(heading), pitch: 0, roll: 0 },
       duration,
-    });
+    }));
   } else {
-    camera.flyToBoundingSphere(new Cesium.BoundingSphere(cartOf(p), radius), {
+    camera.flyToBoundingSphere(new Cesium.BoundingSphere(cartOf(p), radius), flightOptions({
       offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-40), radius * 3.2),
       duration,
-    });
+    }));
   }
   for (const button of document.querySelectorAll(".vt[data-view]")) button.classList.toggle("active", button.dataset.view === view);
   state.followAnchor = null;
@@ -851,7 +865,7 @@ function applyView(view) {
   scene.requestRender();
 }
 
-function centerOn(prefer) {
+function centerOn(prefer, quiet = false) {
   const focus = focusPosition(prefer);
   if (!focus) {
     setMessage("中心に置く対象がまだありません。");
@@ -862,32 +876,70 @@ function centerOn(prefer) {
   const target = cartOf(focus.position);
   const range = Cesium.Math.clamp(Cesium.Cartesian3.distance(camera.positionWC, target), 300, viewRadiusM() * 6);
   // keep the current viewing direction, move so that the target is in the screen centre
-  camera.flyToBoundingSphere(new Cesium.BoundingSphere(target, 1), {
+  camera.flyToBoundingSphere(new Cesium.BoundingSphere(target, 1), flightOptions({
     offset: new Cesium.HeadingPitchRange(camera.heading, camera.pitch, range),
     duration: 0.8,
-  });
+  }));
   state.followAnchor = null;
-  setMessage(`${focus.source}を画面中心にしました。`);
+  if (!quiet) setMessage(`${focus.source}を画面中心にしました。`);
   scene.requestRender();
 }
 
-function followEstimate() {
-  if (!checked("follow-estimate")) {
+function followMode() {
+  return $("follow-mode") ? $("follow-mode").value : "center";
+}
+
+function focusMarker() {
+  // the drawn (interpolated) marker of the centre target, so the camera moves as smoothly
+  if (centreTarget() === "estimate") {
+    const marker = state.estimates?.[selectedMode()];
+    if (marker?.pos && marker.point.show) return { marker, source: "推定位置" };
+  }
+  return state.truth?.pos ? { marker: state.truth, source: "真値" } : null;
+}
+
+function windowPosition(position) {
+  const transforms = Cesium.SceneTransforms;
+  const project = transforms && (transforms.worldToWindowCoordinates || transforms.wgs84ToWindowCoordinates);
+  return project ? project(scene, position) : null;
+}
+
+const EDGE_MARGIN = 0.18; // "edge" mode: recentre when the target is within 18 % of a screen edge
+
+function followTick() {
+  const mode = followMode();
+  const focus = focusMarker();
+  if (mode === "off" || !focus) {
     state.followAnchor = null;
     return;
   }
-  const focus = focusPosition(centreTarget());
-  if (!focus) return;
-  if (state.followSource !== focus.source) state.followAnchor = null; // target switched
-  state.followSource = focus.source;
-  const now = cartOf(focus.position);
-  if (state.followAnchor) {
-    // translate the camera by the followed position's displacement: orientation and zoom stay
-    const delta = Cesium.Cartesian3.subtract(now, state.followAnchor, new Cesium.Cartesian3());
-    viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
-    Cesium.Cartesian3.add(viewer.camera.position, delta, viewer.camera.position);
+  if (state.flying) return; // re-anchored when the flight ends
+  const now = focus.marker.pos;
+  if (mode === "center") {
+    if (state.followAnchor && state.followSource === focus.source) {
+      // translate the camera by the target's displacement: direction and zoom stay as set
+      const delta = Cesium.Cartesian3.subtract(now, state.followAnchor, new Cesium.Cartesian3());
+      if (Cesium.Cartesian3.magnitude(delta) > 0) {
+        viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+        Cesium.Cartesian3.add(viewer.camera.position, delta, viewer.camera.position);
+      }
+    }
+    state.followSource = focus.source;
+    state.followAnchor = Cesium.Cartesian3.clone(now, state.followAnchor || new Cesium.Cartesian3());
   }
-  state.followAnchor = now;
+  // both modes: recentre when the target nears a screen edge or has left the screen
+  // (edge mode only does this; centre mode also catches manual panning / a switched target)
+  const canvas = scene.canvas;
+  const at = windowPosition(now);
+  const w = canvas.clientWidth || 1;
+  const h = canvas.clientHeight || 1;
+  const outside = !at || at.x < EDGE_MARGIN * w || at.x > (1 - EDGE_MARGIN) * w
+    || at.y < EDGE_MARGIN * h || at.y > (1 - EDGE_MARGIN) * h;
+  const t = performance.now();
+  if (outside && t - (state.lastRecentre || 0) > 1500) {
+    state.lastRecentre = t;
+    centerOn(centreTarget(), true);
+  }
 }
 
 for (const button of document.querySelectorAll(".vt[data-view]")) {
@@ -895,9 +947,9 @@ for (const button of document.querySelectorAll(".vt[data-view]")) {
 }
 $("center-estimate").addEventListener("click", () => centerOn("estimate"));
 $("center-truth").addEventListener("click", () => centerOn("truth"));
-$("follow-estimate").addEventListener("change", () => {
+$("follow-mode").addEventListener("change", () => {
   state.followAnchor = null;
-  if (checked("follow-estimate")) centerOn(centreTarget());
+  if (followMode() !== "off") centerOn(centreTarget());
 });
 $("center-target").addEventListener("change", () => {
   state.followAnchor = null;
@@ -1524,7 +1576,6 @@ function render(snapshot) {
   updateCurrent(snapshot.current_estimate, snapshot.config);
   updateDeployment(snapshot.deployment);
   drawCharts();
-  followEstimate();
   if (state.firstFix && snapshot.target) {
     state.firstFix = false;
     applyView("oblique");
