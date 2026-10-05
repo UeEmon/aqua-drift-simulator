@@ -43,6 +43,8 @@ def note(message: str) -> None:
 
 
 def stage(name: str, func) -> None:
+    print(f"--- stage: {name}", flush=True)
+    notes.append(f"stage {name}")
     try:
         func()
     except Exception as error:  # noqa: BLE001 - report and continue with the other checks
@@ -295,4 +297,16 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import traceback
+
+    try:
+        code = main()
+    except BaseException as error:  # noqa: BLE001 - report anything that escaped the stages
+        trace = traceback.format_exc()[-1500:]
+        fail(f"ui_check crashed: {type(error).__name__}: {error} | {trace}")
+        code = 1
+    if failures:
+        summary = " || ".join(f[:300] for f in failures[:6])
+        print(f"::error title=ui_check summary::{_escape(summary)}", flush=True)
+        print(f"::error title=last notes::{_escape(' || '.join(n[:200] for n in notes[-6:]))}", flush=True)
+    sys.exit(code)
