@@ -24,6 +24,7 @@ common maximum slant range, and the exact time/position/depth of each drifting o
 
 Documentation:
 
+- [docs/system-requirements.md](docs/system-requirements.md) – **動作環境の要件**（サーバー・ブラウザ・GPU・ストレージ・ネットワーク）
 - [docs/requirements.md](docs/requirements.md) – requirements and item-by-item traceability
 - [docs/estimation-methods.md](docs/estimation-methods.md) – Kalman filter explained, alternatives, chosen method
 - [docs/observation-mode-comparison.md](docs/observation-mode-comparison.md) – position / range-bearing / bearing-only / Doppler / combinations
@@ -59,6 +60,17 @@ only changed chunks reach the GPU; quality adapts to the frame time; markers gli
 the 1 Hz updates ("なめらか", switched off automatically on very slow GPUs). The 「性能」 toggle
 shows frame rate, update time, received bytes, quality level and the GPU in use. A hardware
 GPU with WebGL2 is recommended; the GIS also runs on software WebGL (used in CI).
+
+## System requirements (summary)
+
+| | Minimum (default, 12 observer containers) | Recommended |
+|---|---|---|
+| Server | Docker Engine 24+ / Compose v2.20+, x86-64, 4 cores, 4 GB RAM for Docker, 10 GB free | 4–8 cores, 8 GB, 20 GB SSD |
+| Browser | Chrome / Edge 98+, Firefox 94+, Safari 15.4+, WebGL 2, hardware acceleration on, 1280 px wide | Latest Chrome / Edge, recent GPU, 1600 px+ |
+
+Internet is needed only for the first build; the system runs offline. There is no
+authentication — keep it on a trusted network or set `WEB_BIND=127.0.0.1`. Details, measured
+figures and storage growth: [docs/system-requirements.md](docs/system-requirements.md).
 
 ## Start with Docker
 
