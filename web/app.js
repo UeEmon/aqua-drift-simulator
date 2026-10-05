@@ -865,6 +865,28 @@ function applyView(view) {
   scene.requestRender();
 }
 
+function initialView(snapshot) {
+  // start-up view: placed at once (no flight, no zoom-in animation) as a wide overview of the
+  // target and all observers, centred on the centre target (truth by default). After this the
+  // camera only moves on the user's actions (follow mode is off by default).
+  const focus = focusPosition(centreTarget());
+  if (!focus) return;
+  const centre = cartOf(focus.position);
+  let extent = viewRadiusM();
+  for (const observer of snapshot.observers || []) {
+    if (!observer.position) continue;
+    extent = Math.max(extent, Cesium.Cartesian3.distance(centre, cartOf(observer.position)));
+  }
+  const camera = viewer.camera;
+  camera.viewBoundingSphere(new Cesium.BoundingSphere(centre, extent * 1.3),
+    new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-50), extent * 1.3 * 2.4));
+  camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+  state.initialCamera = { height: camera.positionCartographic.height };
+  for (const button of document.querySelectorAll(".vt[data-view]")) button.classList.toggle("active", button.dataset.view === "oblique");
+  setMessage(`初期表示：目標と観測者の全体（中心：${focus.source}）。追従は「しない」（ツールバーで変更可）`);
+  scene.requestRender();
+}
+
 function centerOn(prefer, quiet = false) {
   const focus = focusPosition(prefer);
   if (!focus) {
@@ -874,8 +896,8 @@ function centerOn(prefer, quiet = false) {
   const camera = viewer.camera;
   camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
   const target = cartOf(focus.position);
-  const range = Cesium.Math.clamp(Cesium.Cartesian3.distance(camera.positionWC, target), 300, viewRadiusM() * 6);
-  // keep the current viewing direction, move so that the target is in the screen centre
+  const range = Math.max(Cesium.Cartesian3.distance(camera.positionWC, target), 50);
+  // keep the current viewing direction and distance (no zoom), move the target to the centre
   camera.flyToBoundingSphere(new Cesium.BoundingSphere(target, 1), flightOptions({
     offset: new Cesium.HeadingPitchRange(camera.heading, camera.pitch, range),
     duration: 0.8,
@@ -886,7 +908,7 @@ function centerOn(prefer, quiet = false) {
 }
 
 function followMode() {
-  return $("follow-mode") ? $("follow-mode").value : "center";
+  return $("follow-mode") ? $("follow-mode").value : "off";
 }
 
 function focusMarker() {
@@ -1578,7 +1600,7 @@ function render(snapshot) {
   drawCharts();
   if (state.firstFix && snapshot.target) {
     state.firstFix = false;
-    applyView("oblique");
+    initialView(snapshot);
   }
   scene.requestRender();
 }

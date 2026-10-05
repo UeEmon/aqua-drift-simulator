@@ -29,7 +29,7 @@ def fail(message: str) -> None:
     print(f"::error::{_escape(message)}", flush=True)
 
 
-KEY_NOTES = ("perf:", "GPU:", "forward deployment:", "follow mode", "default view centre",
+KEY_NOTES = ("initial view", "perf:", "GPU:", "forward deployment:", "follow mode", "default view centre",
              "background map:", "view oblique")
 
 
@@ -211,14 +211,35 @@ def main() -> int:
             check_centred("centre-on-estimate", 0.05)
             page.screenshot(path=str(out / "03-centered.png"))
 
+        def initial_view() -> None:
+            # start-up: follow off, the camera was placed once without a flight and has not
+            # zoomed or moved since (minutes of target motion have passed by now)
+            info = page.evaluate("""() => { const a = window.aquaDrift; const c = a.viewer.camera;
+                return { mode: document.getElementById('follow-mode').value, initial: a.state.initialCamera,
+                         height: c.positionCartographic.height, flying: !!c._currentFlight }; }""")
+            note(f"initial view: follow {info['mode']}, camera height {info['height']:.0f} m "
+                 f"(set at start {(info['initial'] or {}).get('height', float('nan')):.0f} m)")
+            if info["mode"] != "off":
+                fail(f"default follow mode is '{info['mode']}', expected 'off'")
+            if not info["initial"]:
+                fail("initial overview view was not applied")
+            elif abs(info["height"] - info["initial"]["height"]) > 1.0 or info["flying"]:
+                fail(f"camera zoomed/moved by itself since start: {info}")
+            check_centred("initial view keeps the target in frame", 0.35, "truth")
+            h0 = info["height"]
+            page.wait_for_timeout(5000)
+            h1 = page.evaluate("() => window.aquaDrift.viewer.camera.positionCartographic.height")
+            if abs(h1 - h0) > 1.0:
+                fail(f"camera height changed without user action: {h0:.0f} -> {h1:.0f} m")
+
         def follow() -> None:
-            mode = page.evaluate("() => document.getElementById('follow-mode').value")
-            if mode != "center":
-                fail(f"default follow mode is '{mode}', expected 'center'")
-            # default: no action needed, the truth stays in the screen centre while it moves
+            # follow is opt-in: switch to "always centre" and the truth stays in the centre
             page.evaluate("() => document.getElementById('center-truth').click()")
+            page.wait_for_timeout(3000)
+            page.evaluate("""() => { const el = document.getElementById('follow-mode');
+                el.value = 'center'; el.dispatchEvent(new Event('change')); }""")
             page.wait_for_timeout(10_000)
-            check_centred("follow mode center (default, after 10 s)", 0.08, "truth")
+            check_centred("follow mode center (after 10 s)", 0.08, "truth")
             # edge mode: pan the target out of the frame, it must come back into view by itself
             page.evaluate("""() => { const el = document.getElementById('follow-mode');
                 el.value = 'edge'; el.dispatchEvent(new Event('change')); }""")
@@ -228,8 +249,8 @@ def main() -> int:
             page.wait_for_timeout(6000)
             check_centred("follow mode edge (after panning away)", 0.32, "truth")
             page.evaluate("""() => { const el = document.getElementById('follow-mode');
-                el.value = 'center'; el.dispatchEvent(new Event('change')); }""")
-            page.wait_for_timeout(3000)
+                el.value = 'off'; el.dispatchEvent(new Event('change')); }""")
+            page.wait_for_timeout(1000)
 
         def final_screens() -> None:
             page.evaluate("() => document.querySelector(\".tab[data-tab='tab-compare']\").click()")
@@ -298,6 +319,7 @@ def main() -> int:
             if truth_points < 10:
                 fail(f"truth track not rendered from the stream ({truth_points} points)")
 
+        stage("initial view", initial_view)
         stage("gpu info", gpu_info)
         stage("background map", base_map)
         stage("telemetry idle", lambda: telemetry("idle"))

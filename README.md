@@ -43,8 +43,10 @@ Documentation:
 
 - **View toolbar (map, top right)**: oblique / top-down (vertical) / horizontal side view
   (direction selectable), orthographic top view, **centre on truth (default centre target)**,
-  centre on estimate, centre-target selector, **follow mode** (default *always centre*: the camera
-  moves with the target every frame so it never leaves the frame; *recentre at edge*; *off*), FPS overlay
+  centre on estimate, centre-target selector, **follow mode** (default *off*; *always centre*: the camera
+  moves with the target every frame so it never leaves the frame; *recentre at edge*). At start-up
+  the camera is placed once, without a fly-in, on a wide overview of the target and observers and
+  then moves only on user actions (no automatic zoom), FPS overlay
 
 By default four observers surround the target's initial position; the remaining observer
 containers wait in standby. The `deployer` service places them **ahead (前程) of the estimated
