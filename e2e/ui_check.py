@@ -29,8 +29,7 @@ def fail(message: str) -> None:
     print(f"::error::{_escape(message)}", flush=True)
 
 
-KEY_NOTES = ("initial view", "perf:", "GPU:", "forward deployment:", "follow mode", "follow off",
-             "default view centre")
+KEY_NOTES = ("initial view", "perf:", "GPU:", "forward deployment:", "follow mode", "map fits")
 
 
 def note(message: str) -> None:
@@ -174,7 +173,24 @@ def main() -> int:
             if not t.get("smooth") and fps > 20:
                 fail(f"render loop not idle ({label}): {fps:.1f} frames/s with requestRenderMode; {data['diag']}")
 
+        def map_fits(width: int, height: int) -> None:
+            # the map (canvas, status strip, camera readout) must lie within the window height
+            box = page.evaluate("""() => { const r = (el) => el.getBoundingClientRect();
+                const s = window.aquaDrift.viewer.scene; const panel = document.getElementById('control-panel');
+                return { win: window.innerHeight, canvas: r(s.canvas).bottom, strip: r(document.getElementById('status-strip')).bottom,
+                         hud: r(document.getElementById('camera-hud')).bottom, doc: document.documentElement.scrollHeight,
+                         panelScrolls: panel.scrollHeight > panel.clientHeight }; }""")
+            note(f"map fits {width}x{height}: canvas bottom {box['canvas']:.0f} / window {box['win']}, "
+                 f"status strip {box['strip']:.0f}, page height {box['doc']}, side panel scrolls {box['panelScrolls']}")
+            worst = max(box["canvas"], box["strip"], box["hud"], box["doc"])
+            if worst > box["win"] + 1:
+                fail(f"map exceeds the window height at {width}x{height}: {box}")
+
         def overflow() -> None:
+            for width, height in ((1600, 1000), (1280, 720), (700, 900)):
+                page.set_viewport_size({"width": width, "height": height})
+                page.wait_for_timeout(1200)
+                map_fits(width, height)
             for width in (1600, 1280):
                 page.set_viewport_size({"width": width, "height": 1000})
                 page.wait_for_timeout(800)
