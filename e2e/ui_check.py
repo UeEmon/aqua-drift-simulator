@@ -146,8 +146,13 @@ def main() -> int:
                   const key = line.trim().replace(/^at /, '').replace(/https?:[^ )]*[/]/, '').slice(0, 60);
                   d.by[key] = (d.by[key] || 0) + 1; s.__origRequestRender(); };
                 const c = window.aquaDrift.viewer.camera; let last = c.positionWC.clone();
+                d.sizes = {}; const w = window.aquaDrift.viewer.cesiumWidget || window.aquaDrift.viewer;
                 d.off = s.postRender.addEventListener(() => { if (!Cesium.Cartesian3.equalsEpsilon(last, c.positionWC, 0, 1e-6)) d.cam++;
-                  last = c.positionWC.clone(); }); }""")
+                  last = c.positionWC.clone(); const cv = s.canvas; const doc = document.documentElement;
+                  const k = cv.clientWidth + 'x' + cv.clientHeight + ' buf ' + cv.width + 'x' + cv.height + ' dpr ' + window.devicePixelRatio
+                    + ' res ' + window.aquaDrift.viewer.resolutionScale + ' doc ' + doc.scrollWidth + 'x' + doc.scrollHeight
+                    + ' force ' + !!w._forceResize;
+                  d.sizes[k] = (d.sizes[k] || 0) + 1; }); }""")
             t0 = page.evaluate("() => window.aquaDrift.telemetry.frames")
             page.wait_for_timeout(3000)
             data = page.evaluate(
@@ -155,7 +160,7 @@ def main() -> int:
                   s.requestRender = s.__origRequestRender; d.off();
                   const by = Object.entries(d.by).sort((a, b) => b[1] - a[1]).slice(0, 4);
                   return { t: window.aquaDrift.telemetry, long: window.__longTasks,
-                  diag: { requests: d.calls, cameraMoves: d.cam, by, globe: s.globe.show,
+                  diag: { requests: d.calls, cameraMoves: d.cam, by, sizes: Object.entries(d.sizes).slice(0, 4), globe: s.globe.show,
                           anim: window.aquaDrift.anim.active.size },
                   pending: ['region','regionOutline','voxels'].map(k => !!window.aquaDrift.gpu[k].pending) }; }"""
             )

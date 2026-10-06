@@ -875,15 +875,17 @@ function initialView() {
   const target = cartOf(focus.position);
   const altitudeM = INITIAL_CAMERA_ALT_FT * FT_TO_M;
   const pitch = Cesium.Math.toRadians(INITIAL_CAMERA_PITCH_DEG);
-  const range = (altitudeM - heightOf(focus.position.depth_ft)) / Math.sin(-pitch);
-  camera.lookAt(target, new Cesium.HeadingPitchRange(0, pitch, range));
-  camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
-  // remove the earth-curvature residual so that the altitude is exactly the set value
-  const at = camera.positionCartographic;
-  camera.setView({
-    destination: Cesium.Cartesian3.fromRadians(at.longitude, at.latitude, altitudeM),
-    orientation: { heading: camera.heading, pitch: camera.pitch, roll: 0 },
-  });
+  const below = altitudeM - heightOf(focus.position.depth_ft);
+  let range = below / Math.sin(-pitch);
+  // the target stays exactly on the line of sight; the range is refined so that the altitude
+  // is the set value despite the earth's curvature (converges in 2-3 steps)
+  for (let i = 0; i < 4; i += 1) {
+    camera.lookAt(target, new Cesium.HeadingPitchRange(0, pitch, range));
+    camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+    const error = camera.positionCartographic.height - altitudeM;
+    if (!Number.isFinite(error) || Math.abs(error) < 0.01) break;
+    range -= error / Math.sin(-pitch);
+  }
   state.initialCamera = { height: altitudeM };
   for (const button of document.querySelectorAll(".vt[data-view]")) button.classList.toggle("active", button.dataset.view === "oblique");
   setMessage(`初期表示：高度 ${INITIAL_CAMERA_ALT_FT} ft、俯角 ${-INITIAL_CAMERA_PITCH_DEG}°。追従オン：${focus.source}を視点中心に保ちます（ツールバーで切替）`);
