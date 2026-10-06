@@ -142,7 +142,7 @@ def main() -> int:
             # count who requests frames during the window (diagnostics for the idle check)
             page.evaluate("""() => { const s = window.aquaDrift.viewer.scene; const d = { calls: 0, by: {}, cam: 0 };
                 window.__renderDiag = d; if (!s.__origRequestRender) s.__origRequestRender = s.requestRender.bind(s);
-                s.requestRender = () => { d.calls++; const line = (new Error().stack || '').split('\n')[2] || '?';
+                s.requestRender = () => { d.calls++; const line = (new Error().stack || '').split(String.fromCharCode(10))[2] || '?';
                   const key = line.trim().replace(/^at /, '').replace(/https?:[^ )]*[/]/, '').slice(0, 60);
                   d.by[key] = (d.by[key] || 0) + 1; s.__origRequestRender(); };
                 const c = window.aquaDrift.viewer.camera; let last = c.positionWC.clone();
