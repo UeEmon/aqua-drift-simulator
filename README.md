@@ -28,6 +28,7 @@ Documentation:
 - [docs/requirements.md](docs/requirements.md) – requirements and item-by-item traceability
 - [docs/estimation-methods.md](docs/estimation-methods.md) – Kalman filter explained, alternatives, chosen method
 - [docs/observation-mode-comparison.md](docs/observation-mode-comparison.md) – position / range-bearing / bearing-only / Doppler / combinations
+- [docs/depth-from-doppler.md](docs/depth-from-doppler.md) – how to obtain the target depth from Doppler (overflight, vertical baseline, depth-rate prior, Lloyd's mirror), CRLB and particle-filter check
 - [docs/architecture.md](docs/architecture.md) and [docs/uml/](docs/uml/) – PlantUML design
 
 ## GIS panel

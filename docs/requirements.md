@@ -60,6 +60,7 @@
 | 5.2 | 方位：水平・真北基準・15秒・同期・σ=15°・正規・平均0・時間/観測者間独立・範囲内のみ | ✅ | `BearingConfig`（既定 σ 15°, 15 s）、doppler コンテナで生成 | 
 | 5.3 | **最新指定：ベアリング（方位）情報も活用する**（以前の「使用しない」を変更） | ✅ | 粒子フィルタの逐次更新・resample-move の窓尤度・LM 残差に方位尤度（ラップした角度差／σ）を追加。`estimator.use_bearing` で切替可（ドップラーのみとの比較用） |
 | 5.4 | 「位置が直接得られる」方式は実行系の入力に採用しない | ✅ | 比較対象としてのみ実装 |
+| 5.5 | ドップラーで深度情報を得る方法の検討 | 📄 | `aqua_drift.analysis.depth_doppler`、結果は `docs/depth-from-doppler.md`（真上通過・鉛直基線・深度変化率の事前・海面反射。推奨案は未実装） |
 
 検証：`test_bearing_is_horizontal_true_bearing_at_interval`（真方位・σ・間隔）、
 `test_bearings_resolve_collinear_mirror_ambiguity`（一直線配置の鏡像解を方位で解消）、
