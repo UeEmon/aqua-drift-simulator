@@ -5,7 +5,6 @@ const FT_TO_M = 0.3048;
 const YD_TO_M = 0.9144;
 const EARTH_R = 6371008.8;
 const REGION_REBUILD_MS = 3000; // presence-region geometry rebuild throttle
-const MAX_VOXEL_BOXES = 400; // densest voxels drawn as translucent boxes (overdraw budget)
 const MAX_HISTORY = 3600;
 
 const $ = (id) => document.getElementById(id);
@@ -28,10 +27,30 @@ const viewer = new Cesium.Viewer("cesiumContainer", {
   // the GPU stays idle between the 1 Hz updates instead of redrawing at 60 fps
   requestRenderMode: true,
   maximumRenderTimeChange: Infinity,
-  msaaSamples: 4, // hardware multisample anti-aliasing (WebGL2)
+  msaaSamples: 2, // hardware multisample anti-aliasing (WebGL2); set per quality level below
+  showRenderLoopErrors: false, // recovered in scene.renderError below
   contextOptions: { webgl: { powerPreference: "high-performance", alpha: false } },
 });
 const scene = viewer.scene;
+// plain sorted alpha blending instead of order-independent translucency: OIT needs extra
+// full-screen accumulation buffers (x MSAA x device pixels) for the translucent presence region
+scene.orderIndependentTranslucency = false;
+// an exception inside Cesium's frame stops its render loop for good ("Rendering has stopped");
+// record it and restart the loop instead of leaving a frozen map
+const renderFaults = { count: 0, last: "", lastAt: 0 };
+scene.renderError.addEventListener((_scene, error) => {
+  renderFaults.count += 1;
+  renderFaults.last = String((error && error.message) || error);
+  if (window.console) console.error("render error", error);
+  const now = performance.now();
+  const soon = now - renderFaults.lastAt < 5000;
+  renderFaults.lastAt = now;
+  setTimeout(() => {
+    viewer.useDefaultRenderLoop = true;
+    scene.requestRender();
+  }, soon ? 2000 : 200);
+  setMessage(`描画エラーから復帰しました（${renderFaults.count} 回目）: ${renderFaults.last}`);
+});
 viewer.useBrowserRecommendedResolution = false; // full device-pixel resolution on HiDPI
 viewer.resolutionScale = Math.min(window.devicePixelRatio || 1, 2);
 if (scene.postProcessStages && scene.postProcessStages.fxaa) scene.postProcessStages.fxaa.enabled = true;
@@ -677,7 +696,7 @@ function regionPrimitives(region, withBoxes = true) {
   const voxels = [];
   const exag = exaggeration();
   const totalVoxels = region.components.reduce((n, c) => n + c.voxels.length, 0);
-  const voxelShare = Math.min(1, MAX_VOXEL_BOXES / Math.max(totalVoxels, 1));
+  const voxelShare = Math.min(1, voxelBoxBudget() / Math.max(totalVoxels, 1));
   region.components.forEach((component) => {
     if (component.polygon.length >= 3) {
       const hierarchy = new Cesium.PolygonHierarchy(Cesium.Cartesian3.fromDegreesArray(component.polygon.flat()));
@@ -733,7 +752,7 @@ function regionPrimitives(region, withBoxes = true) {
 function updateRegion(estimate) {
   const region = estimate?.presence_region;
   const voxelStyle = $("voxel-style") ? $("voxel-style").value : "box";
-  const settings = `${estimate?.mode}-${checked("show-region")}-${checked("show-voxels")}-${voxelStyle}-${exaggeration()}-${state.runKey}`;
+  const settings = `${estimate?.mode}-${checked("show-region")}-${checked("show-voxels")}-${voxelStyle}-${exaggeration()}-${state.runKey}-q${quality.level}`;
   const key = `${estimate?.tick}-${settings}`;
   if (key === state.lastRegionKey) return;
   // display settings changed -> rebuild now; new estimate only -> at most every REGION_REBUILD_MS
@@ -751,12 +770,12 @@ function updateRegion(estimate) {
     replacePrimitive(gpu.voxels, null);
     return;
   }
-  const boxes = checked("show-voxels") && voxelStyle === "box";
+  const boxes = checked("show-voxels") && voxelStyle === "box" && voxelBoxBudget() > 0;
   const built = regionPrimitives(region, boxes);
   replacePrimitive(gpu.region, checked("show-region") ? built.fill : null);
   replacePrimitive(gpu.regionOutline, checked("show-region") ? built.outline : null);
   replacePrimitive(gpu.voxels, boxes ? built.voxels : null);
-  if (checked("show-voxels") && voxelStyle === "point") {
+  if (checked("show-voxels") && (voxelStyle === "point" || voxelBoxBudget() === 0)) {
     for (const component of region.components) {
       const n = component.voxels.length;
       component.voxels.forEach((voxel, rank) => {
@@ -1074,12 +1093,17 @@ $("show-fps").addEventListener("change", () => {
 
 // ================================================================== adaptive quality & performance display
 const QUALITY_LEVELS = [
-  { name: "高", res: Math.min(window.devicePixelRatio || 1, 2), msaa: 4, fxaa: true },
-  { name: "中", res: 1.0, msaa: 2, fxaa: true },
-  { name: "低", res: 0.75, msaa: 1, fxaa: true },
-  { name: "最低", res: 0.5, msaa: 1, fxaa: false },
+  // boxes: translucent presence-region voxel boxes drawn (overdraw budget); 0 = drawn as points
+  { name: "高", res: Math.min(window.devicePixelRatio || 1, 2), msaa: 4, fxaa: true, boxes: 400 },
+  { name: "中", res: 1.0, msaa: 2, fxaa: true, boxes: 200 },
+  { name: "低", res: 0.75, msaa: 1, fxaa: true, boxes: 80 },
+  { name: "最低", res: 0.5, msaa: 1, fxaa: false, boxes: 0 },
 ];
-const quality = { level: -1, lastFrame: 0, ema: 0, slowMs: 0, fastMs: 0 };
+// start one level below the top: a heavy close-up at full device resolution with 4x MSAA can
+// saturate an integrated GPU before the first frame times are known; "auto" steps up to 高
+// after a few seconds of fast frames
+const START_QUALITY = 1;
+const quality = { level: -1, lastFrame: 0, ema: 0, slowMs: 0, fastMs: 0, continuing: false, lastDrop: 0, requestedAt: 0 };
 const TARGET_INTERVAL = 1000 / TARGET_FPS;
 
 function applyQuality(level) {
@@ -1090,34 +1114,60 @@ function applyQuality(level) {
   scene.msaaSamples = q.msaa;
   if (scene.postProcessStages && scene.postProcessStages.fxaa) scene.postProcessStages.fxaa.enabled = q.fxaa;
   telemetry.quality = q.name;
+  state.lastRegionKey = ""; // the voxel-box budget depends on the level
   scene.requestRender();
 }
-applyQuality(0);
+applyQuality(START_QUALITY);
+
+function voxelBoxBudget() {
+  return QUALITY_LEVELS[Math.max(quality.level, 0)].boxes;
+}
 
 scene.postRender.addEventListener(() => {
   const now = performance.now();
   const dt = now - quality.lastFrame;
   quality.lastFrame = now;
-  if (dt > 250) return; // idle (on-demand rendering): no frame-rate information
-  quality.ema = quality.ema ? 0.9 * quality.ema + 0.1 * dt : dt;
-  telemetry.frameIntervalMs = quality.ema;
-  quality.slowMs = quality.ema > 1.6 * TARGET_INTERVAL ? quality.slowMs + dt : 0;
-  quality.fastMs = quality.ema < 1.15 * TARGET_INTERVAL ? quality.fastMs + dt : 0;
-  if ($("quality").value === "auto") {
-    if (quality.slowMs > 1500 && quality.level < QUALITY_LEVELS.length - 1) {
-      applyQuality(quality.level + 1);
+  // a frame interval is meaningful only when the previous frame asked for the next one
+  // (smooth markers gliding, the follow camera with them); otherwise it is on-demand idle time.
+  // Slow continuous frames (also > 250 ms) are what can saturate the GPU and freeze the PC.
+  const measured = quality.continuing && dt < 10000;
+  quality.continuing = anim.active.size > 0; // gliding markers request the next frame (the follow camera rides on them)
+  // latency from a data update to its frame on screen: the browser delays the next frame while
+  // the GPU is still busy, so this also catches a GPU overloaded at the 1 Hz update rate
+  const latency = quality.requestedAt ? now - quality.requestedAt : 0;
+  quality.requestedAt = 0;
+  telemetry.updateLatencyMs = latency || telemetry.updateLatencyMs || 0;
+  if (latency > 400 && $("quality").value === "auto" && now - quality.lastDrop > 1000) {
+    if (quality.level < QUALITY_LEVELS.length - 1) applyQuality(quality.level + 1);
+    quality.lastDrop = now;
+    if (latency > 1000 && anim.enabled) setSmooth(false, "描画が追いつかないため、なめらか表示を自動で停止しました（品質を下げるか、GPUの有効化を確認してください）。");
+  }
+  if (measured) {
+    quality.ema = quality.ema ? 0.8 * quality.ema + 0.2 * dt : dt;
+    telemetry.frameIntervalMs = quality.ema;
+    quality.slowMs = quality.ema > 1.6 * TARGET_INTERVAL ? quality.slowMs + dt : 0;
+    quality.fastMs = quality.ema < 1.15 * TARGET_INTERVAL ? quality.fastMs + dt : 0;
+    const auto = $("quality").value === "auto";
+    if (auto && dt > 250 && now - quality.lastDrop > 1000 && quality.level < QUALITY_LEVELS.length - 1) {
+      applyQuality(quality.level + 1); // a very slow frame: lower at once, do not wait
+      quality.lastDrop = now;
       quality.slowMs = 0;
-    } else if (quality.fastMs > 6000 && quality.level > 0) {
+    } else if (auto && quality.slowMs > 1500 && quality.level < QUALITY_LEVELS.length - 1) {
+      applyQuality(quality.level + 1);
+      quality.lastDrop = now;
+      quality.slowMs = 0;
+    } else if (auto && quality.fastMs > 6000 && quality.level > 0) {
       applyQuality(quality.level - 1);
       quality.fastMs = 0;
     }
-  }
-  // smooth display needs ~10 fps at least; otherwise fall back to 1 Hz jumps automatically
-  if (anim.enabled && anim.active.size && quality.ema > 100) {
-    anim.slowSince = anim.slowSince || now;
-    if (now - anim.slowSince > 2000) setSmooth(false, "描画が追いつかないため、なめらか表示を自動で停止しました（品質を下げるか、GPUの有効化を確認してください）。");
-  } else {
-    anim.slowSince = null;
+    // continuous rendering needs ~10 fps at least; otherwise fall back to 1 Hz updates
+    // (smooth off; following then moves the camera once per update)
+    if (anim.enabled && (quality.ema > 100 || dt > 1000)) {
+      anim.slowSince = anim.slowSince || now;
+      if (dt > 1000 || now - anim.slowSince > 2000) setSmooth(false, "描画が追いつかないため、なめらか表示を自動で停止しました（品質を下げるか、GPUの有効化を確認してください）。");
+    } else {
+      anim.slowSince = null;
+    }
   }
   if (anim.active.size) scene.requestRender(); // keep animating until markers arrive
   telemetry.smooth = anim.enabled;
@@ -1126,7 +1176,7 @@ scene.postRender.addEventListener(() => {
 $("quality").addEventListener("change", () => {
   const value = $("quality").value;
   quality.slowMs = quality.fastMs = 0;
-  applyQuality(value === "auto" ? 0 : Number(value));
+  applyQuality(value === "auto" ? START_QUALITY : Number(value));
 });
 $("smooth-motion").addEventListener("change", () => setSmooth(checked("smooth-motion")));
 $("show-sea").addEventListener("change", applyGlobe);
@@ -1711,6 +1761,7 @@ function handleUpdate(result, bytes, parseMs) {
     telemetry.maxUpdateMs = telemetry.updates > 5 ? Math.max(telemetry.maxUpdateMs, took) : 0;
     telemetry.updates += 1;
   }
+  if (!quality.requestedAt) quality.requestedAt = performance.now();
   scene.requestRender();
 }
 
@@ -1762,4 +1813,4 @@ const stream = (() => {
   return { setExaggeration: (value) => guard(() => handleUpdate({ snapshot: null, tracks: decoder.setExaggeration(value) }, 0, 0)) };
 })();
 
-window.aquaDrift = { viewer, state, applyView, centerOn, cameraInfo, telemetry, gpu, baseMap, setBaseMap, tracks, anim }; // diagnostics / E2E
+window.aquaDrift = { viewer, state, applyView, centerOn, cameraInfo, renderFaults, quality, telemetry, gpu, baseMap, setBaseMap, tracks, anim }; // diagnostics / E2E
