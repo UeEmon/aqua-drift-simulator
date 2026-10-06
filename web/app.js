@@ -578,9 +578,19 @@ function updateDeployment(deployment) {
   const starting = status.pending_placements > 0 ? "（観測者コンテナを起動中）" : "";
   setHtml($("deploy-status"), `自動前程配置 <b>${enabled ? "有効" : "無効"}</b>　投入待ち ${status.pending_placements}${starting}　` +
     `待機中 ${status.standby_count}　最終配置 ${status.last_deploy_tick ?? "--"} s`);
-  const rows = status.history.slice().reverse().map((r) =>
-    `<tr><td>${r.tick} s</td><td>${r.positions.length}</td><td>${escapeHtml(r.reason)}</td></tr>`);
+  const rows = status.history.slice().reverse().map((r) => {
+    const depths = r.positions.map((p) => Math.round(p.depth_ft)).join("/");
+    return `<tr><td>${r.tick} s</td><td>${r.positions.length}<br /><small>${depths} Ft</small></td><td>${escapeHtml(deployReason(r.reason))}</td></tr>`;
+  });
   setHtml($("deploy-table").querySelector("tbody"), rows.join("") || "<tr><td colspan='3'>配置なし</td></tr>");
+}
+
+function deployReason(reason) {
+  // optimal planner: "optimal (coverage): 2 observers, depths [..] Ft; predicted error horizontal a -> b YD, depth c -> d Ft"
+  const m = /^optimal \(([^)]+)\): (\d+) observers, depths \[([^\]]*)\] Ft; predicted error horizontal (\d+) -> (\d+) YD, depth (\d+) -> (\d+) Ft/.exec(reason || "");
+  if (!m) return reason;
+  const why = { coverage: "探知範囲の不足", "information gain": "追尾精度の改善", "operator request": "操作員の指示" }[m[1]] || m[1];
+  return `最適配置（${why}）：${m[2]} 本・深度 ${m[3].split(/,\s*/).join("/")} Ft、予測誤差 水平 ${m[4]}→${m[5]} YD・深度 ${m[6]}→${m[7]} Ft`;
 }
 
 $("deploy-now").addEventListener("click", async () => {
@@ -1611,6 +1621,15 @@ function populateForms(config) {
   const fwdValues = { "fwd-lead": f.lead_time_s, "fwd-min": f.min_coverage, "fwd-ahead": f.ahead_distance_yd,
     "fwd-lateral": f.lateral_offset_yd, "fwd-count": f.observers_per_drop, "fwd-cooldown": f.cooldown_s };
   for (const [id, value] of Object.entries(fwdValues)) $(id).value = value;
+  if (f.strategy) {
+    $("fwd-strategy").value = f.strategy;
+    $("fwd-horizon").value = f.horizon_s;
+    $("fwd-target").value = f.target_error_yd;
+    $("fwd-max").value = f.max_per_drop;
+    $("fwd-depths").value = (f.depth_options_ft || []).join(", ");
+    $("fwd-depth-weight").value = f.depth_weight;
+    $("fwd-min-gain").value = Math.round((f.min_relative_gain || 0) * 100);
+  }
   $("use-bearing").checked = config.estimator.use_bearing;
   const l = config.lloyd || {};
   const lloydValues = { "lloyd-noise": l.level_noise_db, "lloyd-corr": l.noise_correlation_s, "lloyd-wave": l.wave_height_rms_m,
@@ -1696,6 +1715,14 @@ $("config-form").addEventListener("submit", (event) => {
     next.forward.lateral_offset_yd = num("fwd-lateral");
     next.forward.observers_per_drop = num("fwd-count");
     next.forward.cooldown_s = num("fwd-cooldown");
+    next.forward.strategy = $("fwd-strategy").value;
+    next.forward.horizon_s = num("fwd-horizon");
+    next.forward.target_error_yd = num("fwd-target");
+    next.forward.max_per_drop = num("fwd-max");
+    const depths = $("fwd-depths").value.split(/[,\s、]+/).map(Number).filter((d) => Number.isFinite(d) && d >= 0);
+    if (depths.length) next.forward.depth_options_ft = depths;
+    next.forward.depth_weight = num("fwd-depth-weight");
+    next.forward.min_relative_gain = num("fwd-min-gain") / 100;
     next.lloyd.level_noise_db = num("lloyd-noise");
     next.lloyd.noise_correlation_s = num("lloyd-corr");
     next.lloyd.wave_height_rms_m = num("lloyd-wave");

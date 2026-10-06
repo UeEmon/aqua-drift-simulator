@@ -28,6 +28,7 @@ Documentation:
 - [docs/requirements.md](docs/requirements.md) – requirements and item-by-item traceability
 - [docs/estimation-methods.md](docs/estimation-methods.md) – Kalman filter explained, alternatives, chosen method
 - [docs/observation-mode-comparison.md](docs/observation-mode-comparison.md) – position / range-bearing / bearing-only / Doppler / combinations
+- [docs/optimal-deployment.md](docs/optimal-deployment.md) – automatic observer deployment: positions, number and depths chosen by the Doppler-tracking (Fisher) information within the detection range
 - [docs/depth-from-doppler.md](docs/depth-from-doppler.md) – how to obtain the target depth from Doppler (overflight, vertical baseline, depth-rate prior, Lloyd's mirror), CRLB and particle-filter check; the optional **Lloyd's mirror depth** (direct + surface-reflected path interference of the received level, switch in the 推定と真値 tab, off by default because of its processing load)
 - [docs/architecture.md](docs/architecture.md) and [docs/uml/](docs/uml/) – PlantUML design
 
@@ -52,8 +53,10 @@ Documentation:
 
 By default four observers surround the target's initial position; the remaining observer
 containers wait in standby. The `deployer` service places them **ahead (前程) of the estimated
-target** whenever the estimate predicts it will leave the current observer field (estimate
-only, never the truth); the 表示・観測者 tab shows the status and has a "deploy now" button.
+target** (estimate only, never the truth). The default **optimal** planner chooses the positions,
+the number of observers and their depths from the Doppler-tracking (Fisher) information over
+the next 30 min, taking the detection range into account (see docs/optimal-deployment.md); the
+表示・観測者 tab shows each plan (count, depths, predicted error) and has a "deploy now" button.
 
 The background map (Natural Earth II) is **off by default** to prioritise rendering; switch it
 on with 「背景地図」 in the view toolbar when needed.

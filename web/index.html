@@ -245,11 +245,23 @@
 
               <h3 class="span2">前程配置（推定位置にもとづく観測者の自動追加）</h3>
               <label class="check span2"><input id="fwd-enabled" type="checkbox" />前程配置を自動で行う</label>
+              <label class="span2" title="最適：ドップラー追尾の情報量（フィッシャー情報）から位置・本数・深度を計算。固定：前方の左右に決まった配置">配置方式
+                <select id="fwd-strategy">
+                  <option value="optimal">最適（位置・本数・深度を計算）</option>
+                  <option value="fixed">固定（前方の左右に配置）</option>
+                </select>
+              </label>
+              <label title="最適方式：この時間先まで追尾精度を予測して配置を決める">計画時間 (秒)<input id="fwd-horizon" type="number" min="120" max="7200" step="60" required /></label>
+              <label title="最適方式：予測誤差（水平＋深度）がこれ以下になるまで追加">目標誤差 (YD)<input id="fwd-target" type="number" min="1" step="1" required /></label>
+              <label title="最適方式：1回に追加する上限本数（空き番号の範囲内）">1回の上限本数<input id="fwd-max" type="number" min="1" max="8" step="1" required /></label>
+              <label title="最適方式：選べる観測者深度（Ft、カンマ区切り）">深度の候補 (Ft)<input id="fwd-depths" type="text" required /></label>
+              <label title="最適方式：深度誤差の重み（0 で水平のみ）">深度の重み<input id="fwd-depth-weight" type="number" min="0" max="10" step="0.1" required /></label>
+              <label title="最適方式：追加1本でこの割合以上改善しなければ追加しない">追加の最小改善 (%)<input id="fwd-min-gain" type="number" min="0" max="100" step="1" required /></label>
               <label>先行時間 (秒)<input id="fwd-lead" type="number" min="30" max="7200" step="30" required /></label>
               <label>最小カバー観測者数<input id="fwd-min" type="number" min="1" max="10" step="1" required /></label>
               <label>前方距離 (YD)<input id="fwd-ahead" type="number" min="100" step="100" required /></label>
               <label>横間隔 (YD)<input id="fwd-lateral" type="number" min="0" step="100" required /></label>
-              <label>1回の配置数<input id="fwd-count" type="number" min="1" max="6" step="1" required /></label>
+              <label title="固定方式の配置数">1回の配置数（固定）<input id="fwd-count" type="number" min="1" max="6" step="1" required /></label>
               <label>最短間隔 (秒)<input id="fwd-cooldown" type="number" min="0" max="3600" step="10" required /></label>
               <button type="submit" class="span2">条件を反映</button>
             </form>

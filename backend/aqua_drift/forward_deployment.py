@@ -18,6 +18,7 @@ import math
 
 from aqua_drift.deployment import _offset
 from aqua_drift.models import ForwardDeploymentConfig, Position, TrackEstimate
+from aqua_drift.optimal_deployment import plan_optimal_deployment
 from aqua_drift.physics import local_offset_m
 
 YD_TO_M = 0.9144
@@ -36,10 +37,15 @@ def plan_forward_deployment(
     last_deploy_tick: int | None,
     depth_step_ft: float = 150.0,
     force: bool = False,
+    free_slots: int = 99,
+    source_frequency_hz: float = 400.0,
+    sound_speed_mps: float = 1500.0,
+    frequency_sigma_hz: float = 0.03,
 ) -> tuple[list[Position], str]:
     """Return (positions to deploy, reason). An empty list means no deployment now.
     `force` (operator request) skips the coverage and cooldown checks but still requires a
-    usable estimate."""
+    usable estimate. With config.strategy == "optimal" the positions, number and depths are
+    chosen by aqua_drift.optimal_deployment; "fixed" uses the two-sided pattern."""
     if not config.enabled and not force:
         return [], "disabled"
     if estimate is None or estimate.current_position is None or estimate.uncertainty is None:
@@ -67,6 +73,17 @@ def plan_forward_deployment(
         east, north, _ = local_offset_m(origin, position)
         if math.hypot(east - predicted[0], north - predicted[1]) <= radius:
             covered += 1
+    if config.strategy == "optimal":
+        if not force and estimate.uncertainty.horizontal_major_yd * YD_TO_M > config.optimal_max_sigma_fraction * r_max:
+            return [], "estimate not yet converged enough for optimal placement"
+        positions, reason, _ = plan_optimal_deployment(
+            estimate, observers, pending, config, max_slant_range_yd, free_slots,
+            source_frequency_hz, sound_speed_mps, frequency_sigma_hz,
+            coverage_short=covered < config.min_coverage, force=force,
+        )
+        if not positions and covered >= config.min_coverage:
+            reason = f"covered ({covered} observers near predicted position); {reason}"
+        return positions, reason
     if covered >= config.min_coverage and not force:
         return [], f"covered ({covered} observers near predicted position)"
 

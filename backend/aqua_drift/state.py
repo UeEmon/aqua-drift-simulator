@@ -180,6 +180,11 @@ class SimulationState:
                 pending_positions=[p.position for p in self.placements],
                 standby_count=self._standby_count(),
                 last_deploy_tick=self.last_deploy_tick,
+                free_slots=max(self.config.observer_limit - len(self.observers) - len(self.placements), 0),
+                source_frequency_hz=self.config.source.source_frequency_hz
+                + self.config.source.shared_recognition_bias_hz,
+                sound_speed_mps=self.config.source.sound_speed_mps,
+                frequency_sigma_hz=self.config.estimator.model_frequency_sigma_hz,
             )
 
     def _deployment_status(self) -> DeploymentStatus:

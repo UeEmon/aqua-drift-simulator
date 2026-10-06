@@ -179,6 +179,8 @@ async def deploy_now() -> dict[str, object]:
     positions, reason = plan_forward_deployment(
         feed.tick, estimate, feed.observer_positions, feed.pending_positions, feed.config,
         feed.max_slant_range_yd, feed.last_deploy_tick, feed.depth_step_ft, force=True,
+        free_slots=feed.free_slots, source_frequency_hz=feed.source_frequency_hz,
+        sound_speed_mps=feed.sound_speed_mps, frequency_sigma_hz=feed.frequency_sigma_hz,
     )
     if not positions:
         raise HTTPException(status_code=409, detail=f"no deployment: {reason}")

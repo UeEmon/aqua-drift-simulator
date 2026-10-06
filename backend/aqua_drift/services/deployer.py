@@ -34,6 +34,10 @@ async def run() -> None:
                 feed.max_slant_range_yd,
                 feed.last_deploy_tick,
                 feed.depth_step_ft,
+                free_slots=feed.free_slots,
+                source_frequency_hz=feed.source_frequency_hz,
+                sound_speed_mps=feed.sound_speed_mps,
+                frequency_sigma_hz=feed.frequency_sigma_hz,
             )
             if positions:
                 request = DeploymentRequest(tick=feed.tick, positions=positions, reason=reason)

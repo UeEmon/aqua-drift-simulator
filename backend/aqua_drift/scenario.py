@@ -98,6 +98,10 @@ class ScenarioRun:
             self.config.max_slant_range_yd,
             self.last_deploy_tick,
             self.config.deployment.depth_step_ft,
+            free_slots=max(self.config.observer_limit - len(self.observers), 0),
+            source_frequency_hz=self.config.source.source_frequency_hz + self.config.source.shared_recognition_bias_hz,
+            sound_speed_mps=self.config.source.sound_speed_mps,
+            frequency_sigma_hz=self.config.estimator.model_frequency_sigma_hz,
         )
         if not positions:
             return

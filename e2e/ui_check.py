@@ -422,11 +422,22 @@ def main() -> int:
             page.evaluate("() => document.getElementById('deploy-now').click()")
             # the orchestrator starts new observer containers for the placements
             page.wait_for_function(
-                f"() => window.aquaDrift.state.latestSnapshot.observers.length >= {before + 2}", timeout=120_000
+                f"() => window.aquaDrift.state.latestSnapshot.observers.length >= {before + 1}", timeout=120_000
             )
             snap = page.evaluate("() => window.aquaDrift.state.latestSnapshot")
             ids = sorted(r["state"]["observer_id"] for r in snap["observers"])
             note(f"forward deployment: containers started on demand, observers now {ids}")
+            # optimal planner (default): positions, number and depths from the tracking information
+            history = snap["deployment"]["history"]
+            latest = history[-1] if history else {}
+            depths = [round(p["depth_ft"]) for p in latest.get("positions", [])]
+            table = page.inner_text("#deploy-table tbody")
+            note(f"forward deployment (optimal): {len(history)} drops, latest {len(depths)} observers at depths {depths} Ft: "
+                 f"{latest.get('reason', '')}")
+            if not latest.get("reason", "").startswith("optimal"):
+                fail(f"deployment not planned by the optimal planner: {latest.get('reason')}")
+            if "最適配置" not in table:
+                fail(f"deployment table does not show the optimal plan: {table[:200]}")
             page.wait_for_timeout(2000)
             page.screenshot(path=str(out / "07-forward-deployment.png"))
 

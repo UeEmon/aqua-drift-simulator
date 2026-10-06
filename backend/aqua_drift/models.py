@@ -135,6 +135,17 @@ class ForwardDeploymentConfig(BaseModel):
     cooldown_s: int = Field(default=120, ge=0, le=3600)
     min_speed_kt: float = Field(default=0.5, ge=0)
     max_sigma_fraction: float = Field(default=0.5, gt=0)  # skip if 1σ major > fraction x R_max
+    # "optimal": positions, number and depths chosen by the Doppler-tracking information
+    # (aqua_drift.optimal_deployment); "fixed": the two-sided pattern above
+    strategy: str = Field(default="optimal", pattern="^(optimal|fixed)$")
+    horizon_s: int = Field(default=1800, ge=120, le=7200)
+    max_per_drop: int = Field(default=4, ge=1, le=8)
+    min_relative_gain: float = Field(default=0.10, ge=0, le=1)  # stop adding below this gain
+    trigger_gain: float = Field(default=0.30, ge=0, le=1)  # deploy without a coverage gap above this
+    target_error_yd: float = Field(default=25.0, gt=0)  # stop adding once the predicted error is below
+    depth_options_ft: list[float] = Field(default_factory=lambda: [60.0, 200.0, 500.0, 1000.0, 1500.0])
+    depth_weight: float = Field(default=1.0, ge=0, le=10)  # depth error weight in the criterion
+    optimal_max_sigma_fraction: float = Field(default=0.15, gt=0)  # placement needs a converged track
 
 
 class ObserverDeploymentConfig(BaseModel):
@@ -368,6 +379,10 @@ class DeploymentFeed(BaseModel):
     pending_positions: list[Position]
     standby_count: int
     last_deploy_tick: int | None
+    free_slots: int = 99
+    source_frequency_hz: float = 400.0  # operator's (recognized) source frequency
+    sound_speed_mps: float = 1500.0
+    frequency_sigma_hz: float = 0.03
 
 
 class DeploymentStatus(BaseModel):
