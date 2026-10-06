@@ -13,7 +13,8 @@ The operator starts/stops the estimator; the GIS shows estimate and truth side b
 | `target` | Constant HDG / through-water speed / depth; changes follow the configured rates (deg/s, kt/s, Ft/s); moved by the current |
 | `observer` (×1..100) | One observer per container; drifts with the water; exact time/position/depth. Start position from env, a queued placement (operator or forward deployment), or the default pattern for the first four; further containers wait in standby |
 | `current-field` | Truth affine current field `v(p) = a + G (p − p_ref)` |
-| `deployer` | Forward (前程) deployment: every 5 s reads `/internal/deployment-feed` (estimates, observer and pending positions; no truth) and queues placements ahead of the estimated target for standby observer containers |
+| `deployer` | Forward (前程) deployment: every 5 s reads `/internal/deployment-feed` (estimates, observer and pending positions; no truth) and plans drops ahead of the estimated target (optimal positions, number and depths) |
+| `layer` | 設標者: every 1 s flies to the approved drop points (200±50 kt, bank ≤ 15°, points drift with the estimated current) and lays the observer on arrival; circles the estimated target when idle. Drops are proposed to the operator first (approval automatic by default, or manual) |
 | `doppler` | Acoustic source / Doppler + bearing engine. Waits until target and all observers reach the tick, then emits one synchronized batch: frequency when slant range ≤ R_max, explicit non-detection otherwise. Truth is attached separately |
 | `estimator` | Pulls `/internal/estimator-feed` (observations only, truth stripped) and publishes ONLINE / SMOOTHED estimates, CPA results and the current estimate |
 | `api` | FastAPI + WebSocket, single writer of the immutable PostgreSQL/PostGIS event history |

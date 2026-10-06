@@ -11,6 +11,7 @@ node "Docker Compose network: aqua-drift" {
   component "doppler\n(acoustic source / Doppler + bearing)" as Doppler
   component "estimator\n(PF + resample-move + CPA)" as Estimator
   component "deployer\n(forward / 前程 deployment\nfrom the estimate)" as Deployer
+  component "layer\n(設標者: flies to approved\ndrop points, lays observers)" as Layer
   component "api\n(FastAPI, WebSocket,\nsingle DB writer)" as API
   database "db\nPostgreSQL + PostGIS\n(immutable event history)" as DB
   component "web\n(nginx + CesiumJS,\nNatural Earth II offline)" as GIS
@@ -25,6 +26,7 @@ Doppler --> API : GET /internal/sim-state\nPOST /internal/doppler (obs + truth)
 Estimator --> API : GET /internal/estimator-feed\n(observations only)\nPOST /internal/estimate
 API --> DB
 Deployer --> API : GET /internal/deployment-feed\n(estimates only)\nPOST /internal/deploy
+Layer --> API : GET /internal/layer-feed\nPOST /internal/layer
 GIS --> API : /api/* , /ws
 
 note bottom of Estimator

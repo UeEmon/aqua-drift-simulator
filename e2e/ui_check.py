@@ -29,7 +29,7 @@ def fail(message: str) -> None:
     print(f"::error::{_escape(message)}", flush=True)
 
 
-KEY_NOTES = ("initial view", "perf:", "GPU:", "forward deployment:", "Lloyd")
+KEY_NOTES = ("initial view", "perf:", "GPU:", "layer:", "Lloyd")
 
 
 def note(message: str) -> None:
@@ -419,11 +419,48 @@ def main() -> int:
             if ids[:4] != ["obs-01", "obs-02", "obs-03", "obs-04"]:
                 fail(f"initial observers should be obs-01..obs-04, got {ids}")
             page.evaluate("() => document.querySelector(\".tab[data-tab='tab-display']\").click()")
-            page.evaluate("() => document.getElementById('deploy-now').click()")
-            # the orchestrator starts new observer containers for the placements
+            # the layer (設標者) circles the estimated target while idle
+            layer0 = page.evaluate("() => window.aquaDrift.state.latestSnapshot.deployment.layer")
+            if not layer0:
+                fail("layer state missing")
+            else:
+                note(f"layer: idle mode {layer0['mode']} at {layer0['speed_kt']:.0f} kt, bank {layer0['bank_deg']:.1f} deg")
+            # manual approval: the plan is proposed to the operator first
+            page.evaluate("""() => { const el = document.getElementById('drop-approval');
+                el.value = 'manual'; el.dispatchEvent(new Event('change')); }""")
             page.wait_for_function(
-                f"() => window.aquaDrift.state.latestSnapshot.observers.length >= {before + 1}", timeout=120_000
+                "() => window.aquaDrift.state.latestSnapshot.config.layer.approval === 'manual'", timeout=15_000)
+            page.evaluate("() => document.getElementById('deploy-now').click()")
+            page.wait_for_function("() => !document.getElementById('drop-alert').hidden", timeout=30_000)
+            proposed = page.evaluate("""() => window.aquaDrift.state.latestSnapshot.deployment.tasks
+                .filter(t => t.status === 'PROPOSED').map(t => t.task_id)""")
+            page.wait_for_timeout(3000)
+            still = page.evaluate("""() => window.aquaDrift.state.latestSnapshot.deployment.tasks
+                .filter(t => t.status === 'PROPOSED').length""")
+            if not proposed or still < len(proposed):
+                fail(f"proposals should wait for the operator: {proposed}, still {still}")
+            page.evaluate("() => document.getElementById('drop-approve-all').click()")
+            page.wait_for_function("""() => { const d = window.aquaDrift.state.latestSnapshot.deployment;
+                return d.layer && d.layer.mode === 'TRANSIT' && d.tasks.every(t => t.status !== 'PROPOSED'); }""",
+                timeout=30_000)
+            note(f"layer: {len(proposed)} proposals approved by the operator, layer in transit")
+            banks = []
+            for _ in range(10):
+                page.wait_for_timeout(1000)
+                banks.append(abs(page.evaluate("() => window.aquaDrift.state.latestSnapshot.deployment.layer.bank_deg")))
+            if max(banks) > 15.0 + 1e-6:
+                fail(f"layer bank exceeded 15 deg: {max(banks):.2f}")
+            # the observer is in the water only when the layer reaches the drop point
+            page.wait_for_function(
+                f"() => window.aquaDrift.state.latestSnapshot.observers.length >= {before + 1}", timeout=420_000
             )
+            done = page.evaluate("""() => window.aquaDrift.state.latestSnapshot.deployment.tasks
+                .filter(t => t.status === 'DONE').map(t => [t.task_id, t.approved_tick, t.done_tick])""")
+            note(f"layer: drops laid {done} (task, approved tick, laid tick)")
+            if not done:
+                fail("no drop task completed by the layer")
+            page.evaluate("""() => { const el = document.getElementById('drop-approval');
+                el.value = 'auto'; el.dispatchEvent(new Event('change')); }""")
             snap = page.evaluate("() => window.aquaDrift.state.latestSnapshot")
             ids = sorted(r["state"]["observer_id"] for r in snap["observers"])
             note(f"forward deployment: containers started on demand, observers now {ids}")

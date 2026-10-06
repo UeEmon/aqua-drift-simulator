@@ -93,6 +93,7 @@
       if ("cpa" in message) st.cpa = message.cpa;
       if ("cur" in message) st.current = message.cur;
       if ("dep" in message) st.deployment = message.dep;
+      st.layer = message.lay || null;
       if ("arch" in message) st.archived = message.arch;
       if ("lly" in message) st.lloyd = message.lly;
       let regionChanged = false;
@@ -174,7 +175,7 @@
         estimates,
         cpa: st.cpa,
         current_estimate: st.current,
-        deployment: st.deployment,
+        deployment: { ...st.deployment, layer: st.layer },
         archived_observer_ids: st.archived,
         lloyd: st.lloyd,
       };

@@ -88,6 +88,7 @@ async def test_standby_observers_take_forward_deployments() -> None:
 
     config = ScenarioConfig()
     config.deployment.initial_count = 2
+    config.layer.enabled = False  # immediate placements (the layer flow is tested in test_layer.py)
     state = SimulationState(config)
     assert await state.assign_position("a") is not None
     assert await state.assign_position("b") is not None

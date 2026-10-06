@@ -14,9 +14,13 @@ from aqua_drift.models import (
     DeploymentRecord,
     DeploymentRequest,
     DopplerBatch,
+    DropDecision,
+    DropTask,
     EstimationControl,
     EstimatorFeed,
     EstimatorOutput,
+    LayerFeed,
+    LayerUpdate,
     ObserverAssignment,
     ObserverPlacement,
     ObserverState,
@@ -185,10 +189,39 @@ async def deploy_now() -> dict[str, object]:
     if not positions:
         raise HTTPException(status_code=409, detail=f"no deployment: {reason}")
     record = await state.queue_deployment(
-        DeploymentRequest(tick=feed.tick, positions=positions, reason=reason)
+        DeploymentRequest(tick=feed.tick, positions=positions, reason=reason), source="operator"
     )
     await store.append_event("forward_deployment", feed.tick, record.model_dump(mode="json"))
     return {"deployed": len(positions), "standby": feed.standby_count, "tick": feed.tick}
+
+
+@app.post("/api/drops/approve", response_model=list[DropTask])
+async def approve_drops(decision: DropDecision) -> list[DropTask]:
+    """Operator approves proposed drop points (empty list / null = all proposed); the layer
+    (設標者) then flies there and lays the observers."""
+    tasks = await state.decide_tasks(decision.task_ids, approve=True)
+    await store.append_event("drop_decision", state.tick, {"approve": [t.task_id for t in tasks]})
+    return tasks
+
+
+@app.post("/api/drops/reject", response_model=list[DropTask])
+async def reject_drops(decision: DropDecision) -> list[DropTask]:
+    tasks = await state.decide_tasks(decision.task_ids, approve=False)
+    await store.append_event("drop_decision", state.tick, {"reject": [t.task_id for t in tasks]})
+    return tasks
+
+
+@app.get("/internal/layer-feed", response_model=LayerFeed)
+async def layer_feed() -> LayerFeed:
+    return await state.layer_feed()
+
+
+@app.post("/internal/layer")
+async def layer_update(update: LayerUpdate) -> dict[str, list[int]]:
+    done = await state.set_layer_update(update)
+    if done:
+        await store.append_event("drop_done", update.state.tick, {"tasks": done})
+    return {"done": done}
 
 
 @app.post("/internal/deploy", response_model=DeploymentRecord)

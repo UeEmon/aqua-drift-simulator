@@ -107,6 +107,11 @@ services:
     <<: *worker
     command: ["python", "-m", "aqua_drift.services.deployer"]
 
+  # 設標者: flies to approved drop points and lays the additional observers
+  layer:
+    <<: *worker
+    command: ["python", "-m", "aqua_drift.services.layer"]
+
   # receives observations only (no truth) through /internal/estimator-feed
   estimator:
     <<: *worker

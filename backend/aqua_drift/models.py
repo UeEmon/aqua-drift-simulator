@@ -114,6 +114,24 @@ class LloydMirrorConfig(BaseModel):
     random_seed: int = 23
 
 
+class LayerConfig(BaseModel):
+    """設標者 (layer): the craft that lays additional observers. It moves over the sea surface
+    at speed_kt +- speed_spread_kt (a new speed for every leg) with bank <= max_bank_deg and,
+    without a task, circles the estimated target position. An additional observer is in the
+    water only when the layer reaches its drop point. Planned drops are proposed to the
+    operator; approval is automatic (default) or manual."""
+
+    enabled: bool = True  # False: additional observers appear at once (no layer)
+    approval: str = Field(default="auto", pattern="^(auto|manual)$")
+    speed_kt: float = Field(default=200.0, gt=0, le=600)
+    speed_spread_kt: float = Field(default=50.0, ge=0, le=300)
+    max_bank_deg: float = Field(default=15.0, gt=0, le=60)
+    orbit_radius_yd: float = Field(default=5000.0, gt=0)  # raised to the turn radius if smaller
+    capture_radius_yd: float = Field(default=150.0, gt=0)
+    proposal_timeout_s: int = Field(default=600, ge=10, le=7200)  # unanswered proposals expire
+    random_seed: int = 31
+
+
 class ForwardDeploymentConfig(BaseModel):
     """Automatic deployment of observers ahead (前程) of the ESTIMATED target position.
 
@@ -217,6 +235,7 @@ class ScenarioConfig(BaseModel):
     deployment: ObserverDeploymentConfig = ObserverDeploymentConfig()
     estimator: EstimatorConfig = EstimatorConfig()
     lloyd: LloydMirrorConfig = LloydMirrorConfig()
+    layer: LayerConfig = LayerConfig()
 
 
 class EstimatorSettings(BaseModel):
@@ -385,11 +404,69 @@ class DeploymentFeed(BaseModel):
     frequency_sigma_hz: float = 0.03
 
 
+class DropTask(BaseModel):
+    """One additional observer to be laid by the layer.
+
+    PROPOSED (waiting for the operator) -> APPROVED (the layer flies there) -> DONE (laid: the
+    observer is in the water); or REJECTED / EXPIRED. The drop point is planned in the water
+    frame, so it drifts with the (estimated) current until the layer reaches it."""
+
+    task_id: int
+    created_tick: int
+    source: str  # forward (automatic plan) | manual (operator placement) | operator (deploy now)
+    reason: str = ""
+    position: Position
+    status: str = "PROPOSED"
+    approved_tick: int | None = None
+    done_tick: int | None = None
+    eta_s: float | None = None
+
+
+class DropDecision(BaseModel):
+    task_ids: list[int] | None = None  # None = every proposed drop
+
+
+class LayerState(BaseModel):
+    tick: int
+    position: Position  # depth 0 (sea surface)
+    heading_deg: float
+    speed_kt: float
+    bank_deg: float = 0.0
+    mode: str = "ORBIT"  # ORBIT (circling the estimated target) | TRANSIT (to a drop point)
+    task_id: int | None = None
+    orbit_center: Position | None = None
+    orbit_radius_yd: float = 0.0
+    eta_s: float | None = None
+
+
+class LayerUpdate(BaseModel):
+    """Posted by the layer container every tick."""
+
+    state: LayerState
+    task_positions: dict[int, Position] = Field(default_factory=dict)  # drifted drop points
+    task_eta_s: dict[int, float] = Field(default_factory=dict)
+    completed: dict[int, Position] = Field(default_factory=dict)  # laid: task id -> drop point
+
+
+class LayerFeed(BaseModel):
+    tick: int
+    generation: int = 0
+    config: LayerConfig
+    tasks: list[DropTask]  # approved, in order
+    datum: Position  # orbit centre: estimated target position (or the configured datum)
+    current_east_kt: float = 0.0  # estimated current (drift of the planned drop points)
+    current_north_kt: float = 0.0
+    state: LayerState | None = None
+
+
 class DeploymentStatus(BaseModel):
     standby_count: int = 0
     pending_placements: int = 0
     last_deploy_tick: int | None = None
     history: list[DeploymentRecord] = Field(default_factory=list)
+    approval: str = "auto"
+    tasks: list[DropTask] = Field(default_factory=list)  # recent drop tasks (all states)
+    layer: LayerState | None = None
 
 
 class EstimatorFeed(BaseModel):

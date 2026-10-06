@@ -9,7 +9,7 @@ AQUA-DRIFT Simulator を動かすための環境要件です。数値の根拠�
 | 項目 | 内容 |
 |---|---|
 | 実行方式 | Docker Compose による複数コンテナ構成（サーバー）＋ Web ブラウザ（表示端末） |
-| コンテナ | `db`（PostgreSQL 16 / PostGIS 3.4）、`api`、`clock`、`current-field`、`target`、`doppler`、`deployer`、`estimator`、`orchestrator`、`web`（nginx＋CesiumJS 1.129）。観測者コンテナ（obs-01〜obs-99）は `orchestrator` が必要時に起動・削除（初期 4 台） |
+| コンテナ | `db`（PostgreSQL 16 / PostGIS 3.4）、`api`、`clock`、`current-field`、`target`、`doppler`、`deployer`、`layer`（設標者）、`estimator`、`orchestrator`、`web`（nginx＋CesiumJS 1.129）。観測者コンテナ（obs-01〜obs-99）は `orchestrator` が必要時に起動・削除（初期 4 台） |
 | サーバーと表示端末 | 同一 PC でも、LAN 上の別 PC でも可 |
 | 通信 | ブラウザ → サーバーの TCP 8090（画面・API・WebSocket）。8091（API 直接）は既定でサーバー自身からのみ |
 

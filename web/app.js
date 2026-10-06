@@ -112,6 +112,8 @@ const COLORS = {
   inactive: Cesium.Color.GRAY,
   bearing: Cesium.Color.fromCssColorString("#ffe680"),
   drop: Cesium.Color.fromCssColorString("#ff9f43"),
+  layer: Cesium.Color.fromCssColorString("#e9e4ff"),
+  proposed: Cesium.Color.fromCssColorString("#ffd479"),
   error: Cesium.Color.WHITE,
 };
 
@@ -124,6 +126,9 @@ const gpu = {
   drops: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
   voxelPoints: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
   dropLabels: scene.primitives.add(new Cesium.LabelCollection()),
+  layerLines: scene.primitives.add(new Cesium.PolylineCollection()),
+  taskPoints: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
+  taskLabels: scene.primitives.add(new Cesium.LabelCollection()),
   region: { current: null, pending: null },
   regionOutline: { current: null, pending: null },
   voxels: { current: null, pending: null },
@@ -585,6 +590,124 @@ function updateDeployment(deployment) {
   setHtml($("deploy-table").querySelector("tbody"), rows.join("") || "<tr><td colspan='3'>配置なし</td></tr>");
 }
 
+// ================================================================== layer (設標者) and drop tasks
+const TASK_STATUS = { PROPOSED: "了承待ち", APPROVED: "設標に向かう", DONE: "投入済み", REJECTED: "却下", EXPIRED: "失効" };
+
+function circlePositions(center, radiusM, n = 72) {
+  const out = [];
+  for (let k = 0; k <= n; k += 1) {
+    const a = (2 * Math.PI * k) / n;
+    const p = destination(center, (a * 180) / Math.PI, radiusM);
+    out.push(Cesium.Cartesian3.fromDegrees(p.longitude, p.latitude, 0));
+  }
+  return out;
+}
+
+function updateLayer(deployment) {
+  const status = deployment || {};
+  const layer = status.layer;
+  const tasks = status.tasks || [];
+  const open = tasks.filter((t) => t.status === "PROPOSED" || t.status === "APPROVED");
+  // ---- map: layer marker, route to the drop points, orbit circle, task points
+  if (layer) {
+    if (!state.layerMarker) {
+      state.layerMarker = new Marker(
+        gpu.points.add({ pixelSize: 11, color: COLORS.layer, outlineColor: Cesium.Color.BLACK, outlineWidth: 2, id: "layer" }),
+        gpu.labels.add({ text: "設標者", font: "12px sans-serif", fillColor: COLORS.layer, pixelOffset: new Cesium.Cartesian2(0, -18) }),
+        null,
+      );
+      state.layerRoute = gpu.layerLines.add({ width: 2, material: dashMaterial(COLORS.layer, 10), positions: [] });
+      state.layerOrbit = gpu.layerLines.add({ width: 1, material: dashMaterial(COLORS.layer.withAlpha(0.45), 16), positions: [] });
+    }
+    state.layerMarker.show(true);
+    state.layerMarker.set(Cesium.Cartesian3.fromDegrees(layer.position.longitude, layer.position.latitude, 0));
+    const doing = layer.mode === "TRANSIT" ? `設標へ #${layer.task_id} 到着 ${fmt(layer.eta_s, 0)} s` : "旋回待機";
+    state.layerMarker.label.text = `設標者 ${fmt(layer.speed_kt, 0)} kt ${doing}`;
+    const approved = open.filter((t) => t.status === "APPROVED");
+    const route = approved.length
+      ? [Cesium.Cartesian3.fromDegrees(layer.position.longitude, layer.position.latitude, 0),
+        ...approved.map((t) => Cesium.Cartesian3.fromDegrees(t.position.longitude, t.position.latitude, 0))]
+      : [];
+    state.layerRoute.positions = route;
+    state.layerRoute.show = route.length > 1;
+    const orbitKey = layer.mode === "ORBIT" && layer.orbit_center
+      ? `${layer.orbit_center.latitude.toFixed(4)},${layer.orbit_center.longitude.toFixed(4)},${Math.round(layer.orbit_radius_yd / 100)}` : "";
+    if (orbitKey !== state.layerOrbitKey) {
+      state.layerOrbitKey = orbitKey;
+      state.layerOrbit.positions = orbitKey ? circlePositions(layer.orbit_center, layer.orbit_radius_yd * YD_TO_M) : [];
+      state.layerOrbit.show = Boolean(orbitKey);
+    }
+  } else if (state.layerMarker) {
+    state.layerMarker.show(false);
+    state.layerRoute.show = false;
+    state.layerOrbit.show = false;
+  }
+  const taskKey = open.map((t) => `${t.task_id}:${t.status}:${t.position.latitude.toFixed(4)}:${t.position.longitude.toFixed(4)}:${Math.round((t.eta_s || 0) / 10)}`).join("|") + `|${exaggeration()}`;
+  if (taskKey !== state.taskKey) {
+    state.taskKey = taskKey;
+    gpu.taskPoints.removeAll();
+    gpu.taskLabels.removeAll();
+    for (const t of open) {
+      const proposed = t.status === "PROPOSED";
+      const color = proposed ? COLORS.proposed : COLORS.drop;
+      gpu.taskPoints.add({ position: cartOf(t.position), pixelSize: 10, color: color.withAlpha(proposed ? 0.15 : 0.6), outlineColor: color, outlineWidth: 2 });
+      gpu.taskLabels.add({
+        position: cartOf(t.position),
+        text: proposed ? `提案 #${t.task_id}（${Math.round(t.position.depth_ft)} Ft）了承待ち` : `#${t.task_id}（${Math.round(t.position.depth_ft)} Ft）到着 ${fmt(t.eta_s, 0)} s`,
+        font: "11px sans-serif", fillColor: color, pixelOffset: new Cesium.Cartesian2(0, -14),
+      });
+    }
+  }
+  // ---- approval alert (always visible) and the panel
+  const proposed = open.filter((t) => t.status === "PROPOSED");
+  $("drop-alert").hidden = proposed.length === 0;
+  setText("drop-alert-count", proposed.length);
+  if (!state.dropApprovalPending && $("drop-approval").value !== (status.approval || "auto")) $("drop-approval").value = status.approval || "auto";
+  if (!tabVisible("tab-display")) return;
+  const enabled = state.latestConfig?.layer?.enabled !== false;
+  $("layer-status").textContent = !enabled ? "設標者なし（追加の観測者は即時に投入）"
+    : layer ? `設標者 ${fmt(layer.speed_kt, 0)} kt・バンク ${fmt(Math.abs(layer.bank_deg), 1)}°・${layer.mode === "TRANSIT" ? `設標 #${layer.task_id} へ移動中（到着 ${fmt(layer.eta_s, 0)} s）` : "目標推定位置の周囲を旋回待機"}　了承待ち ${proposed.length}・設標待ち ${open.length - proposed.length}`
+      : "設標者の準備中";
+  const rows = tasks.slice().reverse().slice(0, 15).map((t) => {
+    const actions = t.status === "PROPOSED"
+      ? `<button type="button" data-approve="${t.task_id}">了承</button><button type="button" class="ghost" data-reject="${t.task_id}">却下</button>` : "";
+    const when = t.status === "APPROVED" ? `到着 ${fmt(t.eta_s, 0)} s` : t.status === "DONE" ? `${t.done_tick} s 投入` : `${t.created_tick} s 提案`;
+    const src = { forward: "自動", operator: "即時配置", manual: "手動配置" }[t.source] || t.source;
+    return `<tr><td>${t.task_id}<br /><small>${src}</small></td><td>${TASK_STATUS[t.status] || t.status}</td>`
+      + `<td>${Math.round(t.position.depth_ft)} Ft<br /><small>${when}</small></td><td>${actions}</td></tr>`;
+  });
+  setHtml($("drop-table").querySelector("tbody"), rows.join("") || "<tr><td colspan='4'>設標計画なし</td></tr>");
+}
+
+async function decideDrops(taskIds, approve) {
+  const response = await fetch(`/api/drops/${approve ? "approve" : "reject"}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ task_ids: taskIds }),
+  });
+  if (!response.ok) {
+    setMessage(`設標計画の${approve ? "了承" : "却下"}に失敗: ${await response.text()}`);
+    return;
+  }
+  const changed = await response.json();
+  setMessage(`設標計画 ${changed.length} 件を${approve ? "了承しました（設標者が向かいます）" : "却下しました"}。`);
+}
+
+$("drop-table").addEventListener("click", (event) => {
+  const approve = event.target.closest("[data-approve]");
+  const reject = event.target.closest("[data-reject]");
+  if (approve) decideDrops([Number(approve.dataset.approve)], true);
+  if (reject) decideDrops([Number(reject.dataset.reject)], false);
+});
+$("drop-approve-all").addEventListener("click", () => decideDrops(null, true));
+$("drop-reject-all").addEventListener("click", () => decideDrops(null, false));
+$("drop-approval").addEventListener("change", () => {
+  const mode = $("drop-approval").value;
+  state.dropApprovalPending = true;
+  putConfig((next) => { next.layer.approval = mode; })
+    .then(() => setMessage(mode === "auto" ? "設標計画の了承を自動にしました。" : "設標計画は手動で了承します（了承待ちは画面下部に表示）。"))
+    .catch((error) => setMessage(`設定エラー: ${error.message}`))
+    .finally(() => { state.dropApprovalPending = false; });
+});
+
 function deployReason(reason) {
   // optimal planner: "optimal (coverage): 2 observers, depths [..] Ft; predicted error horizontal a -> b YD, depth c -> d Ft"
   const m = /^optimal \(([^)]+)\): (\d+) observers, depths \[([^\]]*)\] Ft; predicted error horizontal (\d+) -> (\d+) YD, depth (\d+) -> (\d+) Ft/.exec(reason || "");
@@ -597,7 +720,8 @@ $("deploy-now").addEventListener("click", async () => {
   const response = await fetch("/api/deployment/now", { method: "POST" });
   if (response.ok) {
     const result = await response.json();
-    setMessage(`推定位置の前程に ${result.deployed} 点の配置を指示しました（待機観測者 ${result.standby}）。`);
+    const manual = state.latestConfig?.layer?.enabled !== false && state.latestConfig?.layer?.approval === "manual";
+    setMessage(`推定位置の前程に ${result.deployed} 点の設標計画を作成しました（${manual ? "了承待ち：画面下部で了承してください" : "設標者が向かいます"}）。`);
   } else {
     setMessage(`前程配置できません: ${await response.text()}`);
   }
@@ -1631,6 +1755,13 @@ function populateForms(config) {
     $("fwd-min-gain").value = Math.round((f.min_relative_gain || 0) * 100);
   }
   $("use-bearing").checked = config.estimator.use_bearing;
+  const lay = config.layer;
+  if (lay) {
+    $("layer-enabled").checked = lay.enabled;
+    const layValues = { "layer-speed": lay.speed_kt, "layer-spread": lay.speed_spread_kt, "layer-bank": lay.max_bank_deg,
+      "layer-orbit": lay.orbit_radius_yd, "layer-timeout": lay.proposal_timeout_s };
+    for (const [id, value] of Object.entries(layValues)) $(id).value = value;
+  }
   const l = config.lloyd || {};
   const lloydValues = { "lloyd-noise": l.level_noise_db, "lloyd-corr": l.noise_correlation_s, "lloyd-wave": l.wave_height_rms_m,
     "lloyd-path-error": l.path_difference_error_pct, "est-lloyd-model-error": config.estimator.lloyd_model_error_pct,
@@ -1723,6 +1854,12 @@ $("config-form").addEventListener("submit", (event) => {
     if (depths.length) next.forward.depth_options_ft = depths;
     next.forward.depth_weight = num("fwd-depth-weight");
     next.forward.min_relative_gain = num("fwd-min-gain") / 100;
+    next.layer.enabled = checked("layer-enabled");
+    next.layer.speed_kt = num("layer-speed");
+    next.layer.speed_spread_kt = num("layer-spread");
+    next.layer.max_bank_deg = num("layer-bank");
+    next.layer.orbit_radius_yd = num("layer-orbit");
+    next.layer.proposal_timeout_s = num("layer-timeout");
     next.lloyd.level_noise_db = num("lloyd-noise");
     next.lloyd.noise_correlation_s = num("lloyd-corr");
     next.lloyd.wave_height_rms_m = num("lloyd-wave");
@@ -1740,7 +1877,9 @@ $("placement-form").addEventListener("submit", async (event) => {
   const response = await fetch("/api/observers/placements", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (response.ok) {
     const result = await response.json();
-    setMessage(`配置を予約しました（待機 ${result.pending_placements} 件）。観測者コンテナを追加してください。`);
+    setMessage(state.latestConfig?.layer?.enabled !== false
+      ? `配置点を設標者に指示しました（設標待ち ${result.pending_placements} 件）。到着時に観測者が投入されます。`
+      : `配置を予約しました（待機 ${result.pending_placements} 件）。`);
   } else {
     setMessage(`配置エラー: ${await response.text()}`);
   }
@@ -1810,6 +1949,7 @@ function render(snapshot) {
   updateCurrent(snapshot.current_estimate, snapshot.config);
   updateLloyd(snapshot.lloyd, snapshot.config, snapshot.target);
   updateDeployment(snapshot.deployment);
+  updateLayer(snapshot.deployment);
   drawCharts();
   if (state.firstFix && snapshot.target) {
     state.firstFix = false;

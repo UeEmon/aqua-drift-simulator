@@ -1,22 +1,38 @@
 @startuml
-title Forward (前程) deployment
+title Forward (前程) deployment with the layer (設標者)
+actor Operator
 participant Deployer
 participant API
-participant "Observer (standby)" as Standby
+participant "Layer\n(設標者)" as Layer
+participant Orchestrator
+participant "Observer\ncontainer" as Observer
 loop every 5 s
-  Deployer -> API : GET /internal/deployment-feed\n(estimate, observer & pending positions)
-  Deployer -> Deployer : predicted point = estimate + u_water x lead time
-  alt TRACKING and < min_coverage observers within 0.8 R_max of predicted point\nand cooldown elapsed
-    Deployer -> API : POST /internal/deploy\n(N positions ahead, left/right of the track)
+  Deployer -> API : GET /internal/deployment-feed\n(estimate, observers, open drop tasks)
+  Deployer -> Deployer : optimal plan: positions, number, depths\n(Doppler-tracking information, detection range)
+  alt deployment needed
+    Deployer -> API : POST /internal/deploy (plan)
+    API -> API : drop tasks
+    alt approval = auto (default)
+      API -> API : APPROVED
+    else approval = manual
+      API -> API : PROPOSED (shown to the operator)
+      Operator -> API : POST /api/drops/approve (or reject)
+    end
   end
 end
-loop every 1 s while standby
-  Standby -> API : GET /internal/observer/assignment
-  alt placement queued
-    API --> Standby : position
-    Standby -> Standby : start drifting / observing
-  else
-    API --> Standby : 204 (keep waiting)
+loop every 1 s
+  Layer -> API : GET /internal/layer-feed\n(approved tasks, estimated target, estimated current)
+  alt approved task
+    Layer -> Layer : fly to the drop point\n(200±50 kt, bank ≤ 15°; point drifts with the current)
+  else no task
+    Layer -> Layer : circle the estimated target position
+  end
+  Layer -> API : POST /internal/layer (state, drifted points, arrivals)
+  alt arrived at the drop point
+    API -> API : task DONE -> observer placement
   end
 end
+Orchestrator -> API : GET /internal/orchestrator-feed (pending placements)
+Orchestrator -> Observer : start container (obs-NN)
+Observer -> API : GET /internal/observer/assignment -> drop point
 @enduml

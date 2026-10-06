@@ -7,6 +7,7 @@ import json
 import sys
 
 from aqua_drift.models import (
+    DeploymentStatus,
     EstimationControl,
     ObserverRecord,
     ScenarioConfig,
@@ -22,7 +23,7 @@ def build_stream(seconds: int = 600, window_s: int = 120) -> dict:
     config.smoothing_window_seconds = window_s  # small window -> frequent tail rewrites
     config.estimator.track_store_slots = 60
     config.lloyd.enabled = True  # exercises the optional Lloyd's mirror field of the stream
-    run = ScenarioRun(config, 4)
+    run = ScenarioRun(config, 4, forward=True)  # includes the layer (設標者) and drop tasks
     encoder = WireEncoder(region_interval_s=3.0)
     messages, checkpoints, full_sizes = [], [], []
     for _ in range(seconds):
@@ -40,6 +41,10 @@ def build_stream(seconds: int = 600, window_s: int = 120) -> dict:
             current_estimate=output.current,
             archived_observer_ids=[],
             lloyd=output.lloyd,
+            deployment=DeploymentStatus(
+                approval=config.layer.approval, tasks=[t.model_copy() for t in run.tasks[-30:]],
+                layer=run.layer_state.model_copy() if run.layer_state else None,
+            ),
         )
         message = encoder.encode(snapshot, float(run.tick))
         messages.append(json.dumps(message, separators=(",", ":")))

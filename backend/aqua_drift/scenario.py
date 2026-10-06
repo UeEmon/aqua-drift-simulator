@@ -16,10 +16,15 @@ from dataclasses import dataclass, field
 from aqua_drift.deployment import default_position
 from aqua_drift.estimation.engine import TrackingEngine
 from aqua_drift.forward_deployment import plan_forward_deployment
+from aqua_drift.layer import advance as advance_layer
+from aqua_drift.layer import initial_state as initial_layer_state
 from aqua_drift.models import (
     DopplerBatch,
+    DropTask,
     EstimatorOutput,
     EstimatorSettings,
+    LayerFeed,
+    LayerState,
     ObserverState,
     Position,
     ScenarioConfig,
@@ -53,6 +58,9 @@ class ScenarioRun:
     deploy_check_s: int = 10
     deployments: list[tuple[int, int]] = field(default_factory=list)  # (tick, count)
     last_deploy_tick: int | None = None
+    tasks: list[DropTask] = field(default_factory=list)  # drops flown by the layer (設標者)
+    layer_state: LayerState | None = None
+    layer_rng: random.Random | None = None
 
     def __post_init__(self) -> None:
         self.target = initial_target(self.config)
@@ -84,7 +92,45 @@ class ScenarioRun:
         self.engine.process(batch)
         if self.forward and self.tick % self.deploy_check_s == 0:
             self._forward_deploy()
+        if self.config.layer.enabled and (self.tasks or self.layer_state is not None or self.forward):
+            self._layer_step()
         return batch
+
+    def _layer_step(self) -> None:
+        """The layer (設標者) flies to the approved drops (automatic approval) and lays them."""
+        engine = self.engine
+        datum = self.config.target.initial_position
+        if engine.pf.initialized and engine.frame is not None:  # estimate only (no truth)
+            datum = engine.frame.to_geo(*engine.pf.mean_state()[0:3])
+        base = engine.current_fit.base
+        approved = [t for t in self.tasks if t.status == "APPROVED"]
+        feed = LayerFeed(
+            tick=self.tick, config=self.config.layer, tasks=approved, datum=datum,
+            current_east_kt=float(base[0]) / 0.5144444444444445,
+            current_north_kt=float(base[1]) / 0.5144444444444445,
+        )
+        if self.layer_rng is None:
+            self.layer_rng = random.Random(self.config.layer.random_seed)
+        if self.layer_state is None:
+            self.layer_state = initial_layer_state(self.config.layer, datum, self.tick - 1, self.layer_rng)
+        self.layer_state, update = advance_layer(feed, self.layer_state, self.layer_rng)
+        for task in approved:
+            if task.task_id in update.completed:
+                task.status = "DONE"
+                task.done_tick = self.tick
+                task.position = update.completed[task.task_id]
+                self._add_observer(task.position)
+            elif task.task_id in update.task_positions:
+                task.position = update.task_positions[task.task_id]
+                task.eta_s = update.task_eta_s.get(task.task_id)
+
+    def _add_observer(self, position: Position) -> None:
+        self.observers.append(
+            ObserverState(observer_id=f"fwd-{len(self.deployments):02d}-{len(self.observers):03d}",
+                          tick=self.tick, position=position)
+        )
+        while len(self.observers) > self.config.observer_limit:
+            self.observers.pop(0)  # oldest first; its history stays in the engine
 
     def _forward_deploy(self) -> None:
         output = self.engine.output()
@@ -93,12 +139,13 @@ class ScenarioRun:
             self.tick,
             estimate,
             [o.position for o in self.observers],
-            [],
+            [t.position for t in self.tasks if t.status == "APPROVED"],
             self.config.forward,
             self.config.max_slant_range_yd,
             self.last_deploy_tick,
             self.config.deployment.depth_step_ft,
-            free_slots=max(self.config.observer_limit - len(self.observers), 0),
+            free_slots=max(self.config.observer_limit - len(self.observers)
+                           - sum(1 for t in self.tasks if t.status == "APPROVED"), 0),
             source_frequency_hz=self.config.source.source_frequency_hz + self.config.source.shared_recognition_bias_hz,
             sound_speed_mps=self.config.source.sound_speed_mps,
             frequency_sigma_hz=self.config.estimator.model_frequency_sigma_hz,
@@ -106,12 +153,13 @@ class ScenarioRun:
         if not positions:
             return
         for position in positions:
-            self.observers.append(
-                ObserverState(observer_id=f"fwd-{len(self.deployments):02d}-{len(self.observers):03d}",
-                              tick=self.tick, position=position)
-            )
-        while len(self.observers) > self.config.observer_limit:
-            self.observers.pop(0)  # oldest first; its history stays in the engine
+            if self.config.layer.enabled:  # laid when the layer gets there (automatic approval)
+                self.tasks.append(DropTask(
+                    task_id=len(self.tasks) + 1, created_tick=self.tick, source="forward",
+                    position=position, status="APPROVED", approved_tick=self.tick,
+                ))
+            else:
+                self._add_observer(position)
         self.deployments.append((self.tick, len(positions)))
         self.last_deploy_tick = self.tick
 

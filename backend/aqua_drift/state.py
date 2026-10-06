@@ -13,10 +13,14 @@ from aqua_drift.models import (
     DeploymentRequest,
     DeploymentStatus,
     DopplerBatch,
+    DropTask,
     EstimationControl,
     EstimatorFeed,
     EstimatorOutput,
     EstimatorSettings,
+    LayerFeed,
+    LayerState,
+    LayerUpdate,
     LloydDepthEstimate,
     ObserverAssignment,
     ObserverFix,
@@ -66,10 +70,17 @@ class SimulationState:
         self.deploy_history: deque[DeploymentRecord] = deque(maxlen=20)
         self.last_deploy_tick: int | None = None
         self.bearings: dict[str, BearingReport] = {}
+        self.tasks: list[DropTask] = []  # additional observers laid by the layer (設標者)
+        self.task_counter = 0
+        self.layer_state: LayerState | None = None
 
     async def set_config(self, config: ScenarioConfig) -> None:
         async with self.lock:
             self.config = config
+            if config.layer.approval == "auto":
+                for task in self.tasks:
+                    if task.status == "PROPOSED":
+                        self._approve(task)
             while len(self.observers) > config.observer_limit:
                 evicted_id, _ = self.observers.popitem(last=False)
                 self._archive(evicted_id)
@@ -85,7 +96,13 @@ class SimulationState:
 
     # ---------------------------------------------------------------- observers
     async def queue_placement(self, placement: ObserverPlacement) -> int:
+        """Operator placement. With the layer enabled the layer flies there and lays the
+        observer (the operator chose the point, so no further approval); a placement for a
+        named observer container, or without the layer, is queued at once."""
         async with self.lock:
+            if self.config.layer.enabled and placement.observer_id is None:
+                self._new_task(placement.position, "manual", "operator placement")
+                return len(self.placements) + self._open_task_count()
             self.placements.append(placement)
             return len(self.placements)
 
@@ -157,10 +174,16 @@ class SimulationState:
         return sum(1 for last in self.standby.values() if self.tick - last <= 10)
 
     # ---------------------------------------------------------------- forward deployment
-    async def queue_deployment(self, request: DeploymentRequest) -> DeploymentRecord:
+    async def queue_deployment(self, request: DeploymentRequest, source: str = "forward") -> DeploymentRecord:
+        """A deployment plan. With the layer enabled every point becomes a drop task that is
+        proposed to the operator (approved at once in automatic approval mode); the observer is
+        in the water when the layer reaches the point. Without the layer: queued at once."""
         async with self.lock:
             for position in request.positions:
-                self.placements.append(ObserverPlacement(position=position, source="forward"))
+                if self.config.layer.enabled:
+                    self._new_task(position, source, request.reason)
+                else:
+                    self.placements.append(ObserverPlacement(position=position, source="forward"))
             record = DeploymentRecord(
                 tick=request.tick, positions=request.positions, reason=request.reason
             )
@@ -177,10 +200,14 @@ class SimulationState:
                 depth_step_ft=self.config.deployment.depth_step_ft,
                 estimates=list(self.estimates),
                 observer_positions=[r.state.position for r in self.observers.values()],
-                pending_positions=[p.position for p in self.placements],
+                pending_positions=[p.position for p in self.placements]
+                + [t.position for t in self.tasks if t.status in self.OPEN_TASK_STATES],
                 standby_count=self._standby_count(),
                 last_deploy_tick=self.last_deploy_tick,
-                free_slots=max(self.config.observer_limit - len(self.observers) - len(self.placements), 0),
+                free_slots=max(
+                    self.config.observer_limit - len(self.observers) - len(self.placements)
+                    - self._open_task_count(), 0
+                ),
                 source_frequency_hz=self.config.source.source_frequency_hz
                 + self.config.source.shared_recognition_bias_hz,
                 sound_speed_mps=self.config.source.sound_speed_mps,
@@ -188,12 +215,108 @@ class SimulationState:
             )
 
     def _deployment_status(self) -> DeploymentStatus:
+        self._expire_tasks()
         return DeploymentStatus(
             standby_count=self._standby_count(),
             pending_placements=len(self.placements),
             last_deploy_tick=self.last_deploy_tick,
             history=list(self.deploy_history),
+            approval=self.config.layer.approval,
+            tasks=self.tasks[-30:],
+            layer=self.layer_state if self.config.layer.enabled else None,
         )
+
+    # ---------------------------------------------------------------- layer (設標者)
+    OPEN_TASK_STATES = ("PROPOSED", "APPROVED")
+
+    def _open_task_count(self) -> int:
+        return sum(1 for t in self.tasks if t.status in self.OPEN_TASK_STATES)
+
+    def _new_task(self, position: Position, source: str, reason: str) -> DropTask:
+        self.task_counter += 1
+        task = DropTask(task_id=self.task_counter, created_tick=self.tick, source=source,
+                        reason=reason, position=position)
+        if source == "manual" or self.config.layer.approval == "auto":
+            self._approve(task)
+        self.tasks.append(task)
+        if len(self.tasks) > 200:
+            closed = [t for t in self.tasks if t.status not in self.OPEN_TASK_STATES]
+            for old in closed[: len(self.tasks) - 200]:
+                self.tasks.remove(old)
+        return task
+
+    def _approve(self, task: DropTask) -> None:
+        task.status = "APPROVED"
+        task.approved_tick = self.tick
+
+    def _expire_tasks(self) -> None:
+        timeout = self.config.layer.proposal_timeout_s
+        for task in self.tasks:
+            if task.status == "PROPOSED" and self.tick - task.created_tick > timeout:
+                task.status = "EXPIRED"
+
+    async def decide_tasks(self, task_ids: list[int] | None, approve: bool) -> list[DropTask]:
+        """Operator decision on proposed drops (None = all proposed)."""
+        async with self.lock:
+            self._expire_tasks()
+            changed = []
+            for task in self.tasks:
+                if task.status != "PROPOSED" or (task_ids is not None and task.task_id not in task_ids):
+                    continue
+                if approve:
+                    self._approve(task)
+                else:
+                    task.status = "REJECTED"
+                changed.append(task)
+            return changed
+
+    async def layer_feed(self) -> LayerFeed:
+        async with self.lock:
+            self._expire_tasks()
+            online = next((e for e in self.estimates if e.mode.value == "ONLINE"), None)
+            datum = online.current_position if online and online.current_position else None
+            if datum is None:
+                datum = self.config.target.initial_position  # operator's datum until an estimate exists
+            current = self.current_estimate.base_velocity if self.current_estimate else None
+            approved = sorted(
+                (t for t in self.tasks if t.status == "APPROVED"),
+                key=lambda t: (t.approved_tick or 0, t.task_id),
+            )
+            return LayerFeed(
+                tick=self.tick,
+                generation=self.generation,
+                config=self.config.layer,
+                tasks=approved,
+                datum=datum,
+                current_east_kt=current.east_kt if current else 0.0,
+                current_north_kt=current.north_kt if current else 0.0,
+                state=self.layer_state,
+            )
+
+    async def set_layer_update(self, update: LayerUpdate) -> list[int]:
+        """Layer position every tick; drop points drift; reached points become observers."""
+        async with self.lock:
+            self.layer_state = update.state
+            done = []
+            by_id = {t.task_id: t for t in self.tasks}
+            for task_id, position in update.task_positions.items():
+                task = by_id.get(task_id)
+                if task and task.status == "APPROVED":
+                    task.position = position
+                    task.eta_s = update.task_eta_s.get(task_id)
+            for task_id, position in update.completed.items():
+                task = by_id.get(task_id)
+                if not task or task.status != "APPROVED":
+                    continue
+                task.status = "DONE"
+                task.done_tick = update.state.tick
+                task.position = position
+                task.eta_s = 0.0
+                self.placements.append(ObserverPlacement(
+                    position=position, source="manual" if task.source == "manual" else "forward"
+                ))
+                done.append(task_id)
+            return done
 
     async def set_observer(self, observer: ObserverState) -> str | None:
         """Register/update an observer. When a new observer exceeds the limit (1..99) the
@@ -348,6 +471,9 @@ class SimulationState:
             self.placements = deque(p for p in self.placements if p.source == "manual")
             self.deploy_history.clear()
             self.last_deploy_tick = None
+            # automatic drop plans belong to the old run; operator placements are still flown
+            self.tasks = [t for t in self.tasks if t.source == "manual" and t.status == "APPROVED"]
+            self.layer_state = None
             self.standby.clear()
             if replace_observers:
                 explicit = {k: v for k, v in self.assignments.items() if k in self.explicit_ids}

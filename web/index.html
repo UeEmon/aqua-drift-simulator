@@ -19,6 +19,7 @@
           <span><i class="sw observer"></i>観測者（探知中は緑）</span>
           <span><i class="sw bearing"></i>方位観測</span>
           <span><i class="sw drop"></i>前程配置の投入点</span>
+          <span><i class="sw layer"></i>設標者・設標予定点</span>
         </div>
         <div id="view-toolbar" role="toolbar" aria-label="視点">
           <div class="vt-row">
@@ -70,6 +71,9 @@
           <span>観測者 <strong id="observer-count">0</strong>（探知中 <strong id="detecting-count">0</strong>）</span>
           <span>推定状態 <strong id="observability">--</strong></span>
           <span>位置算出 <strong id="position-basis">--</strong></span>
+          <span id="drop-alert" hidden>設標計画 了承待ち <strong id="drop-alert-count">0</strong> 件
+            <button type="button" id="drop-approve-all" class="mini">了承</button>
+            <button type="button" id="drop-reject-all" class="mini ghost">却下</button></span>
         </div>
       </section>
 
@@ -243,6 +247,14 @@
               <label title="推定側が仮定する音速モデル誤差（深度に対する割合）">推定側モデル誤差 (%)<input id="est-lloyd-model-error" type="number" min="0" max="50" step="0.5" required /></label>
               <label title="深度の当てはめを行う間隔（短いほど処理負荷大）">当てはめ間隔 (s)<input id="est-lloyd-interval" type="number" min="1" max="600" step="1" required /></label>
 
+              <h3 class="span2">設標者（追加配置を行う）</h3>
+              <label class="check span2"><input id="layer-enabled" type="checkbox" />設標者が移動して投入する（オフ：即時に投入）</label>
+              <label>速力 (kt)<input id="layer-speed" type="number" min="1" max="600" step="1" required /></label>
+              <label>速力のばらつき ± (kt)<input id="layer-spread" type="number" min="0" max="300" step="1" required /></label>
+              <label>最大バンク (度)<input id="layer-bank" type="number" min="1" max="60" step="1" required /></label>
+              <label title="旋回半径より小さい場合は旋回半径に合わせる">旋回待機の半径 (YD)<input id="layer-orbit" type="number" min="100" step="100" required /></label>
+              <label title="手動了承で応答がない提案はこの時間で失効">提案の有効時間 (秒)<input id="layer-timeout" type="number" min="10" max="7200" step="10" required /></label>
+
               <h3 class="span2">前程配置（推定位置にもとづく観測者の自動追加）</h3>
               <label class="check span2"><input id="fwd-enabled" type="checkbox" />前程配置を自動で行う</label>
               <label class="span2" title="最適：ドップラー追尾の情報量（フィッシャー情報）から位置・本数・深度を計算。固定：前方の左右に決まった配置">配置方式
@@ -303,6 +315,25 @@
               </table>
             </div>
             <button id="deploy-now" type="button" class="secondary">今すぐ推定位置の前程に配置</button>
+          </section>
+
+          <section>
+            <h2>設標者（追加配置）</h2>
+            <label class="inline">設標計画の了承
+              <select id="drop-approval">
+                <option value="auto">自動（既定）</option>
+                <option value="manual">手動（オペレーターが了承）</option>
+              </select>
+            </label>
+            <p class="summary" id="layer-status">--</p>
+            <div class="table-wrap">
+              <table id="drop-table">
+                <colgroup><col style="width:12%" /><col style="width:24%" /><col style="width:30%" /><col style="width:34%" /></colgroup>
+                <thead><tr><th>#</th><th>状態</th><th>深度・到着</th><th>操作</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p class="note">追加の観測者は設標者が予定点（潮流とともに移動）に到着した時点で投入されます。設標者は 200±50 kt・バンク 15° 以内で移動し、指示がないときは目標推定位置の周囲を旋回します。</p>
           </section>
 
           <section>

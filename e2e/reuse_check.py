@@ -58,7 +58,7 @@ if f"{PROJECT}-{slot}" in observer_containers():
     fail(f"container of evicted {slot} did not exit")
 position = snap["observers"][-1]["state"]["position"]
 post("/api/observers/placements", {"position": position})
-deadline = time.time() + 120
+deadline = time.time() + 480  # the layer (設標者) flies there first
 reused = None
 while time.time() < deadline:
     snap = get("/api/snapshot")

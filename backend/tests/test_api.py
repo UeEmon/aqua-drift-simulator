@@ -60,12 +60,22 @@ def test_estimator_feed_contains_no_truth() -> None:
 def test_observer_placement_queue() -> None:
     with TestClient(app) as client:
         placement = {"position": {"latitude": 35.1, "longitude": 140.1, "depth_ft": 300.0}}
+        # with the layer (設標者, default) an operator placement becomes an approved drop task
+        assert client.post("/api/observers/placements", json=placement).status_code == 200
+        tasks = client.get("/api/snapshot").json()["deployment"]["tasks"]
+        assert tasks[-1]["status"] == "APPROVED" and tasks[-1]["source"] == "manual"
+        # without the layer the next observer container takes the placement at once
+        config = client.get("/api/config").json()
+        config["layer"]["enabled"] = False
+        assert client.put("/api/config", json=config).status_code == 200
         assert client.post("/api/observers/placements", json=placement).status_code == 200
         assigned = client.get(
             "/internal/observer/assignment", params={"observer_id": "placed-1"}
         ).json()
         assert assigned["latitude"] == 35.1
         assert assigned["depth_ft"] == 300.0
+        config["layer"]["enabled"] = True
+        assert client.put("/api/config", json=config).status_code == 200
 
 
 def test_estimation_control_endpoints() -> None:

@@ -57,6 +57,11 @@ target** (estimate only, never the truth). The default **optimal** planner choos
 the number of observers and their depths from the Doppler-tracking (Fisher) information over
 the next 30 min, taking the detection range into account (see docs/optimal-deployment.md); the
 表示・観測者 tab shows each plan (count, depths, predicted error) and has a "deploy now" button.
+Additional observers are laid by the **layer (設標者)**: the planned drop points are proposed to the
+operator (approval **automatic** by default, or **manual** with 了承/却下 in the status strip and the
+表示・観測者 tab); the layer then flies there over the sea surface at 200±50 kt with bank ≤ 15°
+(drop points drift with the estimated current) and the observer is in the water when it arrives.
+Without a task the layer circles the estimated target position.
 
 The background map (Natural Earth II) is **off by default** to prioritise rendering; switch it
 on with 「背景地図」 in the view toolbar when needed.
