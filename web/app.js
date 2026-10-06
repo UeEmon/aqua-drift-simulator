@@ -29,12 +29,12 @@ const viewer = new Cesium.Viewer("cesiumContainer", {
   maximumRenderTimeChange: Infinity,
   msaaSamples: 2, // hardware multisample anti-aliasing (WebGL2); set per quality level below
   showRenderLoopErrors: false, // recovered in scene.renderError below
+  // plain sorted alpha blending instead of order-independent translucency: OIT needs extra
+  // full-screen accumulation buffers (x MSAA x device pixels) for the translucent presence region
+  orderIndependentTranslucency: false,
   contextOptions: { webgl: { powerPreference: "high-performance", alpha: false } },
 });
 const scene = viewer.scene;
-// plain sorted alpha blending instead of order-independent translucency: OIT needs extra
-// full-screen accumulation buffers (x MSAA x device pixels) for the translucent presence region
-scene.orderIndependentTranslucency = false;
 // an exception inside Cesium's frame stops its render loop for good ("Rendering has stopped");
 // record it and restart the loop instead of leaving a frozen map
 const renderFaults = { count: 0, last: "", lastAt: 0 };
