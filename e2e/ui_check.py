@@ -251,14 +251,16 @@ def main() -> int:
             return math.hypot(dn, de) / 0.9144
 
         def initial_view() -> None:
-            # start-up: follow off, camera placed once (no flight) at 10000 ft above the sea surface;
+            # start-up: follow on (truth), camera placed once (no flight) at 10000 ft above the sea surface;
             # it has not moved since (minutes of target motion have passed by now)
             c = camera_info()
             info = c["info"]
             note(f"initial view: follow {'on' if c['follow'] else 'off'}, camera altitude {info['altitudeFt']:.0f} ft, "
                  f"depression {info['depressionDeg']:.1f} deg, HUD: {' / '.join(c['hud'].splitlines()[:4])}")
-            if c["follow"]:
-                fail("follow should be off at start")
+            if not c["follow"] or c["target"] != "truth":
+                fail(f"follow should be on with the truth target at start (on={c['follow']}, target={c['target']})")
+            if "追従中（真値）" not in c["hud"]:
+                fail(f"camera HUD does not show following the truth: {c['hud']!r}")
             if not c["initial"]:
                 fail("initial view was not applied")
             if abs(info["altitudeFt"] - 10000) > 3 or c["flying"]:
@@ -270,11 +272,12 @@ def main() -> int:
                 fail(f"camera HUD altitude not 10,000 ft: {c['hud']!r}")
             if not info["centre"]:
                 fail("camera HUD: no view centre at the initial oblique view")
-            check_centred("initial view keeps the target in frame", 0.35, "truth")
+            # minutes after start the truth has moved; the view centre must still be on it
+            check_centred("initial view follows the truth (default)", 0.03, "truth")
             page.wait_for_timeout(5000)
             later = camera_info()["info"]["altitudeFt"]
             if abs(later - info["altitudeFt"]) > 3:
-                fail(f"camera altitude changed without user action: {info['altitudeFt']:.0f} -> {later:.0f} ft")
+                fail(f"camera altitude changed without user action (no automatic zoom): {info['altitudeFt']:.0f} -> {later:.0f} ft")
             overlap = page.evaluate("""() => { const r = (id) => document.getElementById(id).getBoundingClientRect();
                 const hud = r('camera-hud'); const hit = [];
                 for (const id of ['legend', 'view-toolbar', 'status-strip']) { const o = r(id);
@@ -284,8 +287,11 @@ def main() -> int:
                 fail(f"camera HUD overlaps {overlap}")
 
         def follow() -> None:
-            # follow on (truth): the view centre is kept on the truth every frame
-            page.evaluate("""() => { const el = document.getElementById('follow-on');
+            # follow on (truth): the view centre is kept on the truth every frame (the centre
+            # buttons in earlier stages may have switched the follow target)
+            page.evaluate("""() => { const t = document.getElementById('center-target');
+                t.value = 'truth'; t.dispatchEvent(new Event('change'));
+                const el = document.getElementById('follow-on');
                 el.checked = true; el.dispatchEvent(new Event('change')); }""")
             page.wait_for_timeout(10_000)
             check_centred("follow mode truth (after 10 s)", 0.02, "truth")

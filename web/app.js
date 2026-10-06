@@ -867,8 +867,8 @@ const INITIAL_CAMERA_PITCH_DEG = -50;
 
 function initialView() {
   // start-up view: placed at once (no flight, no zoom-in animation) at 10000 ft above the sea
-  // surface, looking down obliquely at the centre target (truth by default). Afterwards the
-  // camera moves only on the user's actions or while follow is switched on (off by default).
+  // surface, looking down obliquely at the centre target (truth by default). Follow is on by
+  // default, so the view centre then stays on the truth target; no automatic zoom.
   const focus = focusPosition(centreTarget());
   if (!focus) return;
   const camera = viewer.camera;
@@ -886,7 +886,7 @@ function initialView() {
   });
   state.initialCamera = { height: altitudeM };
   for (const button of document.querySelectorAll(".vt[data-view]")) button.classList.toggle("active", button.dataset.view === "oblique");
-  setMessage(`初期表示：高度 ${INITIAL_CAMERA_ALT_FT} ft、俯角 ${-INITIAL_CAMERA_PITCH_DEG}°（中心：${focus.source}）。追従はツールバーでオン`);
+  setMessage(`初期表示：高度 ${INITIAL_CAMERA_ALT_FT} ft、俯角 ${-INITIAL_CAMERA_PITCH_DEG}°。追従オン：${focus.source}を視点中心に保ちます（ツールバーで切替）`);
   scene.requestRender();
 }
 
@@ -924,22 +924,43 @@ function focusMarker() {
 
 const scratchFollow = new Cesium.Cartesian3();
 
+function enuRotation(position) {
+  return Cesium.Matrix4.getMatrix3(Cesium.Transforms.eastNorthUpToFixedFrame(position), new Cesium.Matrix3());
+}
+
 function followTick() {
-  // follow on: every frame the camera is translated so that the view centre (the point on the
-  // camera's line of sight) is the follow target (truth or estimate). Viewing direction and
-  // distance along the line of sight are kept, so the user can still rotate and zoom.
-  if (!followOn() || state.flying) return;
+  // follow on: every frame the camera moves with the follow target (truth or estimate) so that
+  // the view centre (the point on the camera's line of sight) stays on the target.
+  //  1. the camera is carried rigidly from the target's previous local frame (east-north-up) to
+  //     its current one, so altitude above the sea surface, depression angle and heading stay
+  //     exactly as they were (no drift from the earth's curvature while the target travels)
+  //  2. it is then slid along its viewing plane so the target lies on the line of sight
+  //     (snaps to the target when follow is switched on or the target is changed)
+  // Viewing direction and distance remain under the user's control (rotate / zoom).
+  if (!followOn() || state.flying) {
+    state.followPrev = null;
+    return;
+  }
   const focus = focusMarker();
   if (!focus) return;
   const camera = viewer.camera;
   camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
-  const toTarget = Cesium.Cartesian3.subtract(focus.marker.pos, camera.position, scratchFollow);
+  const now = focus.marker.pos;
+  const prev = state.followPrev;
+  if (prev && state.followSource === focus.source && Cesium.Cartesian3.distance(prev, now) > 1e-3) {
+    const rotation = Cesium.Matrix3.multiply(enuRotation(now), Cesium.Matrix3.transpose(enuRotation(prev), new Cesium.Matrix3()), new Cesium.Matrix3());
+    const offset = Cesium.Cartesian3.subtract(camera.position, prev, new Cesium.Cartesian3());
+    Cesium.Matrix3.multiplyByVector(rotation, offset, offset);
+    Cesium.Cartesian3.add(now, offset, camera.position);
+    for (const axis of ["direction", "up", "right"]) Cesium.Matrix3.multiplyByVector(rotation, camera[axis], camera[axis]);
+  }
+  const toTarget = Cesium.Cartesian3.subtract(now, camera.position, scratchFollow);
   let along = Cesium.Cartesian3.dot(toTarget, camera.direction);
   if (!(along > 1)) along = Math.max(Cesium.Cartesian3.magnitude(toTarget), 50);
-  const offset = Cesium.Cartesian3.multiplyByScalar(camera.direction, along, new Cesium.Cartesian3());
-  const position = Cesium.Cartesian3.subtract(focus.marker.pos, offset, new Cesium.Cartesian3());
+  const position = Cesium.Cartesian3.subtract(now, Cesium.Cartesian3.multiplyByScalar(camera.direction, along, new Cesium.Cartesian3()), new Cesium.Cartesian3());
   if (Cesium.Cartesian3.distance(position, camera.position) > 0.01) Cesium.Cartesian3.clone(position, camera.position);
   state.followSource = focus.source;
+  state.followPrev = Cesium.Cartesian3.clone(now, state.followPrev || new Cesium.Cartesian3());
 }
 
 // ---------------------------------------------------------------- camera / view-centre readout

@@ -43,8 +43,8 @@ Documentation:
 
 - **View toolbar (map, top right)**: oblique / top-down (vertical) / horizontal side view
   (direction selectable), orthographic top view, **centre on truth (default centre target)**,
-  centre on estimate, **follow** on/off (default off) with the follow target truth / estimate (the
-  target is kept at the view centre every frame), FPS overlay
+  centre on estimate, **follow** on/off (default **on, following the truth**) with the follow target truth / estimate
+  (the target is kept at the view centre every frame; altitude, depression and heading are kept), FPS overlay
 - **Camera readout (map, bottom right)**: camera latitude / longitude, altitude above the sea
   surface in ft, depression angle, heading and the view-centre coordinates. The camera starts at
   10000 ft without a fly-in or automatic zoom
