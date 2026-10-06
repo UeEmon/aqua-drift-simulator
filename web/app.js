@@ -130,7 +130,6 @@ const state = {
   generation: null,
   history: [],
   trueCpa: new Map(),
-  followAnchor: null,
 };
 
 // ================================================================== helpers
@@ -819,7 +818,6 @@ function flightOptions(options) {
   state.flying = (state.flying || 0) + 1;
   const done = () => {
     state.flying = Math.max(0, (state.flying || 1) - 1);
-    state.followAnchor = null;
     scene.requestRender();
   };
   return { ...options, complete: done, cancel: done };
@@ -859,31 +857,36 @@ function applyView(view) {
     }));
   }
   for (const button of document.querySelectorAll(".vt[data-view]")) button.classList.toggle("active", button.dataset.view === view);
-  state.followAnchor = null;
   const names = { oblique: "斜視", top: "真上（垂直）", side: "水平（側面）" };
   setMessage(`視点：${names[view]}（中心：${focus.source}）`);
   scene.requestRender();
 }
 
-function initialView(snapshot) {
-  // start-up view: placed at once (no flight, no zoom-in animation) as a wide overview of the
-  // target and all observers, centred on the centre target (truth by default). After this the
-  // camera only moves on the user's actions (follow mode is off by default).
+const INITIAL_CAMERA_ALT_FT = 10000; // initial camera altitude above the horizontal plane (sea surface)
+const INITIAL_CAMERA_PITCH_DEG = -50;
+
+function initialView() {
+  // start-up view: placed at once (no flight, no zoom-in animation) at 10000 ft above the sea
+  // surface, looking down obliquely at the centre target (truth by default). Afterwards the
+  // camera moves only on the user's actions or while follow is switched on (off by default).
   const focus = focusPosition(centreTarget());
   if (!focus) return;
-  const centre = cartOf(focus.position);
-  let extent = viewRadiusM();
-  for (const observer of snapshot.observers || []) {
-    if (!observer.position) continue;
-    extent = Math.max(extent, Cesium.Cartesian3.distance(centre, cartOf(observer.position)));
-  }
   const camera = viewer.camera;
-  camera.viewBoundingSphere(new Cesium.BoundingSphere(centre, extent * 1.3),
-    new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-50), extent * 1.3 * 2.4));
+  const target = cartOf(focus.position);
+  const altitudeM = INITIAL_CAMERA_ALT_FT * FT_TO_M;
+  const pitch = Cesium.Math.toRadians(INITIAL_CAMERA_PITCH_DEG);
+  const range = (altitudeM - heightOf(focus.position.depth_ft)) / Math.sin(-pitch);
+  camera.lookAt(target, new Cesium.HeadingPitchRange(0, pitch, range));
   camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
-  state.initialCamera = { height: camera.positionCartographic.height };
+  // remove the earth-curvature residual so that the altitude is exactly the set value
+  const at = camera.positionCartographic;
+  camera.setView({
+    destination: Cesium.Cartesian3.fromRadians(at.longitude, at.latitude, altitudeM),
+    orientation: { heading: camera.heading, pitch: camera.pitch, roll: 0 },
+  });
+  state.initialCamera = { height: altitudeM };
   for (const button of document.querySelectorAll(".vt[data-view]")) button.classList.toggle("active", button.dataset.view === "oblique");
-  setMessage(`初期表示：目標と観測者の全体（中心：${focus.source}）。追従は「しない」（ツールバーで変更可）`);
+  setMessage(`初期表示：高度 ${INITIAL_CAMERA_ALT_FT} ft、俯角 ${-INITIAL_CAMERA_PITCH_DEG}°（中心：${focus.source}）。追従はツールバーでオン`);
   scene.requestRender();
 }
 
@@ -902,80 +905,137 @@ function centerOn(prefer, quiet = false) {
     offset: new Cesium.HeadingPitchRange(camera.heading, camera.pitch, range),
     duration: 0.8,
   }));
-  state.followAnchor = null;
   if (!quiet) setMessage(`${focus.source}を画面中心にしました。`);
   scene.requestRender();
 }
 
-function followMode() {
-  return $("follow-mode") ? $("follow-mode").value : "off";
+function followOn() {
+  return checked("follow-on");
 }
 
 function focusMarker() {
-  // the drawn (interpolated) marker of the centre target, so the camera moves as smoothly
+  // the drawn (interpolated) marker of the follow target, so the camera moves as smoothly
   if (centreTarget() === "estimate") {
     const marker = state.estimates?.[selectedMode()];
-    if (marker?.pos && marker.point.show) return { marker, source: "推定位置" };
+    return marker?.pos && marker.point.show ? { marker, source: "推定位置" } : null;
   }
   return state.truth?.pos ? { marker: state.truth, source: "真値" } : null;
 }
 
-function windowPosition(position) {
-  const transforms = Cesium.SceneTransforms;
-  const project = transforms && (transforms.worldToWindowCoordinates || transforms.wgs84ToWindowCoordinates);
-  return project ? project(scene, position) : null;
-}
-
-const EDGE_MARGIN = 0.18; // "edge" mode: recentre when the target is within 18 % of a screen edge
+const scratchFollow = new Cesium.Cartesian3();
 
 function followTick() {
-  const mode = followMode();
+  // follow on: every frame the camera is translated so that the view centre (the point on the
+  // camera's line of sight) is the follow target (truth or estimate). Viewing direction and
+  // distance along the line of sight are kept, so the user can still rotate and zoom.
+  if (!followOn() || state.flying) return;
   const focus = focusMarker();
-  if (mode === "off" || !focus) {
-    state.followAnchor = null;
-    return;
+  if (!focus) return;
+  const camera = viewer.camera;
+  camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+  const toTarget = Cesium.Cartesian3.subtract(focus.marker.pos, camera.position, scratchFollow);
+  let along = Cesium.Cartesian3.dot(toTarget, camera.direction);
+  if (!(along > 1)) along = Math.max(Cesium.Cartesian3.magnitude(toTarget), 50);
+  const offset = Cesium.Cartesian3.multiplyByScalar(camera.direction, along, new Cesium.Cartesian3());
+  const position = Cesium.Cartesian3.subtract(focus.marker.pos, offset, new Cesium.Cartesian3());
+  if (Cesium.Cartesian3.distance(position, camera.position) > 0.01) Cesium.Cartesian3.clone(position, camera.position);
+  state.followSource = focus.source;
+}
+
+// ---------------------------------------------------------------- camera / view-centre readout
+const hudEllipsoids = new Map();
+function planeEllipsoid(heightM) {
+  // ellipsoid raised/lowered by heightM: the horizontal plane at that height (drawn scale)
+  const key = Math.round(heightM * 10) / 10;
+  if (!hudEllipsoids.has(key)) {
+    const r = Cesium.Ellipsoid.WGS84.radii;
+    if (hudEllipsoids.size > 32) hudEllipsoids.clear();
+    hudEllipsoids.set(key, new Cesium.Ellipsoid(r.x + key, r.y + key, r.z + key));
   }
-  if (state.flying) return; // re-anchored when the flight ends
-  const now = focus.marker.pos;
-  if (mode === "center") {
-    if (state.followAnchor && state.followSource === focus.source) {
-      // translate the camera by the target's displacement: direction and zoom stay as set
-      const delta = Cesium.Cartesian3.subtract(now, state.followAnchor, new Cesium.Cartesian3());
-      if (Cesium.Cartesian3.magnitude(delta) > 0) {
-        viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
-        Cesium.Cartesian3.add(viewer.camera.position, delta, viewer.camera.position);
-      }
+  return hudEllipsoids.get(key);
+}
+
+function cameraInfo() {
+  // camera position, altitude above the horizontal plane (sea surface, ft), depression angle,
+  // heading and the view centre: where the line of sight meets the horizontal plane at the
+  // follow target's depth (equals the target while following)
+  const camera = viewer.camera;
+  const carto = Cesium.Cartographic.fromCartesian(camera.positionWC);
+  if (!carto) return null;
+  const focus = focusPosition(centreTarget());
+  const depthFt = focus ? focus.position.depth_ft : 0;
+  const info = {
+    latitude: Cesium.Math.toDegrees(carto.latitude),
+    longitude: Cesium.Math.toDegrees(carto.longitude),
+    altitudeFt: carto.height / FT_TO_M,
+    depressionDeg: -Cesium.Math.toDegrees(camera.pitch),
+    headingDeg: Cesium.Math.toDegrees(camera.heading),
+    planeDepthFt: depthFt,
+    centre: null,
+  };
+  const ray = new Cesium.Ray(camera.positionWC, camera.directionWC);
+  const hit = Cesium.IntersectionTests.rayEllipsoid(ray, planeEllipsoid(heightOf(depthFt)));
+  if (hit) {
+    const point = Cesium.Ray.getPoint(ray, Math.max(hit.start, 0));
+    const c = Cesium.Cartographic.fromCartesian(point);
+    if (c) {
+      info.centre = {
+        latitude: Cesium.Math.toDegrees(c.latitude), longitude: Cesium.Math.toDegrees(c.longitude),
+        slantYd: Cesium.Cartesian3.distance(camera.positionWC, point) / YD_TO_M,
+      };
     }
-    state.followSource = focus.source;
-    state.followAnchor = Cesium.Cartesian3.clone(now, state.followAnchor || new Cesium.Cartesian3());
   }
-  // both modes: recentre when the target nears a screen edge or has left the screen
-  // (edge mode only does this; centre mode also catches manual panning / a switched target)
-  const canvas = scene.canvas;
-  const at = windowPosition(now);
-  const w = canvas.clientWidth || 1;
-  const h = canvas.clientHeight || 1;
-  const outside = !at || at.x < EDGE_MARGIN * w || at.x > (1 - EDGE_MARGIN) * w
-    || at.y < EDGE_MARGIN * h || at.y > (1 - EDGE_MARGIN) * h;
-  const t = performance.now();
-  if (outside && t - (state.lastRecentre || 0) > 1500) {
-    state.lastRecentre = t;
-    centerOn(centreTarget(), true);
+  return info;
+}
+
+function latText(value) {
+  return `${Math.abs(value).toFixed(5)}°${value >= 0 ? "N" : "S"}`;
+}
+function lonText(value) {
+  return `${Math.abs(value).toFixed(5)}°${value >= 0 ? "E" : "W"}`;
+}
+
+let lastCameraHud = "";
+function updateCameraHud() {
+  const box = $("camera-hud");
+  if (!box) return;
+  const info = cameraInfo();
+  if (!info) return;
+  const centre = info.centre
+    ? `${latText(info.centre.latitude)} ${lonText(info.centre.longitude)}`
+    : "交点なし（水平より上を向いている）";
+  const follow = followOn() ? `追従中（${centreTarget() === "estimate" ? "推定" : "真値"}）` : "追従オフ";
+  const text = [
+    `カメラ  ${latText(info.latitude)} ${lonText(info.longitude)}`,
+    `高度    ${Math.round(info.altitudeFt).toLocaleString("ja-JP")} ft（海面から）`,
+    `俯角    ${info.depressionDeg.toFixed(1)}°   方位 ${(((Math.round(info.headingDeg * 10) / 10) % 360 + 360) % 360).toFixed(1)}°`,
+    `視点中心 ${centre}`,
+    `        深度 ${fmt(info.planeDepthFt, 0)} ft 面${info.centre ? `・斜距離 ${Math.round(info.centre.slantYd).toLocaleString("ja-JP")} yd` : ""}  ${follow}`,
+  ].join("\n");
+  if (text !== lastCameraHud) {
+    lastCameraHud = text;
+    box.textContent = text;
   }
 }
+scene.postRender.addEventListener(updateCameraHud);
 
 for (const button of document.querySelectorAll(".vt[data-view]")) {
   button.addEventListener("click", () => applyView(button.dataset.view));
 }
-$("center-estimate").addEventListener("click", () => centerOn("estimate"));
-$("center-truth").addEventListener("click", () => centerOn("truth"));
-$("follow-mode").addEventListener("change", () => {
-  state.followAnchor = null;
-  if (followMode() !== "off") centerOn(centreTarget());
+function centreButton(which) {
+  // while following, a centre button also switches what is followed
+  if (followOn()) $("center-target").value = which;
+  centerOn(which);
+}
+$("center-estimate").addEventListener("click", () => centreButton("estimate"));
+$("center-truth").addEventListener("click", () => centreButton("truth"));
+$("follow-on").addEventListener("change", () => {
+  setMessage(followOn() ? `追従オン：${centreTarget() === "estimate" ? "推定位置" : "真値"}を視点中心に保ちます。` : "追従オフ");
+  scene.requestRender();
 });
 $("center-target").addEventListener("change", () => {
-  state.followAnchor = null;
-  centerOn(centreTarget());
+  if (followOn()) scene.requestRender(); // the next frame snaps to the new target
+  else centerOn(centreTarget());
 });
 $("orthographic").addEventListener("change", () => {
   const active = document.querySelector(".vt[data-view].active");
@@ -1564,7 +1624,6 @@ $("depth-exaggeration").addEventListener("change", () => {
 for (const id of ["show-truth", "show-online", "show-smoothed", "show-region", "show-voxels", "show-range", "show-bearing", "show-error-line", "show-drops"]) {
   $(id).addEventListener("change", () => {
     state.lastRegionKey = "";
-    state.followAnchor = null;
     if (state.latestSnapshot) render(state.latestSnapshot);
   });
 }
@@ -1572,7 +1631,6 @@ for (const input of document.querySelectorAll("input[name='panel-mode']")) {
   input.addEventListener("change", () => {
     state.lastRegionKey = "";
     state.history = [];
-    state.followAnchor = null;
     if (state.latestSnapshot) render(state.latestSnapshot);
   });
 }
@@ -1600,7 +1658,7 @@ function render(snapshot) {
   drawCharts();
   if (state.firstFix && snapshot.target) {
     state.firstFix = false;
-    initialView(snapshot);
+    initialView();
   }
   scene.requestRender();
 }
@@ -1681,4 +1739,4 @@ const stream = (() => {
   return { setExaggeration: (value) => guard(() => handleUpdate({ snapshot: null, tracks: decoder.setExaggeration(value) }, 0, 0)) };
 })();
 
-window.aquaDrift = { viewer, state, applyView, centerOn, telemetry, gpu, baseMap, setBaseMap, tracks, anim }; // diagnostics / E2E
+window.aquaDrift = { viewer, state, applyView, centerOn, cameraInfo, telemetry, gpu, baseMap, setBaseMap, tracks, anim }; // diagnostics / E2E

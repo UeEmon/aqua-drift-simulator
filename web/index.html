@@ -36,19 +36,13 @@
           <div class="vt-row">
             <button type="button" id="center-truth" class="vt primary" title="真値を画面中心へ（既定）">◎ 真値を中心</button>
             <button type="button" id="center-estimate" class="vt" title="推定位置を画面中心へ">推定位置を中心</button>
-            <select id="center-target" aria-label="画面中心の対象" title="視点切替・追従で中心にする対象">
-              <option value="truth" selected>中心：真値（既定）</option>
-              <option value="estimate">中心：推定位置</option>
+            <select id="center-target" aria-label="追従・中心の対象" title="追従・視点切替で視点中心にする対象（真値／推定）">
+              <option value="truth" selected>対象：真値（既定）</option>
+              <option value="estimate">対象：推定位置</option>
             </select>
           </div>
           <div class="vt-row checks">
-            <label title="中心の対象（既定は真値）が画面から外れないようにする">追従
-              <select id="follow-mode">
-                <option value="center">常に中心</option>
-                <option value="edge">端で中心へ戻す</option>
-                <option value="off" selected>しない</option>
-              </select>
-            </label>
+            <label title="追従対象（真値／推定位置）を常に視点中心に保つ。向きと距離は操作で変更可"><input id="follow-on" type="checkbox" />追従</label>
             <label><input id="orthographic" type="checkbox" />正射投影</label>
             <label title="1秒ごとの更新の間をなめらかに補間（描画が追いつかない場合は自動停止）"><input id="smooth-motion" type="checkbox" checked />なめらか</label>
             <label title="背景地図（Natural Earth II）。描画優先のため通常はオフ"><input id="show-basemap" type="checkbox" />背景地図</label>
@@ -68,6 +62,7 @@
             <label><input id="show-fps" type="checkbox" />FPS</label>
           </div>
         </div>
+        <pre id="camera-hud" aria-label="視点カメラ情報"></pre>
         <pre id="perf-hud" hidden></pre>
         <div id="status-strip">
           <span id="connection-status">接続中</span>

@@ -29,8 +29,8 @@ def fail(message: str) -> None:
     print(f"::error::{_escape(message)}", flush=True)
 
 
-KEY_NOTES = ("initial view", "perf:", "GPU:", "forward deployment:", "follow mode", "default view centre",
-             "background map:", "view oblique")
+KEY_NOTES = ("initial view", "perf:", "GPU:", "forward deployment:", "follow mode", "follow off",
+             "default view centre")
 
 
 def note(message: str) -> None:
@@ -211,46 +211,85 @@ def main() -> int:
             check_centred("centre-on-estimate", 0.05)
             page.screenshot(path=str(out / "03-centered.png"))
 
+        def camera_info() -> dict:
+            return page.evaluate("""() => { const a = window.aquaDrift; const s = a.state.latestSnapshot;
+                const est = s.estimates.find(e => e.current_position);
+                return { info: a.cameraInfo(), truth: s.target && s.target.position,
+                         estimate: est && est.current_position, hud: document.getElementById('camera-hud').textContent,
+                         follow: document.getElementById('follow-on').checked,
+                         target: document.getElementById('center-target').value,
+                         flying: !!a.viewer.camera._currentFlight, initial: a.state.initialCamera }; }""")
+
+        def ground_yd(a: dict, b: dict) -> float:
+            lat = math.radians((a["latitude"] + b["latitude"]) / 2)
+            dn = math.radians(a["latitude"] - b["latitude"]) * 6_371_000
+            de = math.radians(a["longitude"] - b["longitude"]) * 6_371_000 * math.cos(lat)
+            return math.hypot(dn, de) / 0.9144
+
         def initial_view() -> None:
-            # start-up: follow off, the camera was placed once without a flight and has not
-            # zoomed or moved since (minutes of target motion have passed by now)
-            info = page.evaluate("""() => { const a = window.aquaDrift; const c = a.viewer.camera;
-                return { mode: document.getElementById('follow-mode').value, initial: a.state.initialCamera,
-                         height: c.positionCartographic.height, flying: !!c._currentFlight }; }""")
-            note(f"initial view: follow {info['mode']}, camera height {info['height']:.0f} m "
-                 f"(set at start {(info['initial'] or {}).get('height', float('nan')):.0f} m)")
-            if info["mode"] != "off":
-                fail(f"default follow mode is '{info['mode']}', expected 'off'")
-            if not info["initial"]:
-                fail("initial overview view was not applied")
-            elif abs(info["height"] - info["initial"]["height"]) > 1.0 or info["flying"]:
-                fail(f"camera zoomed/moved by itself since start: {info}")
+            # start-up: follow off, camera placed once (no flight) at 10000 ft above the sea surface;
+            # it has not moved since (minutes of target motion have passed by now)
+            c = camera_info()
+            info = c["info"]
+            note(f"initial view: follow {'on' if c['follow'] else 'off'}, camera altitude {info['altitudeFt']:.0f} ft, "
+                 f"depression {info['depressionDeg']:.1f} deg, HUD: {' / '.join(c['hud'].splitlines()[:4])}")
+            if c["follow"]:
+                fail("follow should be off at start")
+            if not c["initial"]:
+                fail("initial view was not applied")
+            if abs(info["altitudeFt"] - 10000) > 3 or c["flying"]:
+                fail(f"initial camera altitude {info['altitudeFt']:.1f} ft, expected 10000 ft (flying {c['flying']})")
+            for label in ("カメラ", "高度", "俯角", "視点中心"):
+                if label not in c["hud"]:
+                    fail(f"camera HUD lacks '{label}': {c['hud']!r}")
+            if "10,000 ft" not in c["hud"]:
+                fail(f"camera HUD altitude not 10,000 ft: {c['hud']!r}")
+            if not info["centre"]:
+                fail("camera HUD: no view centre at the initial oblique view")
             check_centred("initial view keeps the target in frame", 0.35, "truth")
-            h0 = info["height"]
             page.wait_for_timeout(5000)
-            h1 = page.evaluate("() => window.aquaDrift.viewer.camera.positionCartographic.height")
-            if abs(h1 - h0) > 1.0:
-                fail(f"camera height changed without user action: {h0:.0f} -> {h1:.0f} m")
+            later = camera_info()["info"]["altitudeFt"]
+            if abs(later - info["altitudeFt"]) > 3:
+                fail(f"camera altitude changed without user action: {info['altitudeFt']:.0f} -> {later:.0f} ft")
+            overlap = page.evaluate("""() => { const r = (id) => document.getElementById(id).getBoundingClientRect();
+                const hud = r('camera-hud'); const hit = [];
+                for (const id of ['legend', 'view-toolbar', 'status-strip']) { const o = r(id);
+                  if (hud.left < o.right && hud.right > o.left && hud.top < o.bottom && hud.bottom > o.top) hit.push(id); }
+                return hit; }""")
+            if overlap:
+                fail(f"camera HUD overlaps {overlap}")
 
         def follow() -> None:
-            # follow is opt-in: switch to "always centre" and the truth stays in the centre
-            page.evaluate("() => document.getElementById('center-truth').click()")
-            page.wait_for_timeout(3000)
-            page.evaluate("""() => { const el = document.getElementById('follow-mode');
-                el.value = 'center'; el.dispatchEvent(new Event('change')); }""")
+            # follow on (truth): the view centre is kept on the truth every frame
+            page.evaluate("""() => { const el = document.getElementById('follow-on');
+                el.checked = true; el.dispatchEvent(new Event('change')); }""")
             page.wait_for_timeout(10_000)
-            check_centred("follow mode center (after 10 s)", 0.08, "truth")
-            # edge mode: pan the target out of the frame, it must come back into view by itself
-            page.evaluate("""() => { const el = document.getElementById('follow-mode');
-                el.value = 'edge'; el.dispatchEvent(new Event('change')); }""")
-            page.wait_for_timeout(3000)
-            page.evaluate("""() => { const c = window.aquaDrift.viewer.camera;
-                c.moveRight(c.positionCartographic.height * 3); window.aquaDrift.viewer.scene.requestRender(); }""")
+            check_centred("follow mode truth (after 10 s)", 0.02, "truth")
+            c = camera_info()
+            if not c["info"]["centre"]:
+                fail("follow truth: camera HUD shows no view centre")
+            else:
+                gap = ground_yd(c["info"]["centre"], c["truth"])
+                note(f"follow mode truth: HUD view centre {gap:.0f} yd from the truth, altitude {c['info']['altitudeFt']:.0f} ft")
+                if gap > 60:
+                    fail(f"follow truth: view centre {gap:.0f} yd from the truth")
+            # switch the follow target to the estimate
+            page.evaluate("""() => { const el = document.getElementById('center-target');
+                el.value = 'estimate'; el.dispatchEvent(new Event('change')); }""")
             page.wait_for_timeout(6000)
-            check_centred("follow mode edge (after panning away)", 0.32, "truth")
-            page.evaluate("""() => { const el = document.getElementById('follow-mode');
-                el.value = 'off'; el.dispatchEvent(new Event('change')); }""")
-            page.wait_for_timeout(1000)
+            check_centred("follow mode estimate (after 6 s)", 0.05, "estimate")
+            # off: the camera stays where it is while the target moves on
+            page.evaluate("""() => { const el = document.getElementById('follow-on');
+                el.checked = false; el.dispatchEvent(new Event('change'));
+                const t = document.getElementById('center-target'); t.value = 'truth'; }""")
+            page.wait_for_timeout(500)
+            before = camera_info()["info"]
+            page.wait_for_timeout(4000)
+            after = camera_info()["info"]
+            moved = ground_yd(before, after)
+            note(f"follow off: camera moved {moved:.1f} yd in 4 s")
+            if moved > 1:
+                fail(f"follow off but the camera moved {moved:.1f} yd")
 
         def final_screens() -> None:
             page.evaluate("() => document.querySelector(\".tab[data-tab='tab-compare']\").click()")
