@@ -119,8 +119,18 @@ def main() -> int:
             note(f"GPU: {json.dumps(gl)}")
             if not gl["webgl2"]:
                 fail("WebGL2 context not active")
-            if gl["msaa"] < 2:
-                fail(f"MSAA not active (msaaSamples={gl['msaa']})")
+            # MSAA follows the quality level (auto lowers it on slow software WebGL): check that
+            # the level's setting is applied and that 高 gives 4x
+            expected = {"高": 4, "中": 2, "低": 1, "最低": 1}
+            level = page.evaluate("() => window.aquaDrift.telemetry.quality")
+            if gl["msaa"] != expected.get(level, -1):
+                fail(f"MSAA {gl['msaa']} does not match quality '{level}'")
+            high = page.evaluate("""() => { const q = document.getElementById('quality'); q.value = '0';
+                q.dispatchEvent(new Event('change')); const m = window.aquaDrift.viewer.scene.msaaSamples;
+                q.value = 'auto'; q.dispatchEvent(new Event('change')); return m; }""")
+            note(f"MSAA: {gl['msaa']}x at quality {level}, {high}x at 高")
+            if high < 4:
+                fail(f"MSAA not 4x at quality 高 (msaaSamples={high})")
             if not gl["requestRenderMode"]:
                 fail("requestRenderMode is off")
             message = page.inner_text("#message")
@@ -129,11 +139,25 @@ def main() -> int:
             page.screenshot(path=str(out / "01-initial.png"))
 
         def telemetry(label: str) -> None:
+            # count who requests frames during the window (diagnostics for the idle check)
+            page.evaluate("""() => { const s = window.aquaDrift.viewer.scene; const d = { calls: 0, by: {}, cam: 0 };
+                window.__renderDiag = d; if (!s.__origRequestRender) s.__origRequestRender = s.requestRender.bind(s);
+                s.requestRender = () => { d.calls++; const line = (new Error().stack || '').split('\n')[2] || '?';
+                  const key = line.trim().replace(/^at /, '').replace(/https?:[^ )]*[/]/, '').slice(0, 60);
+                  d.by[key] = (d.by[key] || 0) + 1; s.__origRequestRender(); };
+                const c = window.aquaDrift.viewer.camera; let last = c.positionWC.clone();
+                d.off = s.postRender.addEventListener(() => { if (!Cesium.Cartesian3.equalsEpsilon(last, c.positionWC, 0, 1e-6)) d.cam++;
+                  last = c.positionWC.clone(); }); }""")
             t0 = page.evaluate("() => window.aquaDrift.telemetry.frames")
             page.wait_for_timeout(3000)
             data = page.evaluate(
-                """() => ({ t: window.aquaDrift.telemetry, long: window.__longTasks,
-                  pending: ['region','regionOutline','voxels'].map(k => !!window.aquaDrift.gpu[k].pending) })"""
+                """() => { const s = window.aquaDrift.viewer.scene; const d = window.__renderDiag;
+                  s.requestRender = s.__origRequestRender; d.off();
+                  const by = Object.entries(d.by).sort((a, b) => b[1] - a[1]).slice(0, 4);
+                  return { t: window.aquaDrift.telemetry, long: window.__longTasks,
+                  diag: { requests: d.calls, cameraMoves: d.cam, by, globe: s.globe.show,
+                          anim: window.aquaDrift.anim.active.size },
+                  pending: ['region','regionOutline','voxels'].map(k => !!window.aquaDrift.gpu[k].pending) }; }"""
             )
             fps = (data["t"]["frames"] - t0) / 3.0
             t = data["t"]
@@ -143,7 +167,7 @@ def main() -> int:
             # with smooth display on, markers glide (continuous frames by design); the idle-loop
             # check applies when it is off (it switches off by itself on slow software WebGL)
             if not t.get("smooth") and fps > 20:
-                fail(f"render loop not idle ({label}): {fps:.1f} frames/s with requestRenderMode")
+                fail(f"render loop not idle ({label}): {fps:.1f} frames/s with requestRenderMode; {data['diag']}")
 
         def overflow() -> None:
             for width in (1600, 1280):
