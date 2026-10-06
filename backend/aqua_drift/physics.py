@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import cmath
 import math
 import random
 
@@ -164,11 +165,63 @@ def advance_observer(
     )
 
 
+def lloyd_mirror_level_db(
+    config: ScenarioConfig,
+    target_position: Position,
+    observer_position: Position,
+    frequency_hz: float,
+) -> tuple[float, float]:
+    """Received level [dB] of the tonal via the direct and the surface-reflected path.
+
+    Image-source model (isovelocity, pressure-release surface: reflection coefficient -mu):
+        p = exp(i k r1) / r1 - mu exp(i k r2) / r2
+        r1 = sqrt(R^2 + (zs - zr)^2), r2 = sqrt(R^2 + (zs + zr)^2)
+        mu = exp(-2 (k sigma_h sin g)^2)  coherent reflection of a rough surface (Rayleigh),
+             sin g = (zs + zr) / r2 the grazing angle at the reflection point
+    The true path difference can be scaled (path_difference_error_pct) to emulate a sound-speed
+    structure that the estimator's isovelocity model does not know. Returns (level, mu)."""
+    lloyd = config.lloyd
+    east_m, north_m, _ = local_offset_m(observer_position, target_position)
+    horizontal = math.hypot(east_m, north_m)
+    zs = target_position.depth_ft * FT_TO_M
+    zr = observer_position.depth_ft * FT_TO_M
+    r1 = math.hypot(horizontal, zs - zr)
+    r2 = math.hypot(horizontal, zs + zr)
+    k = 2.0 * math.pi * frequency_hz / config.source.sound_speed_mps
+    sin_grazing = (zs + zr) / max(r2, 1e-6)
+    mu = math.exp(-2.0 * (k * lloyd.wave_height_rms_m * sin_grazing) ** 2)
+    r2_true = r1 + (r2 - r1) * (1.0 + lloyd.path_difference_error_pct / 100.0)
+    pressure = cmath.exp(1j * k * r1) / max(r1, 1.0) - mu * cmath.exp(1j * k * r2_true) / max(r2_true, 1.0)
+    return lloyd.source_level_db + 20.0 * math.log10(max(abs(pressure), 1e-12)), mu
+
+
+class LevelNoise:
+    """Received-level fluctuation: AR(1) per observer, sigma level_noise_db, correlation time
+    noise_correlation_s (independent between observers)."""
+
+    def __init__(self, seed: int) -> None:
+        self.rng = random.Random(seed)
+        self.state: dict[str, float] = {}
+
+    def sample(self, observer_id: str, sigma_db: float, correlation_s: float) -> float:
+        if sigma_db <= 0:
+            return 0.0
+        a = math.exp(-1.0 / correlation_s) if correlation_s > 0 else 0.0
+        previous = self.state.get(observer_id)
+        if previous is None:
+            value = self.rng.gauss(0.0, sigma_db)
+        else:
+            value = a * previous + math.sqrt(1.0 - a * a) * self.rng.gauss(0.0, sigma_db)
+        self.state[observer_id] = value
+        return value
+
+
 def doppler_observation(
     config: ScenarioConfig,
     target: TargetState,
     observer: ObserverState,
     rng: random.Random | None = None,
+    level_noise: LevelNoise | None = None,
 ) -> tuple[DopplerObservation, DopplerTruth]:
     """Synthesize one error-free Doppler sample (or a non-detection), a noisy horizontal
     bearing every `bearing.interval_s` while detected, and the truth record."""
@@ -193,6 +246,13 @@ def doppler_observation(
     if b.enabled and detected and target.tick % b.interval_s == 0:
         noise = (rng or random).gauss(0.0, b.sigma_deg)
         bearing = (true_bearing + noise) % 360.0
+    level = None
+    if config.lloyd.enabled and detected:
+        level, _ = lloyd_mirror_level_db(config, target.position, observer.position, observed)
+        if level_noise is not None:
+            level += level_noise.sample(
+                observer.observer_id, config.lloyd.level_noise_db, config.lloyd.noise_correlation_s
+            )
     observation = DopplerObservation(
         observer_id=observer.observer_id,
         tick=target.tick,
@@ -201,6 +261,7 @@ def doppler_observation(
         observed_frequency_hz=observed if detected else None,
         recognized_frequency_hz=recognized,
         bearing_deg=bearing,
+        received_level_db=level,
     )
     truth = DopplerTruth(
         observer_id=observer.observer_id,

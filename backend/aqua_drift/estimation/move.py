@@ -47,6 +47,9 @@ class MoveParams:
     max_speed: float
     max_depth: float
     bearing_sigma: float = 0.2618
+    # current depth measurement (metres, sigma) from the optional Lloyd's mirror fit; part of
+    # the resample-move target so that the rejuvenation keeps the depth information
+    depth_fix: tuple[float, float] | None = None
 
 
 class EpochStore:
@@ -205,6 +208,8 @@ def window_loglik(
             total[begin : begin + chunk] -= 0.5 * np.sum((diff / prm.bearing_sigma) ** 2, axis=1)
     if prm.bias_sigma > 0:
         total += -0.5 * (states[:, 6] / prm.bias_sigma) ** 2
+    if prm.depth_fix is not None:
+        total += -0.5 * ((states[:, 2] - prm.depth_fix[0]) / prm.depth_fix[1]) ** 2
     speed = np.linalg.norm(states[:, 3:5], axis=1)
     bad = (speed > prm.max_speed) | (states[:, 2] < 0) | (states[:, 2] > prm.max_depth)
     total[bad] = -np.inf
@@ -230,6 +235,8 @@ def _residuals(x: np.ndarray, win: Window, current: CurrentFit, prm: MoveParams)
         np.array([x[6] / prm.bias_sigma if prm.bias_sigma > 0 else 0.0]),
         np.array([max(0.0, float(np.hypot(x[3], x[4])) - prm.max_speed) * 100.0]),
     ]
+    if prm.depth_fix is not None:
+        parts.append(np.array([(x[2] - prm.depth_fix[0]) / prm.depth_fix[1]]))
     return np.concatenate(parts)
 
 

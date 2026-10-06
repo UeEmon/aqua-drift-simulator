@@ -111,6 +111,20 @@
             <p class="note">判定：|誤差| ÷ 推定1σ が 1 以下「1σ内」、3 以下「3σ内」、それ以上「3σ超」。</p>
           </section>
 
+          <section id="lloyd-section">
+            <h2>ロイドミラー深度（直接波と海面反射波の干渉）</h2>
+            <label class="check" title="受信レベルの模擬と、干渉縞への深度の当てはめを行う（処理負荷大）"><input id="lloyd-enabled" type="checkbox" />計算する（処理負荷大）</label>
+            <p class="summary" id="lloyd-summary">オフ</p>
+            <div class="table-wrap">
+              <table id="lloyd-table">
+                <colgroup><col style="width:24%" /><col style="width:26%" /><col style="width:32%" /><col style="width:18%" /></colgroup>
+                <thead><tr><th>観測者</th><th>状態</th><th>深度 (Ft)<br /><small>当てはめ ±1σ</small></th><th>縞の数</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p class="note">受信レベルの増減（直接波と海面反射波の干渉）に深度を当てはめます。水平距離はドップラー追尾から。一様音速を仮定し、音速構造の誤差はモデル誤差として 1σ に含めます。</p>
+          </section>
+
           <section>
             <h2>誤差の推移</h2>
             <figure class="chart">
@@ -221,6 +235,14 @@
               <label>存在確率 (%)<input id="probability" type="number" min="1" max="99.9" step="0.1" required /></label>
               <label>過去航跡再計算範囲 (秒)<input id="smoothing-window" type="number" min="1" max="10800" step="1" required /></label>
               <label>粒子数<input id="particles" type="number" min="500" max="50000" step="500" required /></label>
+              <h3 class="span2">ロイドミラー（海面反射）による深度（オン／オフは「推定と真値」タブ）</h3>
+              <label title="受信レベルの揺らぎ（模擬側）">レベル揺らぎ σ (dB)<input id="lloyd-noise" type="number" min="0" max="20" step="0.1" required /></label>
+              <label title="揺らぎの相関時間（模擬側）">揺らぎ相関 (s)<input id="lloyd-corr" type="number" min="0" max="600" step="1" required /></label>
+              <label title="海面の波高 rms（模擬側）。荒れるほど反射が弱まる">海面波高 rms (m)<input id="lloyd-wave" type="number" min="0" max="5" step="0.05" required /></label>
+              <label title="音速構造による経路差のずれ（模擬側の真値。推定は一様音速を仮定）">経路差のずれ (%)<input id="lloyd-path-error" type="number" min="-50" max="50" step="0.5" required /></label>
+              <label title="推定側が仮定する音速モデル誤差（深度に対する割合）">推定側モデル誤差 (%)<input id="est-lloyd-model-error" type="number" min="0" max="50" step="0.5" required /></label>
+              <label title="深度の当てはめを行う間隔（短いほど処理負荷大）">当てはめ間隔 (s)<input id="est-lloyd-interval" type="number" min="1" max="600" step="1" required /></label>
+
               <h3 class="span2">前程配置（推定位置にもとづく観測者の自動追加）</h3>
               <label class="check span2"><input id="fwd-enabled" type="checkbox" />前程配置を自動で行う</label>
               <label>先行時間 (秒)<input id="fwd-lead" type="number" min="30" max="7200" step="30" required /></label>

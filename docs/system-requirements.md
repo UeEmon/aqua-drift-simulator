@@ -123,6 +123,7 @@ Docker イメージとビルドキャッシュに約 2〜3 GB（試算）。履�
 | `OBSERVER_STANDBY_TIMEOUT_S` | 120 | 割り当てがないまま待った観測者コンテナが終了するまでの秒数 |
 | `OBSERVER_REPLICAS` | 12 | 静的構成（`--profile static-observers`）のときの観測者コンテナ数 |
 | `ESTIMATOR_CPUS` | 2 | 推定コンテナの CPU 上限 |
+| （画面）ロイドミラー深度 | オフ | オンにすると推定コンテナで 10 秒ごとに深度の当てはめ（観測者 4 で 1 回 6〜50 ms、観測者数に比例）。重いときはオフにするか当てはめ間隔を延ばす |
 | `ESTIMATOR_THREADS` | 2 | 推定の数値計算スレッド数 |
 | `WEB_BIND` / `WEB_PORT` | 0.0.0.0 / 8090 | Web 画面の公開先 |
 | `API_PORT` | 8091 | API の公開ポート（127.0.0.1 のみ） |

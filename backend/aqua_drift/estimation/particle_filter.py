@@ -94,6 +94,7 @@ class DopplerParticleFilter:
         self.bearing_sigma = bearing_sigma_rad
         self.move_window_eff: float | None = None
         self.maneuver_cut_tick: int | None = None
+        self.depth_fix: tuple[float, float, int] | None = None  # (depth m, sigma m, tick)
         self.rng = np.random.default_rng(seed)
         self.x = np.zeros((self.n, self.STATE_DIM))
         self.w = np.full(self.n, 1.0 / self.n)
@@ -407,7 +408,41 @@ class DopplerParticleFilter:
             max_speed=self.max_speed,
             max_depth=self.max_depth,
             bearing_sigma=self.bearing_sigma,
+            depth_fix=self._active_depth_fix(),
         )
+
+    # ------------------------------------------------------------------ external depth fixes
+    DEPTH_FIX_MAX_AGE_S = 60
+
+    def _active_depth_fix(self) -> tuple[float, float] | None:
+        fix = getattr(self, "depth_fix", None)
+        if fix is None or self.tick - fix[2] > self.DEPTH_FIX_MAX_AGE_S:
+            return None
+        return fix[0], fix[1]
+
+    def set_depth_fix(self, depth_m: float | None, sigma_m: float | None = None) -> None:
+        """Latest depth measurement (Lloyd's mirror); used in the resample-move target."""
+        self.depth_fix = None if depth_m is None or sigma_m is None else (depth_m, sigma_m, self.tick)
+
+    def apply_depth_measurement(self, depth_m: float, sigma_m: float, current: CurrentFit) -> float:
+        """Sequential update with a depth measurement (tempered like the Doppler update so the
+        particle set never collapses). Returns the ESS afterwards."""
+        loglik = -0.5 * ((self.x[:, 2] - depth_m) / sigma_m) ** 2
+        remaining = 1.0
+        for _ in range(8):
+            beta = self._choose_beta(loglik, remaining)
+            logw = np.log(np.maximum(self.w, 1e-300)) + beta * loglik
+            logw -= logw.max()
+            w = np.exp(logw)
+            self.w = w / w.sum()
+            remaining -= beta
+            if remaining > 1e-9 or self.ess() < 0.5 * self.n:
+                self._apply_resample(self._systematic_resample())
+                self._roughen(current)
+                loglik = -0.5 * ((self.x[:, 2] - depth_m) / sigma_m) ** 2
+            if remaining <= 1e-9:
+                break
+        return self.ess()
 
     def move(self, current: CurrentFit, epochs: int = 60, starts: int = 8) -> dict[str, float]:
         """Optimization-assisted Metropolis-Hastings rejuvenation (see estimation/move.py).

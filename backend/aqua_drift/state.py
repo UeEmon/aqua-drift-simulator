@@ -17,6 +17,7 @@ from aqua_drift.models import (
     EstimatorFeed,
     EstimatorOutput,
     EstimatorSettings,
+    LloydDepthEstimate,
     ObserverAssignment,
     ObserverFix,
     ObserverPlacement,
@@ -54,6 +55,7 @@ class SimulationState:
         self.estimates: list[TrackEstimate] = []
         self.cpa: list[CpaResult] = []
         self.current_estimate: CurrentEstimate | None = None
+        self.lloyd: LloydDepthEstimate | None = None
         self.placements: deque[ObserverPlacement] = deque()
         self.assignments: dict[str, Position] = {}
         self.assignment_counter = 0
@@ -275,6 +277,7 @@ class SimulationState:
                 running=True, run_id=self.estimation.run_id + 1, started_tick=self.tick
             )
             self.estimates, self.cpa, self.current_estimate = [], [], None
+            self.lloyd = None
             return self.estimation
 
     async def stop_estimation(self) -> EstimationControl:
@@ -293,6 +296,7 @@ class SimulationState:
             self.estimates = output.estimates
             self.cpa = output.cpa
             self.current_estimate = output.current
+            self.lloyd = output.lloyd
 
     async def snapshot(self) -> Snapshot:
         async with self.lock:
@@ -313,6 +317,7 @@ class SimulationState:
                 cpa=list(self.cpa),
                 current_estimate=self.current_estimate,
                 archived_observer_ids=list(self.archived_observer_ids),
+                lloyd=self.lloyd,
             )
 
     async def sim_state(self) -> SimState:
@@ -351,6 +356,7 @@ class SimulationState:
             self.estimates = []
             self.cpa = []
             self.current_estimate = None
+            self.lloyd = None
 
     def _archive(self, observer_id: str) -> None:
         key = self._session_key(observer_id, self.sessions.get(observer_id, 0))

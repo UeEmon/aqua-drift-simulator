@@ -50,6 +50,7 @@
       current: null,
       deployment: { standby_count: 0, pending_placements: 0, last_deploy_tick: null, history: [] },
       archived: [],
+      lloyd: null,
       region: null,
       est: {}, // mode -> rows
       truth: [], // [tick, lat, lon, depth]
@@ -93,6 +94,7 @@
       if ("cur" in message) st.current = message.cur;
       if ("dep" in message) st.deployment = message.dep;
       if ("arch" in message) st.archived = message.arch;
+      if ("lly" in message) st.lloyd = message.lly;
       let regionChanged = false;
       if ("rgn" in message) {
         st.region = message.rgn ? expandRegion(message.rgn) : null;
@@ -174,6 +176,7 @@
         current_estimate: st.current,
         deployment: st.deployment,
         archived_observer_ids: st.archived,
+        lloyd: st.lloyd,
       };
       return { snapshot, region: regionChanged ? st.region : undefined, regionChanged, tracks: updates };
     }

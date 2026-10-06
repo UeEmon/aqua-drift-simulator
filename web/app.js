@@ -1376,6 +1376,49 @@ function updateCpa(cpa) {
   setHtml($("cpa-table").querySelector("tbody"), rows.join("") || "<tr><td colspan='4'>最近接通過なし</td></tr>");
 }
 
+// ================================================================== Lloyd's mirror depth
+const LLOYD_STATUS = {
+  OK: "採用", AMBIGUOUS: "曖昧（縞の次数）", NO_FRINGES: "縞が不足", NO_PATTERN: "干渉が見えない", FEW_SAMPLES: "標本不足",
+};
+
+function updateLloyd(lloyd, config, target) {
+  const enabled = Boolean(config?.lloyd?.enabled);
+  if (!state.lloydPending && $("lloyd-enabled").checked !== enabled) $("lloyd-enabled").checked = enabled;
+  const summary = $("lloyd-summary");
+  const body = $("lloyd-table").querySelector("tbody");
+  if (!enabled || !lloyd || !lloyd.enabled) {
+    summary.textContent = enabled ? "準備中（受信レベルの蓄積を開始）" : "オフ（計算していません）";
+    body.innerHTML = "";
+    return;
+  }
+  if (lloyd.status === "OK") {
+    const truth = target ? target.position.depth_ft : null;
+    const error = truth == null ? "" : `、真値 ${fmt(truth, 0)}・誤差 ${lloyd.depth_ft - truth >= 0 ? "+" : ""}${fmt(lloyd.depth_ft - truth, 0)}`;
+    summary.textContent = `深度 ${fmt(lloyd.depth_ft, 0)} Ft ±${fmt(lloyd.sigma_ft, 0)}${error}（観測者 ${lloyd.used_observers}、`
+      + `${lloyd.tick} s 時点、計算 ${fmt(lloyd.fit_ms, 0)} ms${lloyd.applied ? "、推定に反映" : ""}）`;
+  } else if (lloyd.status === "WAITING") {
+    summary.textContent = "待機中（追尾の水平精度、または受信レベルの蓄積を待っています）";
+  } else {
+    summary.textContent = "結果なし（干渉縞が不足、または縞の次数が曖昧）";
+  }
+  body.innerHTML = (lloyd.observers || []).map((o) => `<tr><td>${escapeHtml(o.observer_id)}</td>`
+    + `<td>${LLOYD_STATUS[o.status] || escapeHtml(o.status)}</td>`
+    + `<td>${o.depth_ft == null ? "--" : `${fmt(o.depth_ft, 0)} ±${fmt(o.sigma_ft, 0)}`}</td>`
+    + `<td>${fmt(o.fringes, 1)}</td></tr>`).join("");
+}
+
+$("lloyd-enabled").addEventListener("change", () => {
+  const on = checked("lloyd-enabled");
+  state.lloydPending = true;
+  putConfig((next) => { next.lloyd.enabled = on; })
+    .then(() => setMessage(on ? "ロイドミラー深度の計算を開始しました（処理負荷が増えます）。" : "ロイドミラー深度の計算を停止しました。"))
+    .catch((error) => {
+      $("lloyd-enabled").checked = !on;
+      setMessage(`設定エラー: ${error.message}`);
+    })
+    .finally(() => { state.lloydPending = false; });
+});
+
 function updateCurrent(current, config) {
   if (!tabVisible("tab-compare")) return;
   const tbody = $("current-table").querySelector("tbody");
@@ -1569,6 +1612,11 @@ function populateForms(config) {
     "fwd-lateral": f.lateral_offset_yd, "fwd-count": f.observers_per_drop, "fwd-cooldown": f.cooldown_s };
   for (const [id, value] of Object.entries(fwdValues)) $(id).value = value;
   $("use-bearing").checked = config.estimator.use_bearing;
+  const l = config.lloyd || {};
+  const lloydValues = { "lloyd-noise": l.level_noise_db, "lloyd-corr": l.noise_correlation_s, "lloyd-wave": l.wave_height_rms_m,
+    "lloyd-path-error": l.path_difference_error_pct, "est-lloyd-model-error": config.estimator.lloyd_model_error_pct,
+    "est-lloyd-interval": config.estimator.lloyd_fit_interval_s };
+  for (const [id, value] of Object.entries(lloydValues)) if ($(id) && value != null) $(id).value = value;
   state.formsLoaded = true;
 }
 
@@ -1648,6 +1696,12 @@ $("config-form").addEventListener("submit", (event) => {
     next.forward.lateral_offset_yd = num("fwd-lateral");
     next.forward.observers_per_drop = num("fwd-count");
     next.forward.cooldown_s = num("fwd-cooldown");
+    next.lloyd.level_noise_db = num("lloyd-noise");
+    next.lloyd.noise_correlation_s = num("lloyd-corr");
+    next.lloyd.wave_height_rms_m = num("lloyd-wave");
+    next.lloyd.path_difference_error_pct = num("lloyd-path-error");
+    next.estimator.lloyd_model_error_pct = num("est-lloyd-model-error");
+    next.estimator.lloyd_fit_interval_s = num("est-lloyd-interval");
   })
     .then(() => setMessage("観測・推定条件を反映しました。"))
     .catch((error) => setMessage(`設定エラー: ${error.message}`));
@@ -1727,6 +1781,7 @@ function render(snapshot) {
   updateRelative(snapshot, estimate);
   updateCpa(snapshot.cpa || []);
   updateCurrent(snapshot.current_estimate, snapshot.config);
+  updateLloyd(snapshot.lloyd, snapshot.config, snapshot.target);
   updateDeployment(snapshot.deployment);
   drawCharts();
   if (state.firstFix && snapshot.target) {

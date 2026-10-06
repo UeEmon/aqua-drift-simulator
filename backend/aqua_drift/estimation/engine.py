@@ -19,6 +19,7 @@ from aqua_drift.estimation.frame import (
     YD_TO_M,
     LocalFrame,
 )
+from aqua_drift.estimation.lloyd import LloydDepthEstimator, LloydFitSettings
 from aqua_drift.estimation.particle_filter import DopplerParticleFilter, ObservationRow
 from aqua_drift.estimation.region import presence_region
 from aqua_drift.models import (
@@ -27,6 +28,7 @@ from aqua_drift.models import (
     EstimateMode,
     EstimatorOutput,
     EstimatorSettings,
+    LloydDepthEstimate,
     PresenceRegion,
     RelativeKinematics,
     TrackEstimate,
@@ -72,6 +74,8 @@ class TrackingEngine:
         self.update_info: dict[str, float] = {}
         self.cpa_results = []
         self.reinitializations = 0
+        self.lloyd = LloydDepthEstimator()
+        self.lloyd_result: LloydDepthEstimate | None = None
 
     # ------------------------------------------------------------------ settings
     def _new_filter(self) -> DopplerParticleFilter:
@@ -194,6 +198,12 @@ class TrackingEngine:
                 obs.observed_frequency_hz,
                 obs.recognized_frequency_hz,
             )
+            if (
+                self.settings.lloyd_enabled
+                and obs.received_level_db is not None
+                and obs.observed_frequency_hz is not None
+            ):
+                self.lloyd.add(obs.observer_id, batch.tick, point, obs.received_level_db, obs.observed_frequency_hz)
         previously_watching = {
             row.observer_id
             for row in rows
@@ -235,6 +245,7 @@ class TrackingEngine:
                     self.pf.move(self.current_fit, est.move_epochs, est.move_starts)
                 )
 
+        self._lloyd_step(batch.tick)
         for row in rows:
             if not row.detected:
                 self.nondetect_tick[row.observer_id] = batch.tick
@@ -243,6 +254,59 @@ class TrackingEngine:
         if self.pf.initialized and batch.tick % self.pf.hist_stride == 0:
             self.online_track.append(self._track_point())
             self.online_track = _thin(self.online_track)
+
+    # ------------------------------------------------------------------ Lloyd's mirror depth
+    LLOYD_MAX_TRACK_SIGMA_M = 150.0
+
+    def _lloyd_step(self, tick: int) -> None:
+        """Optional (heavy) depth fit to the received-level interference pattern."""
+        e = self.settings.estimator
+        if not self.settings.lloyd_enabled:
+            if self.lloyd.samples or self.lloyd_result is None or self.lloyd_result.enabled:
+                self.lloyd.clear()
+                self.pf.set_depth_fix(None)
+                self.lloyd_result = LloydDepthEstimate(enabled=False, tick=max(tick, 0), status="OFF")
+            return
+        self.lloyd.prune(tick, e.lloyd_window_s)
+        if self.lloyd_result is None or not self.lloyd_result.enabled:
+            self.lloyd_result = LloydDepthEstimate(enabled=True, tick=tick, status="WAITING")
+        if tick % e.lloyd_fit_interval_s != 0 or not self.pf.initialized:
+            return
+        pf = self.pf
+        mean = pf.w @ pf.x
+        diff = pf.x[:, 0:2] - mean[0:2]
+        horizontal_sigma = math.sqrt(max(float(np.sum(pf.w[:, None] * diff * diff)), 0.0))
+        if horizontal_sigma > self.LLOYD_MAX_TRACK_SIGMA_M:
+            self.lloyd_result = LloydDepthEstimate(enabled=True, tick=tick, status="WAITING")
+            return  # the horizontal range from the Doppler track is not good enough yet
+        ground = pf.w @ pf.ground_v
+        position = mean[0:3]
+
+        def track(ticks: np.ndarray) -> np.ndarray:
+            # constant velocity within the window (the window is cut after a maneuver)
+            return position[None, :] - ground[None, :] * (tick - ticks)[:, None]
+
+        window = float(min(e.lloyd_window_s, getattr(pf, "move_window_eff", e.lloyd_window_s) or e.lloyd_window_s))
+        settings = LloydFitSettings(
+            sound_speed=self.settings.sound_speed_mps,
+            max_depth_m=e.max_target_depth_ft * FT_TO_M,
+            depth_step_m=e.lloyd_depth_step_ft * FT_TO_M,
+            min_samples=e.lloyd_min_samples,
+            window_s=window,
+            model_error_frac=e.lloyd_model_error_pct / 100.0,
+            noise_correlation_s=e.lloyd_noise_correlation_s,
+        )
+        result = self.lloyd.fit(tick, track, settings)
+        if result.depth_ft is not None and result.sigma_ft is not None:
+            depth_m = result.depth_ft * FT_TO_M
+            sigma_m = result.sigma_ft * FT_TO_M
+            # successive fits share most of their data: spread one window's information over
+            # the fits made within it so that it is not counted many times
+            repeats = max(window / e.lloyd_fit_interval_s, 1.0)
+            pf.apply_depth_measurement(depth_m, sigma_m * math.sqrt(repeats), self.current_fit)
+            pf.set_depth_fix(depth_m, sigma_m)
+            result.applied = True
+        self.lloyd_result = result
 
     # ------------------------------------------------------------------ summaries
     def _track_point(self, tick: int | None = None) -> TrackPoint:
@@ -321,6 +385,7 @@ class TrackingEngine:
             "observation_inputs": (
                 "Doppler frequency, detection flag, observer time/position/depth"
                 + (", horizontal bearing" if e.use_bearing else "")
+                + (", received level (Lloyd's mirror depth)" if self.settings.lloyd_enabled else "")
             ),
             "detectable_time_s": self.detectable_time_s(),
             "particle_count": self.pf.n,
@@ -343,7 +408,7 @@ class TrackingEngine:
             ]
             return EstimatorOutput(
                 tick=max(self.tick, 0), estimates=estimates, cpa=cpa,
-                current=self._current_estimate(),
+                current=self._current_estimate(), lloyd=self.lloyd_result,
             )
 
         pf = self.pf
@@ -453,4 +518,5 @@ class TrackingEngine:
             estimates=[online, smoothed],
             cpa=cpa,
             current=self._current_estimate(),
+            lloyd=self.lloyd_result,
         )

@@ -7,7 +7,8 @@ The first message of a connection carries everything; later messages carry only 
   when the beginning changed (server-side thinning, new run);
 * presence region: shared by both estimate modes, sent when it changed, at most every
   `region_interval_s` (unless the run / probability changed);
-* config, CPA, current estimate, deployment status, archive list: only when changed;
+* config, CPA, current estimate, deployment status, archive list, Lloyd's mirror depth:
+  only when changed;
 * observers, Doppler truth, bearings, relative kinematics: compact arrays.
 
 Numbers are rounded to display precision (lat/lon 1e-6 deg ~ 0.1 m).
@@ -166,6 +167,7 @@ class WireEncoder:
             ("cur", "current_estimate"),
             ("dep", "deployment"),
             ("arch", "archived_observer_ids"),
+            ("lly", "lloyd"),
         ):
             if self._changed(name, data[key]):
                 message[name] = data[key]

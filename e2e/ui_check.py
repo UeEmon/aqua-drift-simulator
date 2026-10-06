@@ -29,7 +29,7 @@ def fail(message: str) -> None:
     print(f"::error::{_escape(message)}", flush=True)
 
 
-KEY_NOTES = ("initial view", "perf:", "GPU:", "forward deployment:", "follow mode", "map fits")
+KEY_NOTES = ("initial view", "perf:", "GPU:", "forward deployment:", "Lloyd")
 
 
 def note(message: str) -> None:
@@ -367,6 +367,50 @@ def main() -> int:
                 fail("background map did not switch off")
             note("background map: off at start, loads on demand, switches off again")
 
+        def lloyd() -> None:
+            # optional Lloyd's mirror depth: off by default, switched on from the compare tab
+            page.evaluate("() => document.querySelector(\".tab[data-tab='tab-compare']\").click()")
+            start = page.evaluate("""() => ({ checked: document.getElementById('lloyd-enabled').checked,
+                summary: document.getElementById('lloyd-summary').textContent,
+                cfg: window.aquaDrift.state.latestSnapshot.config.lloyd.enabled })""")
+            if start["checked"] or start["cfg"]:
+                fail(f"Lloyd's mirror should be off by default: {start}")
+            page.evaluate("() => document.getElementById('lloyd-enabled').click()")
+            try:
+                page.wait_for_function(
+                    """() => { const l = window.aquaDrift.state.latestSnapshot.lloyd;
+                        return l && l.enabled && l.status === 'OK'; }""", timeout=360_000, polling=2000)
+            except Exception:  # noqa: BLE001 - reported below
+                pass
+            info = page.evaluate("""() => { const s = window.aquaDrift.state.latestSnapshot;
+                return { lloyd: s.lloyd, truth: s.target && s.target.position.depth_ft,
+                         summary: document.getElementById('lloyd-summary').textContent,
+                         rows: document.querySelectorAll('#lloyd-table tbody tr').length,
+                         online: (s.estimates.find(e => e.mode === 'ONLINE') || {}) }; }""")
+            lloyd_result = info["lloyd"] or {}
+            note(f"Lloyd's mirror: {info['summary']} | observers {[(o['observer_id'], o['status'], o['fringes']) for o in lloyd_result.get('observers', [])]}")
+            if lloyd_result.get("status") != "OK":
+                fail(f"Lloyd's mirror depth not obtained within 6 min: {lloyd_result.get('status')} {info['summary']}")
+            else:
+                error = lloyd_result["depth_ft"] - info["truth"]
+                online = info["online"]
+                online_err = (online.get("depth_ft") or 0) - info["truth"] if online.get("depth_ft") is not None else None
+                note(f"Lloyd's mirror depth error {error:+.0f} ft (sigma {lloyd_result['sigma_ft']:.0f}), fit "
+                     f"{lloyd_result['fit_ms']:.0f} ms, PF depth error {online_err if online_err is None else round(online_err)} ft")
+                if abs(error) > 100:
+                    fail(f"Lloyd's mirror depth error {error:.0f} ft")
+                if info["rows"] < 1:
+                    fail("Lloyd table empty")
+            page.screenshot(path=str(out / "07-lloyd.png"))
+            page.evaluate("() => document.getElementById('lloyd-enabled').click()")
+            try:
+                page.wait_for_function(
+                    "() => { const l = window.aquaDrift.state.latestSnapshot.lloyd; return l && !l.enabled; }",
+                    timeout=60_000)
+                note("Lloyd's mirror switched off again: " + page.inner_text("#lloyd-summary"))
+            except Exception:  # noqa: BLE001
+                fail("Lloyd's mirror did not switch off")
+
         def forward_deployment() -> None:
             snap = page.evaluate("() => window.aquaDrift.state.latestSnapshot")
             ids = sorted(r["state"]["observer_id"] for r in snap["observers"])
@@ -422,6 +466,7 @@ def main() -> int:
         stage("follow", follow)
         stage("telemetry following", lambda: telemetry("following"))
         stage("forward deployment", forward_deployment)
+        stage("lloyd mirror", lloyd)
         stage("final screenshots", final_screens)
         browser.close()
 

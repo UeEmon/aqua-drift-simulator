@@ -92,6 +92,28 @@ class BearingConfig(BaseModel):
     random_seed: int = 11
 
 
+class LloydMirrorConfig(BaseModel):
+    """Surface-reflection (Lloyd's mirror) interference on the received level of the tonal.
+
+    Optional because the depth fit is computationally heavy: only when `enabled` does the
+    acoustic container simulate the received level and does the estimator fit the target depth
+    to the interference pattern. Truth-side parameters (the estimator does not see them):
+
+    * level_noise_db / noise_correlation_s : level fluctuation (AR(1), dB, seconds)
+    * wave_height_rms_m : sea surface roughness -> coherent reflection exp(-2 (k s sin g)^2)
+    * path_difference_error_pct : sound-speed structure not represented by the isovelocity
+      image-source model (scales the true path difference; 0 = isovelocity water)
+    """
+
+    enabled: bool = False
+    level_noise_db: float = Field(default=2.0, ge=0, le=20)
+    noise_correlation_s: float = Field(default=20.0, ge=0, le=600)
+    wave_height_rms_m: float = Field(default=0.3, ge=0, le=5)
+    path_difference_error_pct: float = Field(default=0.0, ge=-50, le=50)
+    source_level_db: float = 140.0
+    random_seed: int = 23
+
+
 class ForwardDeploymentConfig(BaseModel):
     """Automatic deployment of observers ahead (前程) of the ESTIMATED target position.
 
@@ -159,6 +181,13 @@ class EstimatorConfig(BaseModel):
     move_epochs: int = Field(default=60, ge=5, le=600)
     move_starts: int = Field(default=8, ge=2, le=50)
     random_seed: int = 7
+    # Lloyd's mirror depth fit (runs only while ScenarioConfig.lloyd.enabled)
+    lloyd_fit_interval_s: int = Field(default=10, ge=1, le=600)
+    lloyd_window_s: int = Field(default=600, ge=60, le=3600)
+    lloyd_min_samples: int = Field(default=120, ge=20, le=3600)
+    lloyd_depth_step_ft: float = Field(default=2.0, ge=0.5, le=50)
+    lloyd_model_error_pct: float = Field(default=3.0, ge=0, le=50)  # assumed sound-speed model error
+    lloyd_noise_correlation_s: float = Field(default=20.0, ge=0, le=600)  # assumed
 
 
 class ScenarioConfig(BaseModel):
@@ -176,6 +205,7 @@ class ScenarioConfig(BaseModel):
     forward: ForwardDeploymentConfig = ForwardDeploymentConfig()
     deployment: ObserverDeploymentConfig = ObserverDeploymentConfig()
     estimator: EstimatorConfig = EstimatorConfig()
+    lloyd: LloydMirrorConfig = LloydMirrorConfig()
 
 
 class EstimatorSettings(BaseModel):
@@ -186,6 +216,7 @@ class EstimatorSettings(BaseModel):
     presence_probability_pct: float
     sound_speed_mps: float
     estimator: EstimatorConfig
+    lloyd_enabled: bool = False  # the on/off switch only; truth-side Lloyd parameters stay hidden
 
     @classmethod
     def from_config(cls, config: ScenarioConfig) -> EstimatorSettings:
@@ -195,6 +226,7 @@ class EstimatorSettings(BaseModel):
             presence_probability_pct=config.presence_probability_pct,
             sound_speed_mps=config.source.sound_speed_mps,
             estimator=config.estimator,
+            lloyd_enabled=config.lloyd.enabled,
         )
 
 
@@ -265,6 +297,9 @@ class DopplerObservation(BaseModel):
     observed_frequency_hz: float | None = None
     recognized_frequency_hz: float  # observer's belief of the source frequency (biased)
     bearing_deg: float | None = None  # horizontal true bearing with error (every interval_s)
+    # received level of the tonal [dB] (direct + surface-reflected path), only while detected
+    # and only when the optional Lloyd's mirror calculation is enabled
+    received_level_db: float | None = None
 
 
 class DopplerTruth(BaseModel):
@@ -456,11 +491,38 @@ class TrackEstimate(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class LloydObserverFit(BaseModel):
+    """Depth fitted to one observer's received-level interference pattern."""
+
+    observer_id: str
+    status: str  # OK | AMBIGUOUS | NO_FRINGES | NO_PATTERN | FEW_SAMPLES
+    samples: int
+    fringes: float  # change of the path difference over the window, in wavelengths
+    depth_ft: float | None = None
+    sigma_ft: float | None = None
+    reflection: float | None = None  # fitted coherent surface reflection magnitude
+
+
+class LloydDepthEstimate(BaseModel):
+    """Target depth from the Lloyd's mirror (direct + surface-reflected path) interference."""
+
+    enabled: bool
+    tick: int
+    status: str  # OFF | WAITING | OK | NO_RESULT
+    depth_ft: float | None = None
+    sigma_ft: float | None = None
+    used_observers: int = 0
+    observers: list[LloydObserverFit] = Field(default_factory=list)
+    fit_ms: float = 0.0
+    applied: bool = False  # fed to the particle filter as a depth measurement
+
+
 class EstimatorOutput(BaseModel):
     tick: int
     estimates: list[TrackEstimate]
     cpa: list[CpaResult]
     current: CurrentEstimate | None = None
+    lloyd: LloydDepthEstimate | None = None
 
 
 class ObserverRecord(BaseModel):
@@ -493,3 +555,4 @@ class Snapshot(BaseModel):
     cpa: list[CpaResult]
     current_estimate: CurrentEstimate | None
     archived_observer_ids: list[str]
+    lloyd: LloydDepthEstimate | None = None

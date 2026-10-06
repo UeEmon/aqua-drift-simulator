@@ -21,6 +21,7 @@ def build_stream(seconds: int = 600, window_s: int = 120) -> dict:
     config.estimator.particle_count = 1500
     config.smoothing_window_seconds = window_s  # small window -> frequent tail rewrites
     config.estimator.track_store_slots = 60
+    config.lloyd.enabled = True  # exercises the optional Lloyd's mirror field of the stream
     run = ScenarioRun(config, 4)
     encoder = WireEncoder(region_interval_s=3.0)
     messages, checkpoints, full_sizes = [], [], []
@@ -38,6 +39,7 @@ def build_stream(seconds: int = 600, window_s: int = 120) -> dict:
             cpa=output.cpa,
             current_estimate=output.current,
             archived_observer_ids=[],
+            lloyd=output.lloyd,
         )
         message = encoder.encode(snapshot, float(run.tick))
         messages.append(json.dumps(message, separators=(",", ":")))
