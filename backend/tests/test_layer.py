@@ -210,13 +210,39 @@ def _timed_drop_error(seed: int) -> tuple[int | None, bool]:
 
 
 def test_layer_drops_within_seconds_of_the_planned_time() -> None:
-    """Random drops as the planner schedules them: the layer is on time (docs/handoff.md
-    reported +-24 s and up to +52 s; the coarse flight-time simulation, the speed fixed at
-    departure and the departure rule were the causes)."""
+    """Random drops as the planner schedules them: the layer is on time, adjusting the time
+    with the flight path (docs/handoff.md reported +-24 s and up to +52 s; the coarse
+    flight-time simulation, no correction on the way and the departure rule were the causes)."""
     errors = [e for e, feasible in map(_timed_drop_error, range(60)) if feasible]
     assert len(errors) >= 50 and None not in errors
-    assert sum(abs(e) <= 5 for e in errors) >= 0.9 * len(errors)
-    assert max(abs(e) for e in errors) <= 60
+    assert sum(abs(e) <= 5 for e in errors) >= 0.95 * len(errors)
+    assert max(abs(e) for e in errors) <= 30
+
+
+def test_timed_leg_takes_up_time_with_a_left_detour_at_constant_speed() -> None:
+    """Time is adjusted with the flight path: an early layer makes a detour turning left (4.15)
+    and keeps its speed."""
+    from aqua_drift.layer import _arrival_s
+    from aqua_drift.models import DropTask, LayerFeed
+
+    config = LayerConfig()
+    rng = random.Random(2)
+    state = initial_state(config, DATUM, 0, rng).model_copy(
+        update={"speed_kt": 190.0, "heading_deg": 0.0, "mode": "TRANSIT", "task_id": 1})
+    point = _offset(state.position, 0.0, 12000.0, 500.0)
+    planned = round(_arrival_s(state, config, point)) + 90  # 90 s early on the direct path
+    task = DropTask(task_id=1, created_tick=0, source="forward", position=point, status="APPROVED",
+                    planned_tick=planned)
+    banks, speeds = [], []
+    for tick in range(1, planned + 300):
+        state, update = advance(LayerFeed(tick=tick, config=config, tasks=[task], datum=DATUM), state, rng)
+        banks.append(state.bank_deg)
+        speeds.append(state.speed_kt)
+        if 1 in update.completed:
+            break
+    assert abs(tick - planned) <= 5
+    assert set(speeds) == {190.0}
+    assert sum(b < -10.0 for b in banks) > 20  # the detour is a left turn
 
 
 def test_timed_leg_adjusts_the_speed_on_the_way() -> None:
