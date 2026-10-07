@@ -102,16 +102,24 @@ def main() -> int:
             # the control panel so there is something to draw. The initial camera looks down on
             # the whole globe, so the centre is the globe and the corner is the background
             page.check("#show-sea")
-            page.wait_for_function(
-                """() => { const s = window.aquaDrift.viewer.scene; s.requestRender();
-                  return s.globe.show && s.globe.tilesLoaded; }""",
-                timeout=60_000,
-                polling=500,
-            )
-            frame = page.evaluate(FRAME_JS)
+            # tile loading takes a few frames and `tilesLoaded` can already be true before the
+            # first tile is requested: keep drawing frames until the globe appears (or time out)
+            frame = None
+            for _ in range(60):
+                frame = page.evaluate(FRAME_JS)
+                if frame["center"] != frame["corner"]:
+                    break
+                page.wait_for_timeout(500)
             print(f"pixels: {frame}", flush=True)
             if frame["center"] == frame["corner"]:
-                failures.append(f"canvas looks blank: centre {frame['center']} == corner {frame['corner']}")
+                globe = page.evaluate(
+                    """() => { const v = window.aquaDrift.viewer; const s = v.scene;
+                      return { show: s.globe.show, tilesLoaded: s.globe.tilesLoaded,
+                               cameraHeight: v.camera.positionCartographic.height }; }"""
+                )
+                failures.append(
+                    f"canvas looks blank: centre {frame['center']} == corner {frame['corner']}, globe {globe}"
+                )
             if sum(frame["center"][:3]) == 0:
                 failures.append(f"globe not drawn: centre pixel {frame['center']}")
             page.wait_for_timeout(1000)
