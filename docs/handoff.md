@@ -56,7 +56,9 @@ node --check web/app.js
 * **リポジトリの非公開化**：プロキシが設定変更を拒否したため未実施。ユーザーに手順
   （GitHub の Settings → General → Danger Zone → Change visibility）を案内済み。迂回しないこと。
 * `ruff check e2e` には既存の指摘が残っている（CI の対象は `backend` のみ）。
-* 設標者の計画時刻との差：社内試算で ±24 秒程度（左旋回基準の導入後、16 回中 1 回 +52 秒）。
+* 設標者の計画時刻との差：時間は飛行経路（左旋回の遠回り）で合わせ、速力は経路で合わないときだけ
+  変える方式にした。間に合う計画の 99%（177/179）が ±5 秒以内、最大 12 秒。速力を変えるのは
+  投下点が旋回円の内側に入るなどの 34% の区間（主に減速、中央値約 30 kt）。
 * UI のスモークテスト：`e2e/ui_smoke.py`（CI の `ui-smoke` ジョブ）。バックエンドなしで web/ を配信し、
   ヘッドレス Chromium で Cesium の 3D 画面が起動して地球を描画することを確かめる（事前に `web/` で `npm ci`）。
 * フィクスチャ生成：`backend/aqua_drift/analysis/wire_fixture.py`。
