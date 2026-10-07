@@ -418,7 +418,17 @@ def main() -> int:
             note(f"forward deployment: initial observers {ids}")
             if ids[:4] != ["obs-01", "obs-02", "obs-03", "obs-04"]:
                 fail(f"initial observers should be obs-01..obs-04, got {ids}")
-            page.evaluate("() => document.querySelector(\".tab[data-tab='tab-display']\").click()")
+            # the layer (設標者) has its own control tab; left turn is the standard
+            page.evaluate("() => document.querySelector(\".tab[data-tab='tab-layer']\").click()")
+            if page.evaluate("() => document.getElementById('layer-turn').value") != "left":
+                fail("layer standard turn should be left")
+            try:
+                page.wait_for_function(
+                    "() => document.querySelector('#layer-detail tbody').innerText.includes('基準旋回')", timeout=15_000)
+                note("layer tab: " + page.inner_text("#layer-status") + " / "
+                     + page.inner_text("#layer-detail tbody").replace("\n", " "))
+            except Exception:  # noqa: BLE001
+                fail("layer tab does not show the layer state")
             # the layer (設標者) circles the estimated target while idle
             layer0 = page.evaluate("() => window.aquaDrift.state.latestSnapshot.deployment.layer")
             if not layer0:
@@ -468,8 +478,11 @@ def main() -> int:
                 # a drop planned far enough ahead must be laid at the planned time
                 if planned is not None and approved is not None and planned - approved >= 120 and abs(laid - planned) > 60:
                     fail(f"drop {task_id} laid at {laid}, planned {planned}")
+            page.screenshot(path=str(out / "07a-layer-tab.png"))
             page.evaluate("""() => { const el = document.getElementById('drop-approval');
                 el.value = 'auto'; el.dispatchEvent(new Event('change')); }""")
+            page.evaluate("() => document.querySelector(\".tab[data-tab='tab-display']\").click()")
+            page.wait_for_timeout(1500)
             snap = page.evaluate("() => window.aquaDrift.state.latestSnapshot")
             ids = sorted(r["state"]["observer_id"] for r in snap["observers"])
             note(f"forward deployment: containers started on demand, observers now {ids}")

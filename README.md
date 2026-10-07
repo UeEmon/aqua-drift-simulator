@@ -59,12 +59,17 @@ the next 30 min, taking the detection range into account (see docs/optimal-deplo
 表示・観測者 tab shows each plan (count, depths, predicted error) and has a "deploy now" button.
 Additional observers are laid by the **layer (設標者)**: the planned drop points are proposed to the
 operator (approval **automatic** by default, or **manual** with 了承/却下 in the status strip and the
-表示・観測者 tab); the layer then flies there over the sea surface at 200±50 kt with bank ≤ 15°
+設標者 tab); the layer then flies there over the sea surface at 200±50 kt with bank ≤ 15°
 (drop points drift with the estimated current) and the observer is in the water when it arrives.
 Without a task the layer circles the estimated target position. Each drop has an **optimal drop
 time** (just before the predicted target comes within detection range, and not before the layer
 can be there); the layer leaves when it must, picks its speed to arrive on time, holds over the
-point if early and lays the observer at the planned time.
+point if early and lays the observer at the planned time. The layer turns **left** as the standard
+(orbit and holds counter-clockwise) and takes a right turn only when that route is clearly shorter
+(by the configurable margin, 10 s by default). The **設標者 tab** controls it: live state (mode,
+speed, heading, bank and turn direction, current / next drop), pause, approval mode, standard turn
+side, speed / bank / orbit settings, and the drop list (approve / reject, drop now, set a drop
+time, cancel) plus manual placement.
 
 The background map (Natural Earth II) is **off by default** to prioritise rendering; switch it
 on with 「背景地図」 in the view toolbar when needed.

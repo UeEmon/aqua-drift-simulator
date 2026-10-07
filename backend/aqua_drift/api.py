@@ -15,6 +15,7 @@ from aqua_drift.models import (
     DeploymentRequest,
     DopplerBatch,
     DropDecision,
+    DropReschedule,
     DropTask,
     EstimationControl,
     EstimatorFeed,
@@ -212,6 +213,24 @@ async def reject_drops(decision: DropDecision) -> list[DropTask]:
     tasks = await state.decide_tasks(decision.task_ids, approve=False)
     await store.append_event("drop_decision", state.tick, {"reject": [t.task_id for t in tasks]})
     return tasks
+
+
+@app.post("/api/drops/cancel", response_model=list[DropTask])
+async def cancel_drops(decision: DropDecision) -> list[DropTask]:
+    """Operator cancels open drops (proposed or approved; null = all open)."""
+    tasks = await state.cancel_tasks(decision.task_ids)
+    await store.append_event("drop_decision", state.tick, {"cancel": [t.task_id for t in tasks]})
+    return tasks
+
+
+@app.post("/api/drops/reschedule", response_model=DropTask)
+async def reschedule_drop(request: DropReschedule) -> DropTask:
+    """Operator changes the drop time of an open drop (planned_tick null = as soon as possible)."""
+    task = await state.reschedule_task(request.task_id, request.planned_tick)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"no open drop task {request.task_id}")
+    await store.append_event("drop_decision", state.tick, {"reschedule": request.model_dump()})
+    return task
 
 
 @app.get("/internal/layer-feed", response_model=LayerFeed)

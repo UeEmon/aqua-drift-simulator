@@ -297,6 +297,25 @@ class SimulationState:
                 changed.append(task)
             return changed
 
+    async def cancel_tasks(self, task_ids: list[int] | None) -> list[DropTask]:
+        """Operator cancels proposed or approved drops (None = all open drops)."""
+        async with self.lock:
+            changed = []
+            for task in self.tasks:
+                if task.status in self.OPEN_TASK_STATES and (task_ids is None or task.task_id in task_ids):
+                    task.status = "CANCELLED"
+                    changed.append(task)
+            return changed
+
+    async def reschedule_task(self, task_id: int, planned_tick: int | None) -> DropTask | None:
+        """Operator sets the drop time of an open drop (None = as soon as possible)."""
+        async with self.lock:
+            for task in self.tasks:
+                if task.task_id == task_id and task.status in self.OPEN_TASK_STATES:
+                    task.planned_tick = planned_tick
+                    return task
+            return None
+
     async def layer_feed(self) -> LayerFeed:
         async with self.lock:
             self._expire_tasks()

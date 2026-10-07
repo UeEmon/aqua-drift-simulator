@@ -6,7 +6,9 @@
   inside the turning circle on the side it would turn to, it flies straight on first (otherwise
   it would circle the point forever) and comes back. The observer is laid when the layer is
   within capture_radius_yd of the point.
-* ORBIT: without a task it circles the estimated target position clockwise (vector-field
+* Turns: left turn is the standard (circling counter-clockwise); a right turn is taken only when
+  the route is clearly more efficient that way (shorter by more than turn_margin_s of flight).
+* ORBIT: without a task it circles the estimated target position (vector-field
   guidance onto a circle whose radius is at least 1.2 x the turn radius, so the bank limit
   holds on the circle).
 * Scheduling: every drop has a planned time (the optimal drop time from the planner). The
@@ -49,9 +51,10 @@ def _wrap(angle: float) -> float:
 def initial_state(config: LayerConfig, datum: Position, tick: int, rng: random.Random) -> LayerState:
     speed = leg_speed_kt(config, rng)
     radius = orbit_radius_m(config, speed)
-    start = _offset(datum, 0.0, radius, 0.0)  # north of the datum, heading east = clockwise orbit
+    start = _offset(datum, 0.0, radius, 0.0)  # north of the datum, tangent to the orbit
+    heading = 270.0 if preferred_side(config) < 0 else 90.0  # left turn: counter-clockwise
     return LayerState(
-        tick=tick, position=start, heading_deg=90.0, speed_kt=speed, mode="ORBIT",
+        tick=tick, position=start, heading_deg=heading, speed_kt=speed, mode="ORBIT",
         orbit_center=datum, orbit_radius_yd=radius / YD_TO_M,
     )
 
@@ -77,12 +80,15 @@ def speed_band(config: LayerConfig, count: int = 5) -> list[float]:
     return [low + (high - low) * k / (count - 1) for k in range(count)] if high > low else [low]
 
 
-def dubins_turn(east: float, north: float, heading: float, radius: float) -> tuple[int, float, float]:
-    """Quickest turn-then-straight path (Dubins CS) to a point at (east, north) metres from the
-    craft heading `heading` (rad, clockwise from north) with turn radius `radius`.
+def dubins_turn(east: float, north: float, heading: float, radius: float,
+                prefer: int = -1, margin_m: float = 0.0) -> tuple[int, float, float]:
+    """Turn-then-straight path (Dubins CS) to a point at (east, north) metres from the craft
+    heading `heading` (rad, clockwise from north) with turn radius `radius`.
+
+    The preferred side (default -1 = left turn) is taken unless the other side is shorter by
+    more than margin_m (the route is clearly more efficient that way).
     Returns (side: +1 right / -1 left / 0 none possible, turn angle rad, straight length m)."""
-    best = (0, 0.0, 0.0)
-    best_length = math.inf
+    paths: dict[int, tuple[float, float, float]] = {}
     for side in (1, -1):
         # turning-circle centre: right = (cos h, -sin h), left = opposite
         cx, cy = side * radius * math.cos(heading), -side * radius * math.sin(heading)
@@ -98,10 +104,20 @@ def dubins_turn(east: float, north: float, heading: float, radius: float) -> tup
             arc = (phi_p - tangent - theta0) % (2 * math.pi)
         else:  # counter-clockwise
             arc = (theta0 - (phi_p + tangent)) % (2 * math.pi)
-        length = arc * radius + straight
-        if length < best_length:
-            best_length, best = length, (side, arc, straight)
-    return best
+        paths[side] = (arc * radius + straight, arc, straight)
+    if not paths:
+        return 0, 0.0, 0.0
+    other = -prefer
+    if prefer in paths and (other not in paths or paths[other][0] >= paths[prefer][0] - margin_m):
+        side = prefer
+    else:
+        side = other if other in paths else prefer
+    return side, paths[side][1], paths[side][2]
+
+
+def preferred_side(config: LayerConfig) -> int:
+    """-1: left turn (the standard), +1: right turn."""
+    return 1 if config.preferred_turn == "right" else -1
 
 
 def flight_time_s(state: LayerState, config: LayerConfig, point: Position, speed_kt: float,
@@ -160,7 +176,9 @@ def step(
             turn = 0.0
             eta = 0.0
         else:
-            side, arc, straight = dubins_turn(east, north, heading, radius_turn)
+            side, arc, straight = dubins_turn(
+                east, north, heading, radius_turn, preferred_side(config), config.turn_margin_s * v
+            )
             if side == 0:
                 turn = 0.0  # inside both turning circles: fly on first
                 eta = distance / v + math.pi / omega_max
@@ -172,7 +190,9 @@ def step(
         east, north, _ = local_offset_m(center, position)
         distance = math.hypot(east, north)
         bearing = math.atan2(east, north)
-        desired = bearing + math.pi / 2.0 + math.atan(2.0 * (distance - orbit_radius) / orbit_radius)
+        # circling in the preferred direction (left turn = counter-clockwise by default)
+        sense = float(preferred_side(config))  # -1 counter-clockwise, +1 clockwise
+        desired = bearing + sense * (math.pi / 2.0 + math.atan(2.0 * (distance - orbit_radius) / orbit_radius))
         error = _wrap(desired - heading)
         turn = max(-omega_max * dt, min(omega_max * dt, error))
 
@@ -241,7 +261,7 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
         tick += 1
         positions = {k: drift(p, feed.current_east_kt, feed.current_north_kt) for k, p in positions.items()}
         open_tasks = [t for t in tasks if t.task_id not in completed]
-        task = open_tasks[0] if open_tasks else None
+        task = open_tasks[0] if open_tasks and not feed.config.paused else None
         target = hold = wanted = None
         task_id = None
         if task is not None:

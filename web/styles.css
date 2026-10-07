@@ -288,3 +288,8 @@ button.mini { padding: 2px 8px; margin-left: 4px; font-size: 12px; }
 button.mini.ghost, #drop-table button.ghost { background: transparent; border: 1px solid #5d7894; color: #c7dbef; }
 label.inline { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; font-size: 13px; }
 #drop-table button { padding: 2px 6px; font-size: 12px; margin-right: 4px; }
+
+.button-row { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+table.kv td:first-child { color: #9cc0e2; }
+#layer-form { margin-top: 8px; }
+#drop-table input.time { width: 70px; padding: 2px 4px; font-size: 12px; }

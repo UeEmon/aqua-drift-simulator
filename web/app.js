@@ -665,14 +665,36 @@ function updateLayer(deployment) {
   $("drop-alert").hidden = proposed.length === 0;
   setText("drop-alert-count", proposed.length);
   if (!state.dropApprovalPending && $("drop-approval").value !== (status.approval || "auto")) $("drop-approval").value = status.approval || "auto";
-  if (!tabVisible("tab-display")) return;
-  const enabled = state.latestConfig?.layer?.enabled !== false;
+  if (!tabVisible("tab-layer")) return;
+  const lay = state.latestConfig?.layer || {};
+  const enabled = lay.enabled !== false;
+  const paused = Boolean(lay.paused);
+  const turnName = (bank) => (Math.abs(bank) < 0.5 ? "直進" : bank < 0 ? "左旋回" : "右旋回");
   $("layer-status").textContent = !enabled ? "設標者なし（追加の観測者は即時に投入）"
-    : layer ? `設標者 ${fmt(layer.speed_kt, 0)} kt・バンク ${fmt(Math.abs(layer.bank_deg), 1)}°・${layer.mode === "TRANSIT" ? `設標 #${layer.task_id} へ移動中（到着 ${fmt(layer.eta_s, 0)} s）` : layer.mode === "HOLD" ? `設標 #${layer.task_id} の地点で計画時刻まで旋回` : "目標推定位置の周囲を旋回待機"}　了承待ち ${proposed.length}・設標待ち ${open.length - proposed.length}`
+    : layer ? `設標者 ${fmt(layer.speed_kt, 0)} kt・バンク ${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）・${layer.mode === "TRANSIT" ? `設標 #${layer.task_id} へ移動中（到着 ${fmt(layer.eta_s, 0)} s）` : layer.mode === "HOLD" ? `設標 #${layer.task_id} の地点で計画時刻まで旋回` : "目標推定位置の周囲を旋回待機"}${paused ? "【設標一時停止中】" : ""}　了承待ち ${proposed.length}・設標待ち ${open.length - proposed.length}`
       : "設標者の準備中";
+  const approved = open.filter((t) => t.status === "APPROVED").sort((a, b) => (a.planned_tick ?? -1) - (b.planned_tick ?? -1));
+  const next = approved[0];
+  const detail = layer && enabled ? [
+    ["状態", { ORBIT: "旋回待機", TRANSIT: "設標へ移動", HOLD: "設標点で時刻待ち" }[layer.mode] || layer.mode],
+    ["位置", `${fmt(layer.position.latitude, 4)}, ${fmt(layer.position.longitude, 4)}`],
+    ["速力・針路", `${fmt(layer.speed_kt, 0)} kt・${fmt(layer.heading_deg, 0)}°`],
+    ["バンク", `${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）`],
+    ["基準旋回", `${lay.preferred_turn === "right" ? "右" : "左"}旋回（反対旋回は ${fmt(lay.turn_margin_s ?? 10, 0)} 秒以上早い場合）`],
+    ["実施中", layer.task_id != null ? `#${layer.task_id}・到着 ${fmt(layer.eta_s, 0)} s` : "なし"],
+    ["次の設標", next ? `#${next.task_id}・${next.planned_tick != null ? `計画 ${next.planned_tick} s（あと ${Math.max(0, next.planned_tick - (layer.tick || 0))} s）` : "すぐ"}` : "なし"],
+    ["設標", paused ? "一時停止中" : "実施"],
+  ] : [];
+  setHtml($("layer-detail").querySelector("tbody") || $("layer-detail"),
+    detail.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("") || "<tr><td>--</td></tr>");
   const rows = tasks.slice().reverse().slice(0, 15).map((t) => {
     const actions = t.status === "PROPOSED"
-      ? `<button type="button" data-approve="${t.task_id}">了承</button><button type="button" class="ghost" data-reject="${t.task_id}">却下</button>` : "";
+      ? `<button type="button" data-approve="${t.task_id}">了承</button><button type="button" class="ghost" data-reject="${t.task_id}">却下</button>`
+      : t.status === "APPROVED"
+        ? `<button type="button" class="mini" data-now="${t.task_id}">今すぐ</button>`
+          + `<input class="time" type="number" min="0" step="10" placeholder="時刻 s" data-time-input="${t.task_id}" />`
+          + `<button type="button" class="mini" data-time="${t.task_id}">時刻</button>`
+          + `<button type="button" class="mini ghost" data-cancel="${t.task_id}">中止</button>` : "";
     const plan = t.planned_tick != null ? `計画 ${t.planned_tick} s` : "すぐ";
     const late = t.status === "DONE" && t.planned_tick != null ? `（${t.done_tick - t.planned_tick >= 0 ? "+" : ""}${t.done_tick - t.planned_tick} s）` : "";
     const when = t.status === "APPROVED" ? `${plan}・あと ${fmt(t.eta_s, 0)} s` : t.status === "DONE" ? `${t.done_tick} s 投入${late}` : plan;
@@ -680,7 +702,9 @@ function updateLayer(deployment) {
     return `<tr><td>${t.task_id}<br /><small>${src}</small></td><td>${TASK_STATUS[t.status] || t.status}</td>`
       + `<td>${Math.round(t.position.depth_ft)} Ft<br /><small>${when}</small></td><td>${actions}</td></tr>`;
   });
-  setHtml($("drop-table").querySelector("tbody"), rows.join("") || "<tr><td colspan='4'>設標計画なし</td></tr>");
+  // keep a drop time the operator is typing: do not rebuild the table under the cursor
+  const editing = document.activeElement?.closest?.("#drop-table") && document.activeElement.matches("input");
+  if (!editing) setHtml($("drop-table").querySelector("tbody"), rows.join("") || "<tr><td colspan='4'>設標計画なし</td></tr>");
 }
 
 async function decideDrops(taskIds, approve) {
@@ -695,13 +719,70 @@ async function decideDrops(taskIds, approve) {
   setMessage(`設標計画 ${changed.length} 件を${approve ? "了承しました（設標者が向かいます）" : "却下しました"}。`);
 }
 
+async function postDrops(path, body, done) {
+  const response = await fetch(`/api/drops/${path}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    setMessage(`設標計画の変更に失敗: ${await response.text()}`);
+    return;
+  }
+  setMessage(done(await response.json()));
+}
+
+const cancelDrops = (taskIds) => postDrops("cancel", { task_ids: taskIds }, (changed) => `設標計画 ${changed.length} 件を中止しました。`);
+const rescheduleDrop = (taskId, plannedTick) => postDrops("reschedule", { task_id: taskId, planned_tick: plannedTick },
+  (task) => (task.planned_tick == null ? `設標 #${task.task_id} はすぐに向かいます。` : `設標 #${task.task_id} の投入時刻を ${task.planned_tick} s にしました。`));
+
 $("drop-table").addEventListener("click", (event) => {
-  const approve = event.target.closest("[data-approve]");
-  const reject = event.target.closest("[data-reject]");
-  if (approve) decideDrops([Number(approve.dataset.approve)], true);
-  if (reject) decideDrops([Number(reject.dataset.reject)], false);
+  const target = (key) => event.target.closest(`[data-${key}]`);
+  const id = (el, key) => Number(el.dataset[key]);
+  let el;
+  if ((el = target("approve"))) decideDrops([id(el, "approve")], true);
+  if ((el = target("reject"))) decideDrops([id(el, "reject")], false);
+  if ((el = target("now"))) rescheduleDrop(id(el, "now"), null);
+  if ((el = target("cancel"))) cancelDrops([id(el, "cancel")]);
+  if ((el = target("time"))) {
+    const input = $("drop-table").querySelector(`[data-time-input="${el.dataset.time}"]`);
+    if (!input || input.value === "") { setMessage("投入時刻（シミュレーション時刻 s）を入力してください。"); return; }
+    rescheduleDrop(id(el, "time"), Math.round(Number(input.value)));
+    input.blur();
+  }
 });
 $("drop-approve-all").addEventListener("click", () => decideDrops(null, true));
+$("drop-approve-all-tab").addEventListener("click", () => decideDrops(null, true));
+$("drop-cancel-all").addEventListener("click", () => cancelDrops(null));
+$("layer-enabled").addEventListener("change", () => {
+  const on = checked("layer-enabled");
+  putConfig((next) => { next.layer.enabled = on; })
+    .then(() => setMessage(on ? "設標者が移動して観測者を投入します。" : "設標者なし：追加の観測者は即時に投入します。"))
+    .catch((error) => setMessage(`設定エラー: ${error.message}`));
+});
+$("layer-paused").addEventListener("change", () => {
+  const paused = checked("layer-paused");
+  putConfig((next) => { next.layer.paused = paused; })
+    .then(() => setMessage(paused ? "設標を一時停止しました（目標推定位置の周囲で旋回待機）。" : "設標を再開しました。"))
+    .catch((error) => setMessage(`設定エラー: ${error.message}`));
+});
+$("layer-turn").addEventListener("change", () => {
+  const turn = $("layer-turn").value;
+  putConfig((next) => { next.layer.preferred_turn = turn; })
+    .then(() => setMessage(`設標者の基準旋回を${turn === "right" ? "右" : "左"}旋回にしました。`))
+    .catch((error) => setMessage(`設定エラー: ${error.message}`));
+});
+$("layer-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  putConfig((next) => {
+    next.layer.speed_kt = num("layer-speed");
+    next.layer.speed_spread_kt = num("layer-spread");
+    next.layer.max_bank_deg = num("layer-bank");
+    next.layer.orbit_radius_yd = num("layer-orbit");
+    next.layer.turn_margin_s = num("layer-turn-margin");
+    next.layer.proposal_timeout_s = num("layer-timeout");
+  })
+    .then(() => setMessage("設標者の条件を反映しました。"))
+    .catch((error) => setMessage(`設定エラー: ${error.message}`));
+});
 $("drop-reject-all").addEventListener("click", () => decideDrops(null, false));
 $("drop-approval").addEventListener("change", () => {
   const mode = $("drop-approval").value;
@@ -1763,8 +1844,10 @@ function populateForms(config) {
   const lay = config.layer;
   if (lay) {
     $("layer-enabled").checked = lay.enabled;
+    $("layer-paused").checked = Boolean(lay.paused);
+    $("layer-turn").value = lay.preferred_turn || "left";
     const layValues = { "layer-speed": lay.speed_kt, "layer-spread": lay.speed_spread_kt, "layer-bank": lay.max_bank_deg,
-      "layer-orbit": lay.orbit_radius_yd, "layer-timeout": lay.proposal_timeout_s };
+      "layer-orbit": lay.orbit_radius_yd, "layer-turn-margin": lay.turn_margin_s ?? 10, "layer-timeout": lay.proposal_timeout_s };
     for (const [id, value] of Object.entries(layValues)) $(id).value = value;
   }
   const l = config.lloyd || {};
@@ -1859,12 +1942,6 @@ $("config-form").addEventListener("submit", (event) => {
     if (depths.length) next.forward.depth_options_ft = depths;
     next.forward.depth_weight = num("fwd-depth-weight");
     next.forward.min_relative_gain = num("fwd-min-gain") / 100;
-    next.layer.enabled = checked("layer-enabled");
-    next.layer.speed_kt = num("layer-speed");
-    next.layer.speed_spread_kt = num("layer-spread");
-    next.layer.max_bank_deg = num("layer-bank");
-    next.layer.orbit_radius_yd = num("layer-orbit");
-    next.layer.proposal_timeout_s = num("layer-timeout");
     next.lloyd.level_noise_db = num("lloyd-noise");
     next.lloyd.noise_correlation_s = num("lloyd-corr");
     next.lloyd.wave_height_rms_m = num("lloyd-wave");

@@ -129,6 +129,9 @@ class LayerConfig(BaseModel):
     orbit_radius_yd: float = Field(default=5000.0, gt=0)  # raised to the turn radius if smaller
     capture_radius_yd: float = Field(default=150.0, gt=0)
     proposal_timeout_s: int = Field(default=600, ge=10, le=7200)  # unanswered proposals expire
+    preferred_turn: str = Field(default="left", pattern="^(left|right)$")  # standard turn direction
+    turn_margin_s: float = Field(default=10.0, ge=0, le=600)  # other side only if this much quicker
+    paused: bool = False  # operator hold: the layer circles the target and does not leave
     random_seed: int = 31
 
 
@@ -436,6 +439,11 @@ class DropTask(BaseModel):
 
 class DropDecision(BaseModel):
     task_ids: list[int] | None = None  # None = every proposed drop
+
+
+class DropReschedule(BaseModel):
+    task_id: int
+    planned_tick: int | None = None  # None = as soon as possible
 
 
 class LayerState(BaseModel):

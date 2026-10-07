@@ -78,6 +78,28 @@ def test_observer_placement_queue() -> None:
         assert client.put("/api/config", json=config).status_code == 200
 
 
+def test_drop_reschedule_and_cancel_endpoints() -> None:
+    with TestClient(app) as client:
+        config = client.get("/api/config").json()
+        assert config["layer"]["preferred_turn"] == "left" and config["layer"]["paused"] is False
+        placement = {"position": {"latitude": 35.2, "longitude": 140.2, "depth_ft": 200.0}, "planned_tick": 99999}
+        assert client.post("/api/observers/placements", json=placement).status_code == 200
+        task = client.get("/api/snapshot").json()["deployment"]["tasks"][-1]
+        assert task["planned_tick"] == 99999
+        moved = client.post("/api/drops/reschedule", json={"task_id": task["task_id"], "planned_tick": None})
+        assert moved.status_code == 200 and moved.json()["planned_tick"] is None
+        assert client.post("/api/drops/reschedule", json={"task_id": 123456, "planned_tick": 5}).status_code == 404
+        cancelled = client.post("/api/drops/cancel", json={"task_ids": [task["task_id"]]}).json()
+        assert [t["status"] for t in cancelled] == ["CANCELLED"]
+        config["layer"]["preferred_turn"] = "right"
+        config["layer"]["paused"] = True
+        saved = client.put("/api/config", json=config).json()
+        assert saved["layer"]["preferred_turn"] == "right" and saved["layer"]["paused"] is True
+        config["layer"]["preferred_turn"] = "left"
+        config["layer"]["paused"] = False
+        assert client.put("/api/config", json=config).status_code == 200
+
+
 def test_estimation_control_endpoints() -> None:
     with TestClient(app) as client:
         stopped = client.post("/api/estimation/stop").json()

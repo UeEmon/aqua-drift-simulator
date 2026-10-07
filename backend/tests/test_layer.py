@@ -213,3 +213,61 @@ def test_planner_schedules_drops_before_detection_and_after_the_layer_can_be_the
     asap = ForwardDeploymentConfig(schedule_drops=False)
     _, _, early = plan_forward_deployment_scheduled(100, estimate, behind, [], asap, 6000, None, layer=layer)
     assert min(early) <= min(planned)
+
+
+def test_left_turn_is_the_standard_and_right_only_when_clearly_shorter() -> None:
+    from aqua_drift.layer import dubins_turn
+
+    r = 4000.0
+    # point dead astern: both sides equal -> left (standard)
+    assert dubins_turn(0.0, -20000.0, 0.0, r)[0] == -1
+    # point slightly to the right: right is shorter, but by less than the margin -> still left
+    side_small, _, _ = dubins_turn(300.0, -20000.0, 0.0, r, margin_m=10 * 200 * 0.5144)
+    assert side_small == -1
+    # point well to the right and ahead: right turn is far shorter -> right
+    assert dubins_turn(9000.0, 3000.0, 0.0, r, margin_m=10 * 200 * 0.5144)[0] == 1
+    # a right-turn standard mirrors it
+    assert dubins_turn(0.0, -20000.0, 0.0, r, prefer=1)[0] == 1
+    assert dubins_turn(-9000.0, 3000.0, 0.0, r, prefer=1, margin_m=1000.0)[0] == -1
+
+
+def test_orbit_is_flown_counter_clockwise_with_left_bank_by_default() -> None:
+    rng = random.Random(8)
+    for turn, sign in (("left", -1), ("right", 1)):
+        config = LayerConfig(preferred_turn=turn)
+        state = initial_state(config, DATUM, 0, rng)
+        banks = []
+        for _ in range(900):
+            state, _ = step(state, config, None, None, DATUM, rng)
+            banks.append(state.bank_deg)
+        settled = banks[-300:]
+        assert all(sign * b > 0 for b in settled), turn  # steady turn in the preferred sense
+        assert max(abs(b) for b in banks) <= 15.0 + 1e-6
+
+
+@pytest.mark.asyncio
+async def test_paused_layer_keeps_orbiting_and_operator_can_cancel_or_reschedule() -> None:
+    config = ScenarioConfig()
+    config.layer.paused = True
+    sim = SimulationState(config)
+    a = _offset(DATUM, 5000.0, 0.0, 500.0)
+    b = _offset(DATUM, 6000.0, 2000.0, 60.0)
+    await sim.queue_deployment(DeploymentRequest(tick=0, positions=[a, b], reason="plan", planned_ticks=[300, 400]))
+    rng = random.Random(3)
+    state = await _layer_steps(sim, 120, rng)
+    status = (await sim.snapshot()).deployment
+    assert state.mode == "ORBIT" and status.layer.task_id is None  # paused: no departure
+    first, second = status.tasks[-2], status.tasks[-1]
+    moved = await sim.reschedule_task(first.task_id, None)
+    assert moved is not None and moved.planned_tick is None
+    assert await sim.reschedule_task(999, 10) is None
+    cancelled = await sim.cancel_tasks([second.task_id])
+    assert [t.status for t in cancelled] == ["CANCELLED"]
+    assert [t.task_id for t in (await sim.layer_feed()).tasks] == [first.task_id]
+    # resume: the layer leaves for the remaining drop at once
+    resumed = config.model_copy(deep=True)
+    resumed.layer.paused = False
+    await sim.set_config(resumed)
+    state = await _layer_steps(sim, 10, rng, state)
+    assert state.mode == "TRANSIT" and state.task_id == first.task_id
+    assert [t.status for t in await sim.cancel_tasks(None)] == ["CANCELLED"]
