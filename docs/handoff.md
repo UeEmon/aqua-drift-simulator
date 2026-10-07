@@ -57,8 +57,8 @@ node --check web/app.js
   （GitHub の Settings → General → Danger Zone → Change visibility）を案内済み。迂回しないこと。
 * `ruff check e2e` には既存の指摘が残っている（CI の対象は `backend` のみ）。
 * 設標者の計画時刻との差：社内試算で ±24 秒程度（左旋回基準の導入後、16 回中 1 回 +52 秒）。
-* UI のスモークテスト（Cesium をモックした Node スクリプト）はリポジトリに入っていない。
-  必要なら `e2e/` に移すか、E2E で確認する。
+* UI のスモークテスト：`e2e/ui_smoke.py`（CI の `ui-smoke` ジョブ）。バックエンドなしで web/ を配信し、
+  ヘッドレス Chromium で Cesium の 3D 画面が起動して地球を描画することを確かめる（事前に `web/` で `npm ci`）。
 * フィクスチャ生成：`backend/aqua_drift/analysis/wire_fixture.py`。
 
 ## 6. 新しいセッションの最初の手順
