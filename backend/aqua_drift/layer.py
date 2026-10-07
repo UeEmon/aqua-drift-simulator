@@ -12,8 +12,10 @@
   guidance onto a circle whose radius is at least 1.2 x the turn radius, so the bank limit
   holds on the circle).
 * Scheduling: every drop has a planned time (the optimal drop time from the planner). The
-  layer leaves the orbit when it must to arrive on time, circles the drop point (HOLD) if it is
-  early and lays the observer at the planned time.
+  layer leaves the orbit when the planned time is in the middle of what the speed band can fly
+  in directly (flight times along the same turn-then-straight path the guidance flies), adjusts
+  its speed on the way to arrive on time and circles the drop point (HOLD) when even the
+  slowest speed would be early.
 """
 from __future__ import annotations
 
@@ -158,6 +160,11 @@ def step(
             speed = min(max(wanted_speed_kt, low), config.speed_kt + config.speed_spread_kt)
         else:
             speed = leg_speed_kt(config, rng)  # a new leg: new speed within +- spread
+    elif wanted_speed_kt is not None and mode == "TRANSIT":
+        # timed leg: the speed is adjusted on the way (rate-limited) to arrive at the planned time
+        low = max(config.speed_kt - config.speed_spread_kt, 1.0)
+        wanted = min(max(wanted_speed_kt, low), config.speed_kt + config.speed_spread_kt)
+        speed += max(-SPEED_RATE_KT_S * dt, min(SPEED_RATE_KT_S * dt, wanted - speed))
     v = speed * KNOT_TO_MPS
     omega_max = G * math.tan(math.radians(config.max_bank_deg)) / v
     radius_turn = v / omega_max
@@ -166,7 +173,17 @@ def step(
     arrived = False
     eta = None
     center = hold_center if mode == "HOLD" else datum
-    orbit_radius = HOLD_RADIUS_TURNS * radius_turn if mode == "HOLD" else orbit_radius_m(config, speed)
+    if mode == "HOLD":
+        # circle the drop point at the distance the layer is at when it starts holding (time is
+        # spent without going further away), at least HOLD_RADIUS_TURNS turn radii so that the
+        # turn in is a quarter turn
+        if state.mode == "HOLD" and state.task_id == task_id and state.orbit_radius_yd > 0:
+            orbit_radius = state.orbit_radius_yd * YD_TO_M
+        else:
+            east, north, _ = local_offset_m(hold_center, position)
+            orbit_radius = max(HOLD_RADIUS_TURNS * radius_turn, math.hypot(east, north))
+    else:
+        orbit_radius = orbit_radius_m(config, speed)
 
     if mode == "TRANSIT":
         east, north, _ = local_offset_m(position, target)
@@ -227,9 +244,10 @@ def drift(position: Position, east_kt: float, north_kt: float, dt: float = 1.0) 
     return _offset(position, east_kt * KNOT_TO_MPS * dt, north_kt * KNOT_TO_MPS * dt, position.depth_ft)
 
 
-DEPART_MARGIN_S = 10.0  # leave this much earlier than the flight time at the slowest speed
 ON_TIME_TOLERANCE_S = 15.0  # a drop up to this early counts as on time
-HOLD_RADIUS_TURNS = 2.5  # holding circle around an early drop point, in turn radii
+HOLD_RADIUS_TURNS = 2.5  # smallest holding circle around an early drop point, in turn radii
+SPEED_RATE_KT_S = 5.0  # speed change on a timed leg, kt per second
+LOOKAHEAD_S = 90  # how far ahead the layer checks that waiting on its circle keeps it on time
 
 
 def hold_inbound_s(speed_kt: float, config: LayerConfig) -> float:
@@ -245,14 +263,87 @@ def loop_s(speed_kt: float, config: LayerConfig) -> float:
     return 2.0 * math.pi * v / (G * math.tan(math.radians(config.max_bank_deg)))
 
 
+def path_time_s(state: LayerState, config: LayerConfig, point: Position, speed_kt: float,
+                direct_only: bool = False) -> float | None:
+    """Time to the drop point at speed_kt along the path the guidance flies (Dubins turn at the
+    bank limit, then straight, until within the capture radius). direct_only: None when that
+    path turns more than half a circle (the point is behind)."""
+    v = max(speed_kt, 1.0) * KNOT_TO_MPS
+    radius = v * v / (G * math.tan(math.radians(config.max_bank_deg)))
+    east, north, _ = local_offset_m(state.position, point)
+    side, arc, straight = dubins_turn(
+        east, north, math.radians(state.heading_deg), radius, preferred_side(config), config.turn_margin_s * v
+    )
+    if side == 0 or arc > math.pi:
+        if direct_only:
+            return None
+        if side == 0:  # inside both turning circles: flies on first
+            return flight_time_s(state, config, point, speed_kt, dt=1.0)
+    return max(arc * radius + straight - config.capture_radius_yd * YD_TO_M, 0.0) / v
+
+
+def timed_speed(state: LayerState, config: LayerConfig, point: Position, left: float) -> float:
+    """The speed of the band whose flight time is closest to the time left."""
+    times = {sp: path_time_s(state, config, point, sp) for sp in speed_band(config, 21)}
+    return min(times, key=lambda sp: (abs(times[sp] - left), abs(sp - state.speed_kt)))
+
+
+def direct_window(state: LayerState, config: LayerConfig, point: Position) -> tuple[float, float] | None:
+    """(quickest, slowest) flight time over the speeds of the band that fly in directly."""
+    times = [t for sp in speed_band(config, 9) if (t := path_time_s(state, config, point, sp, True)) is not None]
+    return (min(times), max(times)) if times else None
+
+
+def hold_miss_s(state: LayerState, config: LayerConfig, point: Position, left: float, datum: Position) -> float:
+    """How far from the planned time the drop would be if the layer held at the point first
+    (simulated: circle the point at the slowest speed, turn in once the planned time is in the
+    middle of the direct flight times)."""
+    probe = state
+    rng = random.Random(0)
+    slowest = speed_band(config)[0]
+    for tau in range(1, int(left) + 1):
+        probe, _ = step(probe, config, None, -1, datum, rng, hold_center=point, wanted_speed_kt=slowest)
+        window = direct_window(probe, config, point)
+        if window is not None and left - tau <= 0.5 * (window[0] + window[1]):
+            return max(window[0] - (left - tau), (left - tau) - window[1], 0.0)
+    return math.inf
+
+
+def departure(state: LayerState, config: LayerConfig, point: Position, left: float, datum: Position,
+              hold: Position | None) -> str:
+    """'leave' (fly in now), 'hold' (go and circle the drop point) or 'wait' (keep circling).
+
+    Leaves when the time left is in the middle of the direct flight times of the band (room for
+    the speed control both ways). Leaves earlier when waiting on the current circle (next
+    LOOKAHEAD_S s) would make even the quickest speed late, e.g. the point comes behind; if the
+    slowest speed is then early, holding at the point is taken when it ends closer to the
+    planned time than flying in early."""
+    window = direct_window(state, config, point)
+    if window is not None and left <= 0.5 * (window[0] + window[1]):
+        return "leave"
+    if window is None and left <= min(path_time_s(state, config, point, sp) for sp in speed_band(config, 5)):
+        return "leave"
+    probe = state
+    rng = random.Random(0)
+    for tau in range(5, LOOKAHEAD_S + 1, 5):
+        for _ in range(5):
+            probe, _ = step(probe, config, None, probe.task_id, datum, rng, hold_center=hold)
+        if min(path_time_s(probe, config, point, sp) for sp in speed_band(config, 5)) > left - tau - 2.0:
+            early = left - window[1] if window is not None else math.inf
+            if early <= 2.0 or hold_miss_s(state, config, point, left, datum) >= early:
+                return "leave"
+            return "hold"
+    return "wait"
+
+
 def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[LayerState, LayerUpdate]:
     """Advance the layer from state.tick to feed.tick (1 s steps).
 
     Tasks are flown in the order of their planned drop time. The layer keeps circling the
-    estimated target until it must leave to arrive on time (planned time - flight time -
-    margin); if it gets to the point early it circles the point (HOLD) and comes in so as to
-    drop at the planned time. Tasks without a planned time are flown at once. Drop points
-    drift with the estimated current."""
+    estimated target until it is time to leave (see departure), flies in adjusting its speed
+    every second so that the flight time matches the time left, and circles the point (HOLD)
+    when even the slowest speed would be early. Tasks without a planned time are flown at once.
+    Drop points drift with the estimated current."""
     tasks = sorted(feed.tasks, key=lambda t: (t.planned_tick if t.planned_tick is not None else -1, t.task_id))
     positions = {t.task_id: t.position for t in tasks}
     completed: dict[int, Position] = {}
@@ -266,37 +357,23 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
         task_id = None
         if task is not None:
             point = positions[task.task_id]
-            planned = task.planned_tick if task.planned_tick is not None else tick
-            # leave as late as possible: when no speed of the band (150..250 kt) could still arrive
-            # later than the planned time; the leg speed is then the one whose (simulated) flight
-            # time is closest to the time left
+            timed = task.planned_tick is not None
+            left = task.planned_tick - tick if timed else 0
             committed = state.task_id == task.task_id and state.mode == "TRANSIT"
             holding = state.mode == "HOLD" and state.task_id == task.task_id
-            left = planned - tick
-            times: dict[float, float] = {}
-            if not committed and not holding and left > 0:
+            decision = "leave"
+            if timed and not committed:
                 fastest = feed.config.speed_kt + feed.config.speed_spread_kt
-                if eta_to(state.model_copy(update={"speed_kt": fastest}), feed.config, point) <= left + 600:
-                    times = {sp: flight_time_s(state, feed.config, point, sp) for sp in speed_band(feed.config)}
-                    # prefer speeds that fly in directly (no extra loop): loops at a larger speed
-                    # are not a reliable way to spend time (the holding pattern is)
-                    east, north, _ = local_offset_m(state.position, point)
-                    direct = {
-                        sp: t for sp, t in times.items()
-                        if t <= math.hypot(east, north) / (sp * KNOT_TO_MPS) + loop_s(sp, feed.config) / 2 + 10
-                    }
-                    times = direct or times
-            latest = max(times.values()) if times else -math.inf
-            if holding:
-                # circle the drop point until the (simulated) flight back in takes the time left
-                if left > flight_time_s(state, feed.config, point, state.speed_kt) + 5.0:
-                    hold, task_id = point, task.task_id
-                else:
-                    target, task_id = point, task.task_id  # turn in to drop on time
-            elif committed or left <= 0 or left - DEPART_MARGIN_S <= latest:
+                near = eta_to(state.model_copy(update={"speed_kt": fastest}), feed.config, point) <= left + 600
+                decision = departure(state, feed.config, point, left, feed.datum, point if holding else None) \
+                    if near else ("hold" if holding else "wait")
+            if decision == "leave":
                 target, task_id = point, task.task_id
-                if times:
-                    wanted = min(times, key=lambda sp: abs(times[sp] - left))
+                if timed:
+                    wanted = timed_speed(state, feed.config, point, left)
+            elif decision == "hold" or holding:
+                hold, task_id = point, task.task_id
+                wanted = speed_band(feed.config)[0]  # hold at the slowest speed (smallest circle)
         state, arrived = step(state, feed.config, target, task_id, feed.datum, rng, hold_center=hold,
                               wanted_speed_kt=wanted)
         if arrived and task is not None:

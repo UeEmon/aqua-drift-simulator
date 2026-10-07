@@ -166,12 +166,71 @@ async def _drop_time(planned_in: int, east: float, north: float, seed: int = 4) 
 async def test_layer_lays_the_observer_at_the_planned_time() -> None:
     # far point, plenty of time: keeps circling the target first, leaves late, arrives on time
     done, planned, modes = await _drop_time(500, 15000.0, -5000.0)
-    assert abs(done - planned) <= 30
+    assert abs(done - planned) <= 5
     assert modes[:100].count("ORBIT") > 90  # did not leave at once
     # close point: gets there early and holds over the point until the planned time
     done, planned, modes = await _drop_time(400, 1500.0, 1500.0)
-    assert abs(done - planned) <= 30
+    assert abs(done - planned) <= 5
     assert "HOLD" in modes or modes[:150].count("ORBIT") > 100
+
+
+def _timed_drop_error(seed: int) -> tuple[int | None, bool]:
+    """One random timed drop as the planner sets it (planned 30..290 s ahead, never before the
+    layer's earliest time) with a random current. Returns (drop - planned time in s, feasible:
+    some speed of the band can get there by the planned time)."""
+    import numpy as np
+
+    from aqua_drift.layer import flight_time_s, speed_band
+    from aqua_drift.models import DropTask, LayerFeed
+    from aqua_drift.optimal_deployment import LayerAvailability
+
+    r = random.Random(seed)
+    config = LayerConfig()
+    rng = random.Random(seed + 1000)
+    state = initial_state(config, DATUM, 0, rng)
+    state, _ = advance(LayerFeed(tick=60, config=config, tasks=[], datum=DATUM), state, rng)
+    distance, bearing = r.uniform(1000.0, 25000.0), r.uniform(0.0, 2.0 * math.pi)
+    point = _offset(DATUM, distance * math.sin(bearing), distance * math.cos(bearing), 500.0)
+    availability = LayerAvailability(ready_s=0.0, position=state.position, speed_kt=config.speed_kt,
+                                     max_bank_deg=config.max_bank_deg, heading_deg=state.heading_deg)
+    east, north, _ = local_offset_m(DATUM, point)
+    earliest = float(availability.earliest_s(DATUM, np.array([[east, north, 0.0]]))[0])
+    planned = 60 + max(math.ceil(earliest), r.randint(30, 290))
+    current = (r.uniform(-2.0, 2.0), r.uniform(-2.0, 2.0))
+    quickest = min(flight_time_s(state, config, point, sp, dt=1.0) for sp in speed_band(config))
+    task = DropTask(task_id=1, created_tick=60, source="forward", position=point, status="APPROVED",
+                    planned_tick=planned)
+    for tick in range(61, planned + 600):
+        feed = LayerFeed(tick=tick, config=config, tasks=[task], datum=DATUM,
+                         current_east_kt=current[0], current_north_kt=current[1])
+        state, update = advance(feed, state, rng)
+        if 1 in update.completed:
+            return tick - planned, planned - 60 >= quickest + 5
+    return None, planned - 60 >= quickest + 5
+
+
+def test_layer_drops_within_seconds_of_the_planned_time() -> None:
+    """Random drops as the planner schedules them: the layer is on time (docs/handoff.md
+    reported +-24 s and up to +52 s; the coarse flight-time simulation, the speed fixed at
+    departure and the departure rule were the causes)."""
+    errors = [e for e, feasible in map(_timed_drop_error, range(60)) if feasible]
+    assert len(errors) >= 50 and None not in errors
+    assert sum(abs(e) <= 5 for e in errors) >= 0.9 * len(errors)
+    assert max(abs(e) for e in errors) <= 60
+
+
+def test_timed_leg_adjusts_the_speed_on_the_way() -> None:
+    from aqua_drift.layer import SPEED_RATE_KT_S
+
+    config = LayerConfig()
+    state = initial_state(config, DATUM, 0, random.Random(1)).model_copy(update={"speed_kt": 200.0})
+    target = _offset(DATUM, 20000.0, 0.0, 0.0)
+    state, _ = step(state, config, target, 1, DATUM, random.Random(1), wanted_speed_kt=200.0)
+    state, _ = step(state, config, target, 1, DATUM, random.Random(1), wanted_speed_kt=150.0)
+    assert state.speed_kt == pytest.approx(200.0 - SPEED_RATE_KT_S)  # rate-limited
+    for _ in range(20):
+        state, _ = step(state, config, target, 1, DATUM, random.Random(1), wanted_speed_kt=150.0)
+    assert state.speed_kt == pytest.approx(150.0)
 
 
 def test_planner_schedules_drops_before_detection_and_after_the_layer_can_be_there() -> None:
