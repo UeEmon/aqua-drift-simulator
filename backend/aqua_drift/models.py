@@ -272,6 +272,23 @@ class TickMessage(BaseModel):
     tick: int = Field(ge=0)
 
 
+MAX_TIME_SCALE = 100.0
+
+
+class ClockSettings(BaseModel):
+    """Simulation time per wall-clock second (1 = real time, 0 = paused)."""
+
+    time_scale: float = Field(default=1.0, ge=0, le=MAX_TIME_SCALE)
+
+
+class ClockStatus(BaseModel):
+    """Polled by the clock container: synced is True once every worker finished the current tick."""
+
+    tick: int
+    time_scale: float
+    synced: bool
+
+
 class TargetState(BaseModel):
     tick: int = Field(ge=0)
     position: Position
@@ -494,6 +511,7 @@ class DeploymentStatus(BaseModel):
 
 class EstimatorFeed(BaseModel):
     tick: int
+    time_scale: float = 1.0
     generation: int = 0
     estimation: EstimationControl = EstimationControl()
     settings: EstimatorSettings
@@ -651,6 +669,7 @@ class SimState(BaseModel):
 
     tick: int
     generation: int = 0
+    time_scale: float = 1.0
     config: ScenarioConfig
     target: TargetState | None
     observers: list[ObserverRecord]
@@ -659,6 +678,7 @@ class SimState(BaseModel):
 class Snapshot(BaseModel):
     tick: int
     generation: int = 0
+    time_scale: float = 1.0
     deployment: DeploymentStatus = DeploymentStatus()
     estimation: EstimationControl = EstimationControl()
     bearings: list[BearingReport] = Field(default_factory=list)

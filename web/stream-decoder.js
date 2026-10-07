@@ -77,6 +77,7 @@
     }
 
     function decode(message) {
+      if (!("t" in message)) return { snapshot: null, tracks: [], regionChanged: false, timeScale: message.clk }; // clock-only
       const updates = [];
       const runKey = `${message.gen}-${message.ctl ? message.ctl.run_id : 0}`;
       if (message.gen !== st.gen) {
@@ -156,6 +157,7 @@
       const snapshot = {
         tick: message.t,
         generation: message.gen,
+        time_scale: message.clk,
         estimation: message.ctl,
         config: st.config,
         target,
