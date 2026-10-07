@@ -630,11 +630,16 @@ function updateLayer(deployment) {
     const doing = layer.mode === "TRANSIT" ? `設標へ #${layer.task_id} 到着 ${fmt(layer.eta_s, 0)} s`
       : layer.mode === "HOLD" ? `#${layer.task_id} 設標点で計画時刻待ち` : "旋回待機";
     state.layerMarker.label.text = `設標者 ${fmt(layer.speed_kt, 0)} kt ${doing}`;
+    // planned flight path (飛行予定経路, dashed): the turn-limited path the layer will fly through
+    // the drop points, from the backend (straight legs from an older backend without it)
     const approved = open.filter((t) => t.status === "APPROVED");
-    const route = approved.length
-      ? [Cesium.Cartesian3.fromDegrees(layer.position.longitude, layer.position.latitude, 0),
-        ...approved.map((t) => Cesium.Cartesian3.fromDegrees(t.position.longitude, t.position.latitude, 0))]
-      : [];
+    const planned = layer.planned_path || [];
+    const route = planned.length > 1
+      ? planned.map(([lat, lon]) => Cesium.Cartesian3.fromDegrees(lon, lat, 0))
+      : approved.length && !("planned_path" in layer)
+        ? [Cesium.Cartesian3.fromDegrees(layer.position.longitude, layer.position.latitude, 0),
+          ...approved.map((t) => Cesium.Cartesian3.fromDegrees(t.position.longitude, t.position.latitude, 0))]
+        : [];
     state.layerRoute.positions = route;
     state.layerRoute.show = route.length > 1;
     const orbitKey = layer.mode === "ORBIT" && layer.orbit_center
