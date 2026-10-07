@@ -8,7 +8,7 @@ participant Orchestrator
 participant "Observer\ncontainer" as Observer
 loop every 5 s
   Deployer -> API : GET /internal/deployment-feed\n(estimate, observers, open drop tasks)
-  Deployer -> Deployer : optimal plan: positions, number, depths\n(Doppler-tracking information, detection range)
+  Deployer -> Deployer : optimal plan: positions, number, depths\n(Doppler-tracking information, detection range)\n+ optimal drop time (before detection starts,\nnot before the layer can be there)
   alt deployment needed
     Deployer -> API : POST /internal/deploy (plan)
     API -> API : drop tasks
@@ -22,13 +22,13 @@ loop every 5 s
 end
 loop every 1 s
   Layer -> API : GET /internal/layer-feed\n(approved tasks, estimated target, estimated current)
-  alt approved task
-    Layer -> Layer : fly to the drop point\n(200±50 kt, bank ≤ 15°; point drifts with the current)
+  alt approved task (in planned-time order)
+    Layer -> Layer : leave when it must, speed chosen to arrive on time,\nhold over the point if early\n(200±50 kt, bank ≤ 15°; point drifts with the current)
   else no task
     Layer -> Layer : circle the estimated target position
   end
   Layer -> API : POST /internal/layer (state, drifted points, arrivals)
-  alt arrived at the drop point
+  alt arrived at the drop point at the planned time
     API -> API : task DONE -> observer placement
   end
 end

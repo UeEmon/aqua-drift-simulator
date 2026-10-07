@@ -101,7 +101,8 @@ class SimulationState:
         named observer container, or without the layer, is queued at once."""
         async with self.lock:
             if self.config.layer.enabled and placement.observer_id is None:
-                self._new_task(placement.position, "manual", "operator placement")
+                task = self._new_task(placement.position, "manual", "operator placement")
+                task.planned_tick = placement.planned_tick
                 return len(self.placements) + self._open_task_count()
             self.placements.append(placement)
             return len(self.placements)
@@ -179,9 +180,11 @@ class SimulationState:
         proposed to the operator (approved at once in automatic approval mode); the observer is
         in the water when the layer reaches the point. Without the layer: queued at once."""
         async with self.lock:
-            for position in request.positions:
+            planned = request.planned_ticks or [None] * len(request.positions)
+            for position, planned_tick in zip(request.positions, planned, strict=False):
                 if self.config.layer.enabled:
-                    self._new_task(position, source, request.reason)
+                    task = self._new_task(position, source, request.reason)
+                    task.planned_tick = planned_tick
                 else:
                     self.placements.append(ObserverPlacement(position=position, source="forward"))
             record = DeploymentRecord(
@@ -212,7 +215,31 @@ class SimulationState:
                 + self.config.source.shared_recognition_bias_hz,
                 sound_speed_mps=self.config.source.sound_speed_mps,
                 frequency_sigma_hz=self.config.estimator.model_frequency_sigma_hz,
+                **self._layer_availability(),
             )
+
+    def _layer_availability(self) -> dict:
+        """When / where the layer is free for a new drop: after its open tasks."""
+        layer = self.config.layer
+        if not layer.enabled:
+            return {"layer_enabled": False}
+        ready_tick, ready_position, heading = self.tick, None, None
+        if self.layer_state is not None:
+            ready_position, heading = self.layer_state.position, self.layer_state.heading_deg
+        for task in self.tasks:
+            if task.status not in self.OPEN_TASK_STATES:
+                continue
+            due = task.planned_tick if task.planned_tick is not None else self.tick + int(task.eta_s or 0)
+            if due >= ready_tick:
+                ready_tick, ready_position, heading = due, task.position, None
+        return {
+            "layer_enabled": True,
+            "layer_ready_tick": ready_tick,
+            "layer_ready_position": ready_position or self.config.target.initial_position,
+            "layer_ready_heading_deg": heading,
+            "layer_speed_kt": layer.speed_kt,
+            "layer_max_bank_deg": layer.max_bank_deg,
+        }
 
     def _deployment_status(self) -> DeploymentStatus:
         self._expire_tasks()
@@ -280,7 +307,7 @@ class SimulationState:
             current = self.current_estimate.base_velocity if self.current_estimate else None
             approved = sorted(
                 (t for t in self.tasks if t.status == "APPROVED"),
-                key=lambda t: (t.approved_tick or 0, t.task_id),
+                key=lambda t: (t.planned_tick if t.planned_tick is not None else -1, t.task_id),
             )
             return LayerFeed(
                 tick=self.tick,

@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from aqua_drift.forward_deployment import plan_forward_deployment
+from aqua_drift.forward_deployment import plan_forward_deployment_scheduled
 from aqua_drift.models import (
     DeploymentFeed,
     DeploymentRecord,
@@ -31,6 +31,7 @@ from aqua_drift.models import (
     TargetState,
     TickMessage,
 )
+from aqua_drift.optimal_deployment import availability_from_feed
 from aqua_drift.state import ObserverRejected, SimulationState
 from aqua_drift.storage import EventStore
 from aqua_drift.wire import WireEncoder
@@ -180,16 +181,18 @@ async def deploy_now() -> dict[str, object]:
     """Operator request: deploy observers ahead of the current estimate immediately."""
     feed = await state.deployment_feed()
     estimate = next((e for e in feed.estimates if e.mode.value == "ONLINE"), None)
-    positions, reason = plan_forward_deployment(
+    positions, reason, planned = plan_forward_deployment_scheduled(
         feed.tick, estimate, feed.observer_positions, feed.pending_positions, feed.config,
         feed.max_slant_range_yd, feed.last_deploy_tick, feed.depth_step_ft, force=True,
         free_slots=feed.free_slots, source_frequency_hz=feed.source_frequency_hz,
         sound_speed_mps=feed.sound_speed_mps, frequency_sigma_hz=feed.frequency_sigma_hz,
+        layer=availability_from_feed(feed),
     )
     if not positions:
         raise HTTPException(status_code=409, detail=f"no deployment: {reason}")
     record = await state.queue_deployment(
-        DeploymentRequest(tick=feed.tick, positions=positions, reason=reason), source="operator"
+        DeploymentRequest(tick=feed.tick, positions=positions, reason=reason, planned_ticks=planned),
+        source="operator",
     )
     await store.append_event("forward_deployment", feed.tick, record.model_dump(mode="json"))
     return {"deployed": len(positions), "standby": feed.standby_count, "tick": feed.tick}

@@ -7,8 +7,9 @@ import logging
 
 import httpx
 
-from aqua_drift.forward_deployment import plan_forward_deployment
+from aqua_drift.forward_deployment import plan_forward_deployment_scheduled
 from aqua_drift.models import DeploymentFeed, DeploymentRequest
+from aqua_drift.optimal_deployment import availability_from_feed
 from aqua_drift.services.common import API_URL, post, wait_for_api
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s deployer %(message)s")
@@ -25,7 +26,7 @@ async def run() -> None:
             response.raise_for_status()
             feed = DeploymentFeed.model_validate(response.json())
             estimate = next((e for e in feed.estimates if e.mode.value == "ONLINE"), None)
-            positions, reason = plan_forward_deployment(
+            positions, reason, planned = plan_forward_deployment_scheduled(
                 feed.tick,
                 estimate,
                 feed.observer_positions,
@@ -38,9 +39,10 @@ async def run() -> None:
                 source_frequency_hz=feed.source_frequency_hz,
                 sound_speed_mps=feed.sound_speed_mps,
                 frequency_sigma_hz=feed.frequency_sigma_hz,
+                layer=availability_from_feed(feed),
             )
             if positions:
-                request = DeploymentRequest(tick=feed.tick, positions=positions, reason=reason)
+                request = DeploymentRequest(tick=feed.tick, positions=positions, reason=reason, planned_ticks=planned)
                 result = await post(client, "/internal/deploy", request.model_dump(mode="json"))
                 result.raise_for_status()
                 log.info("tick=%s deployed %d observers (%s); the orchestrator starts their containers",

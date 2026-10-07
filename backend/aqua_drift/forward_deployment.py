@@ -18,7 +18,7 @@ import math
 
 from aqua_drift.deployment import _offset
 from aqua_drift.models import ForwardDeploymentConfig, Position, TrackEstimate
-from aqua_drift.optimal_deployment import plan_optimal_deployment
+from aqua_drift.optimal_deployment import LayerAvailability, plan_optimal_deployment
 from aqua_drift.physics import local_offset_m
 
 YD_TO_M = 0.9144
@@ -27,7 +27,13 @@ MIN_DEPTH_FT = 50.0
 MAX_DEPTH_FT = 1500.0
 
 
-def plan_forward_deployment(
+def plan_forward_deployment(*args, **kwargs) -> tuple[list[Position], str]:
+    """Return (positions to deploy, reason); see plan_forward_deployment_scheduled."""
+    positions, reason, _ = plan_forward_deployment_scheduled(*args, **kwargs)
+    return positions, reason
+
+
+def plan_forward_deployment_scheduled(
     tick: int,
     estimate: TrackEstimate | None,
     observers: list[Position],
@@ -41,25 +47,28 @@ def plan_forward_deployment(
     source_frequency_hz: float = 400.0,
     sound_speed_mps: float = 1500.0,
     frequency_sigma_hz: float = 0.03,
-) -> tuple[list[Position], str]:
-    """Return (positions to deploy, reason). An empty list means no deployment now.
+    layer: LayerAvailability | None = None,
+) -> tuple[list[Position], str, list[int] | None]:
+    """Return (positions to deploy, reason, planned drop ticks). An empty list means no
+    deployment now. The planned ticks (optimal strategy) are when the layer should lay each
+    observer; None = as soon as possible.
     `force` (operator request) skips the coverage and cooldown checks but still requires a
     usable estimate. With config.strategy == "optimal" the positions, number and depths are
     chosen by aqua_drift.optimal_deployment; "fixed" uses the two-sided pattern."""
     if not config.enabled and not force:
-        return [], "disabled"
+        return [], "disabled", None
     if estimate is None or estimate.current_position is None or estimate.uncertainty is None:
-        return [], "no estimate"
+        return [], "no estimate", None
     if not estimate.observability_status.startswith("TRACKING"):
-        return [], f"estimate not usable ({estimate.observability_status})"
+        return [], f"estimate not usable ({estimate.observability_status})", None
     r_max = max_slant_range_yd * YD_TO_M
     if estimate.uncertainty.horizontal_major_yd * YD_TO_M > config.max_sigma_fraction * r_max:
-        return [], "estimate too uncertain"
+        return [], "estimate too uncertain", None
     if not force and last_deploy_tick is not None and tick - last_deploy_tick < config.cooldown_s:
-        return [], "cooldown"
+        return [], "cooldown", None
     speed_kt = estimate.through_water_speed_kt or 0.0
     if speed_kt < config.min_speed_kt or estimate.hdg_deg is None:
-        return [], "target (nearly) stationary in the water"
+        return [], "target (nearly) stationary in the water", None
 
     heading = math.radians(estimate.hdg_deg)
     ux, uy = math.sin(heading), math.cos(heading)
@@ -75,17 +84,18 @@ def plan_forward_deployment(
             covered += 1
     if config.strategy == "optimal":
         if not force and estimate.uncertainty.horizontal_major_yd * YD_TO_M > config.optimal_max_sigma_fraction * r_max:
-            return [], "estimate not yet converged enough for optimal placement"
-        positions, reason, _ = plan_optimal_deployment(
+            return [], "estimate not yet converged enough for optimal placement", None
+        positions, reason, report = plan_optimal_deployment(
             estimate, observers, pending, config, max_slant_range_yd, free_slots,
             source_frequency_hz, sound_speed_mps, frequency_sigma_hz,
-            coverage_short=covered < config.min_coverage, force=force,
+            coverage_short=covered < config.min_coverage, force=force, layer=layer,
         )
         if not positions and covered >= config.min_coverage:
             reason = f"covered ({covered} observers near predicted position); {reason}"
-        return positions, reason
+        planned = [tick + round(t) for t in report.drop_times_s] if positions and report else None
+        return positions, reason, planned
     if covered >= config.min_coverage and not force:
-        return [], f"covered ({covered} observers near predicted position)"
+        return [], f"covered ({covered} observers near predicted position)", None
 
     ahead = config.ahead_distance_yd * YD_TO_M
     lateral = config.lateral_offset_yd * YD_TO_M
@@ -108,4 +118,4 @@ def plan_forward_deployment(
         f"predicted position in {config.lead_time_s} s covered by {covered} < "
         f"{config.min_coverage} observers"
     )
-    return positions, reason
+    return positions, reason, None

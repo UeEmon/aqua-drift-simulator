@@ -61,7 +61,10 @@ Additional observers are laid by the **layer (設標者)**: the planned drop poi
 operator (approval **automatic** by default, or **manual** with 了承/却下 in the status strip and the
 表示・観測者 tab); the layer then flies there over the sea surface at 200±50 kt with bank ≤ 15°
 (drop points drift with the estimated current) and the observer is in the water when it arrives.
-Without a task the layer circles the estimated target position.
+Without a task the layer circles the estimated target position. Each drop has an **optimal drop
+time** (just before the predicted target comes within detection range, and not before the layer
+can be there); the layer leaves when it must, picks its speed to arrive on time, holds over the
+point if early and lays the observer at the planned time.
 
 The background map (Natural Earth II) is **off by default** to prioritise rendering; switch it
 on with 「背景地図」 in the view toolbar when needed.

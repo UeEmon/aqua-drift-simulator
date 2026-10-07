@@ -164,6 +164,8 @@ class ForwardDeploymentConfig(BaseModel):
     depth_options_ft: list[float] = Field(default_factory=lambda: [60.0, 200.0, 500.0, 1000.0, 1500.0])
     depth_weight: float = Field(default=1.0, ge=0, le=10)  # depth error weight in the criterion
     optimal_max_sigma_fraction: float = Field(default=0.15, gt=0)  # placement needs a converged track
+    schedule_drops: bool = True  # plan the optimal drop time (else: as soon as possible)
+    drop_lead_s: int = Field(default=60, ge=0, le=1800)  # in the water this long before detection starts
 
 
 class ObserverDeploymentConfig(BaseModel):
@@ -293,6 +295,7 @@ class ObserverPlacement(BaseModel):
     position: Position
     observer_id: str | None = None
     source: str = "manual"  # manual (operator) | forward (automatic 前程 deployment)
+    planned_tick: int | None = None  # drop time requested by the operator (None = as soon as possible)
 
 
 class ObserverAssignment(Position):
@@ -384,6 +387,7 @@ class DeploymentRequest(BaseModel):
     tick: int
     positions: list[Position]
     reason: str
+    planned_ticks: list[int] | None = None  # optimal drop time of each position
 
 
 class DeploymentFeed(BaseModel):
@@ -399,6 +403,13 @@ class DeploymentFeed(BaseModel):
     standby_count: int
     last_deploy_tick: int | None
     free_slots: int = 99
+    # layer (設標者) availability for the drop-time planning: when / where it is free next
+    layer_enabled: bool = False
+    layer_ready_tick: int | None = None
+    layer_ready_position: Position | None = None
+    layer_ready_heading_deg: float | None = None
+    layer_speed_kt: float = 200.0
+    layer_max_bank_deg: float = 15.0
     source_frequency_hz: float = 400.0  # operator's (recognized) source frequency
     sound_speed_mps: float = 1500.0
     frequency_sigma_hz: float = 0.03
@@ -417,9 +428,10 @@ class DropTask(BaseModel):
     reason: str = ""
     position: Position
     status: str = "PROPOSED"
+    planned_tick: int | None = None  # optimal / requested drop time (None = as soon as possible)
     approved_tick: int | None = None
     done_tick: int | None = None
-    eta_s: float | None = None
+    eta_s: float | None = None  # seconds from now to the expected drop
 
 
 class DropDecision(BaseModel):
@@ -432,7 +444,7 @@ class LayerState(BaseModel):
     heading_deg: float
     speed_kt: float
     bank_deg: float = 0.0
-    mode: str = "ORBIT"  # ORBIT (circling the estimated target) | TRANSIT (to a drop point)
+    mode: str = "ORBIT"  # ORBIT (circling the estimated target) | TRANSIT (to a drop point) | HOLD (early at the point)
     task_id: int | None = None
     orbit_center: Position | None = None
     orbit_radius_yd: float = 0.0

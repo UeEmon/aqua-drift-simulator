@@ -142,3 +142,74 @@ async def test_drop_point_drifts_with_the_estimated_current() -> None:
     east, north, _ = local_offset_m(drop, task.position)
     assert task.status == "APPROVED"
     assert abs(east - 2.0 * 0.5144 * 100) < 5.0 and abs(north) < 1.0
+
+
+async def _drop_time(planned_in: int, east: float, north: float, seed: int = 4) -> tuple[int, int, list[str]]:
+    sim = SimulationState(ScenarioConfig())
+    rng = random.Random(seed)
+    state = await _layer_steps(sim, 60, rng)  # settle on the orbit
+    point = _offset(state.position, east, north, 500.0)
+    request = DeploymentRequest(tick=sim.tick, positions=[point], reason="plan", planned_ticks=[sim.tick + planned_in])
+    await sim.queue_deployment(request)
+    planned = sim.tick + planned_in
+    modes = []
+    for _ in range(planned_in + 600):
+        state = await _layer_steps(sim, 1, rng, state)
+        modes.append(state.mode)
+        task = (await sim.snapshot()).deployment.tasks[-1]
+        if task.status == "DONE":
+            return task.done_tick, planned, modes
+    return -1, planned, modes
+
+
+@pytest.mark.asyncio
+async def test_layer_lays_the_observer_at_the_planned_time() -> None:
+    # far point, plenty of time: keeps circling the target first, leaves late, arrives on time
+    done, planned, modes = await _drop_time(500, 15000.0, -5000.0)
+    assert abs(done - planned) <= 30
+    assert modes[:100].count("ORBIT") > 90  # did not leave at once
+    # close point: gets there early and holds over the point until the planned time
+    done, planned, modes = await _drop_time(400, 1500.0, 1500.0)
+    assert abs(done - planned) <= 30
+    assert "HOLD" in modes or modes[:150].count("ORBIT") > 100
+
+
+def test_planner_schedules_drops_before_detection_and_after_the_layer_can_be_there() -> None:
+    from aqua_drift.forward_deployment import plan_forward_deployment_scheduled
+    from aqua_drift.models import (
+        EstimateMode,
+        ForwardDeploymentConfig,
+        PresenceRegion,
+        TrackEstimate,
+        Uncertainty,
+    )
+    from aqua_drift.optimal_deployment import LayerAvailability
+
+    origin = Position(latitude=35.0, longitude=140.0, depth_ft=400.0)
+    estimate = TrackEstimate(
+        mode=EstimateMode.ONLINE, tick=100, observability_status="TRACKING", current_position=origin,
+        depth_ft=400.0, hdg_deg=90.0, through_water_speed_kt=8.0,
+        uncertainty=Uncertainty(
+            horizontal_major_yd=50, horizontal_minor_yd=20, horizontal_major_axis_deg=0, depth_sigma_ft=100,
+            ground_speed_sigma_kt=0.2, through_water_speed_sigma_kt=0.2, cog_sigma_deg=1, hdg_sigma_deg=1,
+            bias_sigma_hz=0.01,
+        ),
+        presence_region=PresenceRegion(probability_pct=90),
+    )
+    behind = [_offset(origin, -2700.0, 1800.0, 200.0), _offset(origin, -2700.0, -1800.0, 200.0)]
+    layer = LayerAvailability(ready_s=0.0, position=_offset(origin, 0.0, -20000.0, 0.0), speed_kt=200.0,
+                              max_bank_deg=15.0, heading_deg=0.0)
+    config = ForwardDeploymentConfig()
+    positions, reason, planned = plan_forward_deployment_scheduled(
+        100, estimate, behind, [], config, 6000, None, layer=layer)
+    assert positions and planned and len(planned) == len(positions)
+    assert "drop in" in reason
+    earliest = layer.earliest_s(origin, __import__("numpy").array([
+        [*local_offset_m(origin, p)[0:2], 0.0] for p in positions]))
+    for tick, first in zip(planned, earliest, strict=True):
+        assert tick >= 100 + first - 1  # not before the layer can be there
+        assert tick <= 100 + config.horizon_s
+    # without scheduling the drops are as early as the layer allows
+    asap = ForwardDeploymentConfig(schedule_drops=False)
+    _, _, early = plan_forward_deployment_scheduled(100, estimate, behind, [], asap, 6000, None, layer=layer)
+    assert min(early) <= min(planned)

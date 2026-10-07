@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 from aqua_drift.deployment import default_position
 from aqua_drift.estimation.engine import TrackingEngine
-from aqua_drift.forward_deployment import plan_forward_deployment
+from aqua_drift.forward_deployment import plan_forward_deployment_scheduled
 from aqua_drift.layer import advance as advance_layer
 from aqua_drift.layer import initial_state as initial_layer_state
 from aqua_drift.models import (
@@ -30,6 +30,7 @@ from aqua_drift.models import (
     ScenarioConfig,
     TargetState,
 )
+from aqua_drift.optimal_deployment import LayerAvailability
 from aqua_drift.physics import (
     LevelNoise,
     advance_observer,
@@ -124,6 +125,20 @@ class ScenarioRun:
                 task.position = update.task_positions[task.task_id]
                 task.eta_s = update.task_eta_s.get(task.task_id)
 
+    def _layer_availability(self) -> LayerAvailability | None:
+        if not self.config.layer.enabled:
+            return None
+        ready, where = self.tick, (self.layer_state.position if self.layer_state else self.config.target.initial_position)
+        heading = self.layer_state.heading_deg if self.layer_state else None
+        for task in self.tasks:
+            if task.status == "APPROVED":
+                due = task.planned_tick if task.planned_tick is not None else self.tick + int(task.eta_s or 0)
+                if due >= ready:
+                    ready, where, heading = due, task.position, None
+        layer = self.config.layer
+        return LayerAvailability(ready_s=float(ready - self.tick), position=where,
+                                 speed_kt=layer.speed_kt, max_bank_deg=layer.max_bank_deg, heading_deg=heading)
+
     def _add_observer(self, position: Position) -> None:
         self.observers.append(
             ObserverState(observer_id=f"fwd-{len(self.deployments):02d}-{len(self.observers):03d}",
@@ -135,7 +150,7 @@ class ScenarioRun:
     def _forward_deploy(self) -> None:
         output = self.engine.output()
         estimate = next((e for e in output.estimates if e.mode.value == "ONLINE"), None)
-        positions, _ = plan_forward_deployment(
+        positions, _, planned = plan_forward_deployment_scheduled(
             self.tick,
             estimate,
             [o.position for o in self.observers],
@@ -149,14 +164,16 @@ class ScenarioRun:
             source_frequency_hz=self.config.source.source_frequency_hz + self.config.source.shared_recognition_bias_hz,
             sound_speed_mps=self.config.source.sound_speed_mps,
             frequency_sigma_hz=self.config.estimator.model_frequency_sigma_hz,
+            layer=self._layer_availability(),
         )
         if not positions:
             return
-        for position in positions:
+        for index, position in enumerate(positions):
             if self.config.layer.enabled:  # laid when the layer gets there (automatic approval)
                 self.tasks.append(DropTask(
                     task_id=len(self.tasks) + 1, created_tick=self.tick, source="forward",
                     position=position, status="APPROVED", approved_tick=self.tick,
+                    planned_tick=planned[index] if planned else None,
                 ))
             else:
                 self._add_observer(position)

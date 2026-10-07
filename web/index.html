@@ -329,11 +329,11 @@
             <div class="table-wrap">
               <table id="drop-table">
                 <colgroup><col style="width:12%" /><col style="width:24%" /><col style="width:30%" /><col style="width:34%" /></colgroup>
-                <thead><tr><th>#</th><th>状態</th><th>深度・到着</th><th>操作</th></tr></thead>
+                <thead><tr><th>#</th><th>状態</th><th>深度・投入時刻</th><th>操作</th></tr></thead>
                 <tbody></tbody>
               </table>
             </div>
-            <p class="note">追加の観測者は設標者が予定点（潮流とともに移動）に到着した時点で投入されます。設標者は 200±50 kt・バンク 15° 以内で移動し、指示がないときは目標推定位置の周囲を旋回します。</p>
+            <p class="note">追加の観測者は設標者が予定点（潮流とともに移動）に到着した時点で投入されます。投入時刻は最適値（目標が探知距離に入る直前、設標者が間に合う範囲）を計算し、設標者はその時刻に投入できるよう出発時刻と速力を選び、早く着いたときは予定点の周囲で待ちます。設標者は 200±50 kt・バンク 15° 以内で移動し、指示がないときは目標推定位置の周囲を旋回します。</p>
           </section>
 
           <section>
@@ -342,6 +342,7 @@
               <label>緯度<input id="place-lat" type="number" step="0.0001" required /></label>
               <label>経度<input id="place-lon" type="number" step="0.0001" required /></label>
               <label>深度 (Ft)<input id="place-depth" type="number" min="0" step="10" value="200" required /></label>
+              <label title="設標者が投入する時刻（シミュレーション時刻 s）。空欄ならすぐに向かう">投入時刻 (s)<input id="place-time" type="number" min="0" step="10" placeholder="すぐ" /></label>
               <button type="submit">配置を予約</button>
             </form>
             <p class="note">観測者は obs-01〜obs-99。初期は目標を囲む4点で、前程配置・手動配置のたびに観測者コンテナが自動で起動し、観測を終えると停止します（番号は再利用、履歴は保持）。上限超過時は最古の観測者から削除。</p>

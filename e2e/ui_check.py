@@ -451,14 +451,23 @@ def main() -> int:
             if max(banks) > 15.0 + 1e-6:
                 fail(f"layer bank exceeded 15 deg: {max(banks):.2f}")
             # the observer is in the water only when the layer reaches the drop point
+            planned = page.evaluate("""() => window.aquaDrift.state.latestSnapshot.deployment.tasks
+                .filter(t => t.status === 'APPROVED').map(t => [t.task_id, t.planned_tick])""")
+            note(f"layer: approved drops with optimal drop times {planned} (task, planned tick)")
+            if planned and any(p is None for _, p in planned):
+                fail(f"approved drops without a planned drop time: {planned}")
             page.wait_for_function(
-                f"() => window.aquaDrift.state.latestSnapshot.observers.length >= {before + 1}", timeout=420_000
+                f"() => window.aquaDrift.state.latestSnapshot.observers.length >= {before + 1}", timeout=900_000
             )
             done = page.evaluate("""() => window.aquaDrift.state.latestSnapshot.deployment.tasks
-                .filter(t => t.status === 'DONE').map(t => [t.task_id, t.approved_tick, t.done_tick])""")
-            note(f"layer: drops laid {done} (task, approved tick, laid tick)")
+                .filter(t => t.status === 'DONE').map(t => [t.task_id, t.approved_tick, t.planned_tick, t.done_tick])""")
+            note(f"layer: drops laid {done} (task, approved tick, planned drop tick, laid tick)")
             if not done:
                 fail("no drop task completed by the layer")
+            for task_id, approved, planned, laid in done:
+                # a drop planned far enough ahead must be laid at the planned time
+                if planned is not None and approved is not None and planned - approved >= 120 and abs(laid - planned) > 60:
+                    fail(f"drop {task_id} laid at {laid}, planned {planned}")
             page.evaluate("""() => { const el = document.getElementById('drop-approval');
                 el.value = 'auto'; el.dispatchEvent(new Event('change')); }""")
             snap = page.evaluate("() => window.aquaDrift.state.latestSnapshot")

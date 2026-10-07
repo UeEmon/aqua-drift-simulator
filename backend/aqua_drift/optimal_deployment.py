@@ -28,6 +28,14 @@ range: observers on the track and at depths far from the target depth). One obse
 observers in one line give a mirror ambiguity about that line that the local (Fisher)
 criterion cannot see.
 
+Drop time: an observer measures only once it is in the water, so each candidate's information
+counts from the earliest time the layer (設標者) can be there (its free time, flight distance and
+turn). For every chosen observer the optimal drop time is as late as possible without losing
+information -- just before the predicted target (earliest over the heading hypotheses, less a
+lead time and a position-uncertainty margin) comes within the detection range -- and never
+before the layer can be there. A later drop keeps the observer's 3 h observing time and its slot
+for when they are useful.
+
 Trigger: deploy when the predicted position after lead_time_s is not covered by enough
 observers, or when the predicted error exceeds target_error_yd and the best new observer would
 improve it by at least trigger_gain (the existing field will not track the target well ahead).
@@ -35,7 +43,7 @@ improve it by at least trigger_gain (the existing field will not track the targe
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -61,6 +69,7 @@ class PlanReport:
     horizontal_after_yd: float = 0.0
     depth_before_ft: float = 0.0
     depth_after_ft: float = 0.0
+    drop_times_s: list[float] = field(default_factory=list)  # optimal drop time (s from now)
 
 
 def _fisher(
@@ -72,6 +81,7 @@ def _fisher(
     c: float,
     sigma_f: float,
     max_range: float,
+    start: np.ndarray | None = None,  # (M,) s from now when each observer is in the water
 ) -> np.ndarray:
     """(M,7,7) Doppler Fisher information of each observer about theta = [p0, v, b]."""
     pos = p0[None, :] + v[None, :] * ticks[:, None]  # (T,3)
@@ -85,7 +95,66 @@ def _fisher(
         [scale * drdp, scale * (ticks[None, :, None] * drdp + u), -np.ones(r.shape + (1,))], axis=2
     )  # (M,T,7)
     detect = (r <= max_range).astype(float) * (SAMPLE_S / sigma_f**2)
+    if start is not None:
+        detect = detect * (ticks[None, :] >= start[:, None])
     return np.einsum("mt,mti,mtj->mij", detect, g, g)
+
+
+@dataclass
+class LayerAvailability:
+    """When / where the layer (設標者) is free for a new drop and how it flies."""
+
+    ready_s: float  # seconds from now until the layer is free (after its open tasks)
+    position: Position  # where it is then
+    speed_kt: float
+    max_bank_deg: float
+    heading_deg: float | None = None  # its heading then (None: unknown -> an average half turn)
+
+    def earliest_s(self, origin: Position, points: np.ndarray) -> np.ndarray:
+        """Earliest drop time (s from now) at each point (water-frame metres from origin):
+        free time + straight flight + the turn towards the point at the bank limit (a full
+        loop more when the point is close behind)."""
+        start = np.array(local_offset_m(origin, self.position)[0:2])
+        v = self.speed_kt * KNOT_TO_MPS
+        omega = 9.80665 * math.tan(math.radians(self.max_bank_deg)) / v
+        radius = v / omega
+        delta = points[:, 0:2] - start[None, :]
+        distance = np.linalg.norm(delta, axis=1)
+        if self.heading_deg is None:
+            turn = np.full(len(points), 0.5 * math.pi / omega)
+        else:
+            bearing = np.arctan2(delta[:, 0], delta[:, 1])
+            error = np.abs((bearing - math.radians(self.heading_deg) + math.pi) % (2 * math.pi) - math.pi)
+            turn = error / omega + np.where((distance < 2 * radius) & (error > 0.5 * math.pi), math.pi / omega, 0.0)
+        return self.ready_s + distance / v + turn
+
+
+def drop_times(
+    chosen_points: np.ndarray,  # (K,3)
+    earliest: np.ndarray,  # (K,)
+    p0: np.ndarray,
+    velocities: list[np.ndarray],
+    horizon: float,
+    max_range: float,
+    lead_s: float,
+    position_sigma_m: float,
+    speed: float,
+) -> np.ndarray:
+    """Optimal drop time of each chosen observer (s from now): as late as possible without
+    losing information -- just before the predicted target (earliest over the heading
+    hypotheses, less a position-uncertainty margin) comes within the detection range -- but
+    not before the layer can be there. A later drop keeps the observer's 3 h observing time
+    and its slot for when they are useful and lets the plan use the latest estimate."""
+    ticks = np.arange(0.0, horizon + 1e-9, 1.0)
+    enter = np.full(len(chosen_points), np.inf)
+    for v in velocities:
+        pos = p0[None, :] + v[None, :] * ticks[:, None]
+        r = np.linalg.norm(pos[None, :, :] - chosen_points[:, None, :], axis=2)  # (K,T)
+        inside = r <= max_range
+        first = np.where(inside.any(axis=1), inside.argmax(axis=1), np.iinfo(np.int32).max)
+        enter = np.minimum(enter, first.astype(float))
+    margin = lead_s + 2.0 * position_sigma_m / max(speed, 0.1)
+    return np.maximum(earliest, np.where(np.isfinite(enter), enter - margin, earliest))
 
 
 def _components(info: np.ndarray, eval_ticks: list[float]) -> tuple[np.ndarray, np.ndarray]:
@@ -131,7 +200,9 @@ def plan_optimal_deployment(
     frequency_sigma_hz: float = 0.03,
     coverage_short: bool = False,
     force: bool = False,
+    layer: LayerAvailability | None = None,
 ) -> tuple[list[Position], str, PlanReport | None]:
+    """Plan positions, number and depths (and, in report.drop_times_s, the optimal drop times)."""
     r_max = max_slant_range_yd * YD_TO_M
     origin = estimate.current_position
     depth_est = (estimate.depth_ft if estimate.depth_ft is not None else origin.depth_ft) * FT_TO_M
@@ -160,6 +231,8 @@ def plan_optimal_deployment(
 
     hdg_sigma = math.radians(min(max(estimate.uncertainty.hdg_sigma_deg, 3.0), 30.0))
     hypotheses = [heading, heading - hdg_sigma, heading + hdg_sigma]
+    # an observer only measures once it is in the water: from the layer's earliest arrival
+    earliest = layer.earliest_s(origin, grid) if layer is not None else np.zeros(len(grid))
     base_info, cand_info = [], []
     prior = _prior(estimate)
     for h in hypotheses:
@@ -170,7 +243,7 @@ def plan_optimal_deployment(
                             frequency_sigma_hz, r_max).sum(axis=0)
         base_info.append(info)
         cand_info.append(_fisher(grid, p0, v, ticks, source_frequency_hz, sound_speed_mps,
-                                 frequency_sigma_hz, r_max))
+                                 frequency_sigma_hz, r_max, start=earliest))
     base_info = np.array(base_info)  # (H,7,7)
     cand_info = np.array(cand_info)  # (H,M,7,7)
 
@@ -231,10 +304,33 @@ def plan_optimal_deployment(
             f"{first_gain * 100:.0f} % (< {config.trigger_gain * 100:.0f} %)"
         ), report
     positions = [_offset(origin, float(grid[i, 0]), float(grid[i, 1]), float(grid[i, 2] / FT_TO_M)) for i in chosen]
+    velocities = [np.array([math.sin(h) * speed, math.cos(h) * speed, 0.0]) for h in hypotheses]
+    if config.schedule_drops:
+        times = drop_times(
+            grid[chosen], earliest[chosen], p0, velocities, horizon, r_max, float(config.drop_lead_s),
+            estimate.uncertainty.horizontal_major_yd * YD_TO_M, speed,
+        )
+    else:
+        times = earliest[chosen]
+    report.drop_times_s = [float(t) for t in times]
     why = "operator request" if force else ("coverage" if coverage_short else "information gain")
     reason = (
         f"optimal ({why}): {len(chosen)} observers, depths {report.depths_ft} Ft; predicted error "
         f"horizontal {report.horizontal_before_yd:.0f} -> {report.horizontal_after_yd:.0f} YD, "
-        f"depth {report.depth_before_ft:.0f} -> {report.depth_after_ft:.0f} Ft"
+        f"depth {report.depth_before_ft:.0f} -> {report.depth_after_ft:.0f} Ft; "
+        f"drop in {[round(t) for t in report.drop_times_s]} s"
     )
     return positions, reason, report
+
+
+def availability_from_feed(feed) -> LayerAvailability | None:
+    """LayerAvailability from a DeploymentFeed (None without the layer: drops are immediate)."""
+    if not getattr(feed, "layer_enabled", False) or feed.layer_ready_position is None:
+        return None
+    return LayerAvailability(
+        ready_s=max(float((feed.layer_ready_tick or feed.tick) - feed.tick), 0.0),
+        position=feed.layer_ready_position,
+        speed_kt=feed.layer_speed_kt,
+        max_bank_deg=feed.layer_max_bank_deg,
+        heading_deg=feed.layer_ready_heading_deg,
+    )

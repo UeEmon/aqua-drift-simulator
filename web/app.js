@@ -621,7 +621,8 @@ function updateLayer(deployment) {
     }
     state.layerMarker.show(true);
     state.layerMarker.set(Cesium.Cartesian3.fromDegrees(layer.position.longitude, layer.position.latitude, 0));
-    const doing = layer.mode === "TRANSIT" ? `設標へ #${layer.task_id} 到着 ${fmt(layer.eta_s, 0)} s` : "旋回待機";
+    const doing = layer.mode === "TRANSIT" ? `設標へ #${layer.task_id} 到着 ${fmt(layer.eta_s, 0)} s`
+      : layer.mode === "HOLD" ? `#${layer.task_id} 設標点で計画時刻待ち` : "旋回待機";
     state.layerMarker.label.text = `設標者 ${fmt(layer.speed_kt, 0)} kt ${doing}`;
     const approved = open.filter((t) => t.status === "APPROVED");
     const route = approved.length
@@ -642,7 +643,7 @@ function updateLayer(deployment) {
     state.layerRoute.show = false;
     state.layerOrbit.show = false;
   }
-  const taskKey = open.map((t) => `${t.task_id}:${t.status}:${t.position.latitude.toFixed(4)}:${t.position.longitude.toFixed(4)}:${Math.round((t.eta_s || 0) / 10)}`).join("|") + `|${exaggeration()}`;
+  const taskKey = open.map((t) => `${t.task_id}:${t.status}:${t.planned_tick}:${t.position.latitude.toFixed(4)}:${t.position.longitude.toFixed(4)}`).join("|") + `|${exaggeration()}`;
   if (taskKey !== state.taskKey) {
     state.taskKey = taskKey;
     gpu.taskPoints.removeAll();
@@ -653,7 +654,8 @@ function updateLayer(deployment) {
       gpu.taskPoints.add({ position: cartOf(t.position), pixelSize: 10, color: color.withAlpha(proposed ? 0.15 : 0.6), outlineColor: color, outlineWidth: 2 });
       gpu.taskLabels.add({
         position: cartOf(t.position),
-        text: proposed ? `提案 #${t.task_id}（${Math.round(t.position.depth_ft)} Ft）了承待ち` : `#${t.task_id}（${Math.round(t.position.depth_ft)} Ft）到着 ${fmt(t.eta_s, 0)} s`,
+        text: `${proposed ? "提案 " : ""}#${t.task_id}（${Math.round(t.position.depth_ft)} Ft）`
+          + (t.planned_tick != null ? `計画 ${t.planned_tick} s` : "すぐ") + (proposed ? " 了承待ち" : ""),
         font: "11px sans-serif", fillColor: color, pixelOffset: new Cesium.Cartesian2(0, -14),
       });
     }
@@ -666,12 +668,14 @@ function updateLayer(deployment) {
   if (!tabVisible("tab-display")) return;
   const enabled = state.latestConfig?.layer?.enabled !== false;
   $("layer-status").textContent = !enabled ? "設標者なし（追加の観測者は即時に投入）"
-    : layer ? `設標者 ${fmt(layer.speed_kt, 0)} kt・バンク ${fmt(Math.abs(layer.bank_deg), 1)}°・${layer.mode === "TRANSIT" ? `設標 #${layer.task_id} へ移動中（到着 ${fmt(layer.eta_s, 0)} s）` : "目標推定位置の周囲を旋回待機"}　了承待ち ${proposed.length}・設標待ち ${open.length - proposed.length}`
+    : layer ? `設標者 ${fmt(layer.speed_kt, 0)} kt・バンク ${fmt(Math.abs(layer.bank_deg), 1)}°・${layer.mode === "TRANSIT" ? `設標 #${layer.task_id} へ移動中（到着 ${fmt(layer.eta_s, 0)} s）` : layer.mode === "HOLD" ? `設標 #${layer.task_id} の地点で計画時刻まで旋回` : "目標推定位置の周囲を旋回待機"}　了承待ち ${proposed.length}・設標待ち ${open.length - proposed.length}`
       : "設標者の準備中";
   const rows = tasks.slice().reverse().slice(0, 15).map((t) => {
     const actions = t.status === "PROPOSED"
       ? `<button type="button" data-approve="${t.task_id}">了承</button><button type="button" class="ghost" data-reject="${t.task_id}">却下</button>` : "";
-    const when = t.status === "APPROVED" ? `到着 ${fmt(t.eta_s, 0)} s` : t.status === "DONE" ? `${t.done_tick} s 投入` : `${t.created_tick} s 提案`;
+    const plan = t.planned_tick != null ? `計画 ${t.planned_tick} s` : "すぐ";
+    const late = t.status === "DONE" && t.planned_tick != null ? `（${t.done_tick - t.planned_tick >= 0 ? "+" : ""}${t.done_tick - t.planned_tick} s）` : "";
+    const when = t.status === "APPROVED" ? `${plan}・あと ${fmt(t.eta_s, 0)} s` : t.status === "DONE" ? `${t.done_tick} s 投入${late}` : plan;
     const src = { forward: "自動", operator: "即時配置", manual: "手動配置" }[t.source] || t.source;
     return `<tr><td>${t.task_id}<br /><small>${src}</small></td><td>${TASK_STATUS[t.status] || t.status}</td>`
       + `<td>${Math.round(t.position.depth_ft)} Ft<br /><small>${when}</small></td><td>${actions}</td></tr>`;
@@ -710,10 +714,11 @@ $("drop-approval").addEventListener("change", () => {
 
 function deployReason(reason) {
   // optimal planner: "optimal (coverage): 2 observers, depths [..] Ft; predicted error horizontal a -> b YD, depth c -> d Ft"
-  const m = /^optimal \(([^)]+)\): (\d+) observers, depths \[([^\]]*)\] Ft; predicted error horizontal (\d+) -> (\d+) YD, depth (\d+) -> (\d+) Ft/.exec(reason || "");
+  const m = /^optimal \(([^)]+)\): (\d+) observers, depths \[([^\]]*)\] Ft; predicted error horizontal (\d+) -> (\d+) YD, depth (\d+) -> (\d+) Ft(?:; drop in \[([^\]]*)\] s)?/.exec(reason || "");
   if (!m) return reason;
   const why = { coverage: "探知範囲の不足", "information gain": "追尾精度の改善", "operator request": "操作員の指示" }[m[1]] || m[1];
-  return `最適配置（${why}）：${m[2]} 本・深度 ${m[3].split(/,\s*/).join("/")} Ft、予測誤差 水平 ${m[4]}→${m[5]} YD・深度 ${m[6]}→${m[7]} Ft`;
+  const times = m[8] ? `、投入 ${m[8].split(/,\s*/).map((t) => `${t} s 後`).join("/")}` : "";
+  return `最適配置（${why}）：${m[2]} 本・深度 ${m[3].split(/,\s*/).join("/")} Ft、予測誤差 水平 ${m[4]}→${m[5]} YD・深度 ${m[6]}→${m[7]} Ft${times}`;
 }
 
 $("deploy-now").addEventListener("click", async () => {
@@ -1874,6 +1879,7 @@ $("config-form").addEventListener("submit", (event) => {
 $("placement-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const body = { position: { latitude: num("place-lat"), longitude: num("place-lon"), depth_ft: num("place-depth") } };
+  if ($("place-time").value !== "") body.planned_tick = num("place-time");
   const response = await fetch("/api/observers/placements", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (response.ok) {
     const result = await response.json();
