@@ -63,7 +63,8 @@ def api_sample() -> dict:
 def containers() -> dict:
     try:
         out = subprocess.run(
-            ["docker", "compose", "ps", "-a", "--format", "json"], capture_output=True, text=True, timeout=30
+            ["docker", "compose", "ps", "-a", "--format", "json"], capture_output=True, text=True, timeout=30,
+            check=False,
         ).stdout
     except Exception as error:  # noqa: BLE001
         return {"error": repr(error)}
@@ -81,7 +82,7 @@ def logs_tail(service: str, lines: int = 40) -> str:
     try:
         return subprocess.run(
             ["docker", "compose", "logs", "--no-color", "--tail", str(lines), service],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=30, check=False,
         ).stdout
     except Exception as error:  # noqa: BLE001
         return repr(error)
