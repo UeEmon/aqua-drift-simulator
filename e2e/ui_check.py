@@ -447,10 +447,19 @@ def main() -> int:
             if not proposed or still < len(proposed):
                 fail(f"proposals should wait for the operator: {proposed}, still {still}")
             page.evaluate("() => document.getElementById('drop-approve-all').click()")
+            # timed drops: the layer keeps circling until it is time to leave (path-based timing),
+            # so right after approval it may still be in ORBIT
             page.wait_for_function("""() => { const d = window.aquaDrift.state.latestSnapshot.deployment;
-                return d.layer && d.layer.mode === 'TRANSIT' && d.tasks.every(t => t.status !== 'PROPOSED'); }""",
+                return d.layer && d.tasks.every(t => t.status !== 'PROPOSED'); }""",
                 timeout=30_000)
-            note(f"layer: {len(proposed)} proposals approved by the operator, layer in transit")
+            mode = page.evaluate("() => window.aquaDrift.state.latestSnapshot.deployment.layer.mode")
+            note(f"layer: {len(proposed)} proposals approved by the operator, layer {mode}")
+            # the planned flight path (飛行予定経路) is sent with the layer state and drawn dashed
+            page.wait_for_function("""() => { const l = window.aquaDrift.state.latestSnapshot.deployment.layer;
+                return l && Array.isArray(l.planned_path) && l.planned_path.length > 1; }""", timeout=15_000)
+            path_points = page.evaluate(
+                "() => window.aquaDrift.state.latestSnapshot.deployment.layer.planned_path.length")
+            note(f"layer: planned flight path {path_points} points (dashed)")
             banks = []
             for _ in range(10):
                 page.wait_for_timeout(1000)
