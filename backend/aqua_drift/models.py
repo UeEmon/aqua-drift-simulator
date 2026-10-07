@@ -457,6 +457,9 @@ class LayerState(BaseModel):
     orbit_center: Position | None = None
     orbit_radius_yd: float = 0.0
     eta_s: float | None = None
+    # planned flight path ahead (飛行予定経路): [latitude, longitude] from the current position
+    # through the open drop points in order, along the turn-limited guidance path
+    planned_path: list[tuple[float, float]] = Field(default_factory=list)
 
 
 class LayerUpdate(BaseModel):

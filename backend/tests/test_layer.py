@@ -4,7 +4,14 @@ import random
 import pytest
 
 from aqua_drift.deployment import _offset
-from aqua_drift.layer import advance, initial_state, orbit_radius_m, step, turn_radius_m
+from aqua_drift.layer import (
+    advance,
+    initial_state,
+    orbit_radius_m,
+    planned_path,
+    step,
+    turn_radius_m,
+)
 from aqua_drift.models import (
     DeploymentRequest,
     LayerConfig,
@@ -56,6 +63,24 @@ def test_layer_reaches_points_ahead_and_behind_with_bank_limit() -> None:
         # flight time is at least the straight distance at the leg speed
         assert task_id >= math.hypot(east, north) / (250 * 0.5144) - 2
 
+
+
+def test_planned_path_follows_the_turn_through_the_drop_points() -> None:
+    config = LayerConfig()
+    rng = random.Random(5)
+    start = initial_state(config, DATUM, 0, rng)
+    behind = _offset(start.position, -2000.0, -9000.0, 300.0)  # behind: the path turns first
+    further = _offset(behind, 8000.0, -3000.0, 300.0)
+    path = planned_path(start, config, [behind, further])
+    assert planned_path(start, config, []) == []
+    assert path[0] == (round(start.position.latitude, 5), round(start.position.longitude, 5))
+    assert path[-1] == (round(further.latitude, 5), round(further.longitude, 5))
+    assert (round(behind.latitude, 5), round(behind.longitude, 5)) in path
+    # a curved path, not straight legs: it starts along the current heading and turns
+    first = local_offset_m(start.position, Position(latitude=path[1][0], longitude=path[1][1], depth_ft=0.0))
+    heading = math.radians(start.heading_deg)
+    assert first[0] * math.sin(heading) + first[1] * math.cos(heading) > 0
+    assert len(path) > 10
 
 async def _layer_steps(sim: SimulationState, seconds: int, rng: random.Random, state=None):
     """What the layer container does every tick, in process."""

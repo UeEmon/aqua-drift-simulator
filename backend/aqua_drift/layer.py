@@ -365,6 +365,37 @@ def departure(state: LayerState, config: LayerConfig, point: Position, left: flo
     return "wait"
 
 
+PATH_STEP_S = 5.0  # sampling of the planned flight path (about 500 m at 200 kt)
+PATH_LEG_LIMIT_S = 1200.0  # longest leg drawn
+PATH_MAX_POINTS = 400
+
+
+def planned_path(state: LayerState, config: LayerConfig, points: list[Position]) -> list[tuple[float, float]]:
+    """Planned flight path (飛行予定経路) from the current state through the drop points in
+    order: the same turn-limited guidance as the flight (turn, then straight; a loop when a
+    point is inside the turning circle), simulated at the current speed in PATH_STEP_S steps.
+    The detours that take up early time on a timed leg are not predicted. Empty without points."""
+    if not points:
+        return []
+    probe = state.model_copy(update={"mode": "TRANSIT", "task_id": -1, "planned_path": []})
+    rng = random.Random(0)
+    path = [(round(probe.position.latitude, 5), round(probe.position.longitude, 5))]
+    for k, point in enumerate(points):
+        elapsed = 0.0
+        while elapsed < PATH_LEG_LIMIT_S and len(path) < PATH_MAX_POINTS:
+            probe, arrived = step(probe, config, point, -1 - k, point, rng, dt=PATH_STEP_S,
+                                  wanted_speed_kt=state.speed_kt)
+            elapsed += PATH_STEP_S
+            if arrived:
+                break
+            path.append((round(probe.position.latitude, 5), round(probe.position.longitude, 5)))
+        path.append((round(point.latitude, 5), round(point.longitude, 5)))
+        if len(path) >= PATH_MAX_POINTS:
+            break
+        probe = probe.model_copy(update={"position": point, "task_id": -1 - k})
+    return path
+
+
 def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[LayerState, LayerUpdate]:
     """Advance the layer from state.tick to feed.tick (1 s steps).
 
@@ -417,6 +448,9 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
             else:
                 state = state.model_copy(update={"mode": "HOLD", "task_id": task.task_id})
     state.tick = max(state.tick, feed.tick)
+    if not feed.config.paused:
+        open_points = [positions[t.task_id] for t in tasks if t.task_id not in completed]
+        state = state.model_copy(update={"planned_path": planned_path(state, feed.config, open_points)})
     eta: dict[int, float] = {}
     previous, elapsed = state.position, 0.0
     for task in (t for t in tasks if t.task_id not in completed):
