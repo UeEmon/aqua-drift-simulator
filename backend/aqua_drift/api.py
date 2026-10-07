@@ -15,6 +15,7 @@ from aqua_drift.models import (
     DeploymentRequest,
     DopplerBatch,
     DropDecision,
+    DropReorder,
     DropReschedule,
     DropTask,
     EstimationControl,
@@ -231,6 +232,19 @@ async def reschedule_drop(request: DropReschedule) -> DropTask:
         raise HTTPException(status_code=404, detail=f"no open drop task {request.task_id}")
     await store.append_event("drop_decision", state.tick, {"reschedule": request.model_dump()})
     return task
+
+
+@app.post("/api/drops/reorder", response_model=list[DropTask])
+async def reorder_drops(request: DropReorder) -> list[DropTask]:
+    """Operator changes the drop order (設標順) of the open drops; the drop times are planned
+    again along the new order. Returns the open drops in the new order."""
+    tasks = await state.reorder_tasks(request.task_ids)
+    if tasks is None:
+        raise HTTPException(status_code=404, detail=f"not all of {request.task_ids} are open drop tasks")
+    await store.append_event("drop_decision", state.tick, {
+        "reorder": [t.task_id for t in tasks], "planned_ticks": [t.planned_tick for t in tasks],
+    })
+    return tasks
 
 
 @app.get("/internal/layer-feed", response_model=LayerFeed)
