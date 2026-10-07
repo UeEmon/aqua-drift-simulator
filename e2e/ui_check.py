@@ -7,6 +7,7 @@ estimate puts the estimate at the screen centre. Writes screenshots and GitHub a
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -218,15 +219,14 @@ def main() -> int:
             for view in ("top", "side", "oblique"):
                 low, high = ranges[view]
                 page.evaluate(f"() => document.querySelector(\".vt[data-view='{view}']\").click()")
-                try:
+                # a timeout is reported below with the measured pitch
+                with contextlib.suppress(Exception):
                     page.wait_for_function(
                         f"""() => {{ const c = window.aquaDrift.viewer.camera;
                             const p = Cesium.Math.toDegrees(c.pitch);
                             return !c._currentFlight && p >= {low} && p <= {high}; }}""",
                         timeout=20_000,
                     )
-                except Exception:  # noqa: BLE001 - reported below with the measured pitch
-                    pass
                 page.wait_for_timeout(500)
                 pitch = page.evaluate("() => Cesium.Math.toDegrees(window.aquaDrift.viewer.camera.pitch)")
                 note(f"view {view}: camera pitch {pitch:.1f} deg")
@@ -235,10 +235,8 @@ def main() -> int:
                 page.screenshot(path=str(out / f"02-view-{view}.png"))
 
         def check_centred(label: str, limit: float, which: str = "estimate") -> None:
-            try:
+            with contextlib.suppress(Exception):
                 page.wait_for_function("() => !window.aquaDrift.viewer.camera._currentFlight", timeout=20_000)
-            except Exception:  # noqa: BLE001
-                pass
             pos = page.evaluate(CENTER_JS, which)
             name = "truth" if which == "truth" else "estimate"
             if pos is None:
@@ -376,12 +374,11 @@ def main() -> int:
             if start["checked"] or start["cfg"]:
                 fail(f"Lloyd's mirror should be off by default: {start}")
             page.evaluate("() => document.getElementById('lloyd-enabled').click()")
-            try:
+            # a timeout is reported below
+            with contextlib.suppress(Exception):
                 page.wait_for_function(
                     """() => { const l = window.aquaDrift.state.latestSnapshot.lloyd;
                         return l && l.enabled && l.status === 'OK'; }""", timeout=360_000, polling=2000)
-            except Exception:  # noqa: BLE001 - reported below
-                pass
             info = page.evaluate("""() => { const s = window.aquaDrift.state.latestSnapshot;
                 return { lloyd: s.lloyd, truth: s.target && s.target.position.depth_ft,
                          summary: document.getElementById('lloyd-summary').textContent,
@@ -554,8 +551,7 @@ def main() -> int:
         with open(summary, "a", encoding="utf-8") as handle:
             handle.write("## GIS E2E\n\n")
             handle.writelines(f"- {line}\n" for line in notes)
-            for line in failures:
-                handle.write(f"- ❌ {line}\n")
+            handle.writelines(f"- ❌ {line}\n" for line in failures)
     print("FAILURES:", len(failures))
     return 1 if failures else 0
 
