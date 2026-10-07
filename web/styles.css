@@ -146,6 +146,20 @@ button.secondary { width: 100%; color: #d7eaff; background: #203b54; }
 .badge { padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; }
 .badge.running { color: #062014; background: #5dff9d; }
 .badge.stopped { color: #e7f2ff; background: #4a5d70; }
+#clock-bar {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: #10243a;
+  border: 1px solid #20364b;
+  border-radius: 8px;
+}
+#clock-bar .badge.paused { color: #241a00; background: #ffc857; }
+.clock-presets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.clock-presets button { margin: 0; padding: 6px 4px; }
+.clock-presets button.active { color: #06111b; background: #67c8ff; }
+.clock-custom { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: end; }
 .run-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 button.danger { color: #fff; background: #c2453d; }
 button:disabled { opacity: 0.45; cursor: not-allowed; }

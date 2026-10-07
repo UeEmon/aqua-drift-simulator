@@ -1478,6 +1478,68 @@ $("est-stop").addEventListener("click", () => {
   postControl("/api/estimation/stop", "推定を停止しました（最後の推定結果を保持表示）。").catch((error) => setMessage(`推定停止エラー: ${error.message}`));
 });
 
+// ================================================================== simulation speed (time scale)
+const clock = { scale: 1, samples: [] };
+
+function formatScale(scale) {
+  return `${Number(scale.toFixed(2))}倍`;
+}
+
+function showClock(scale) {
+  clock.scale = scale;
+  const badge = $("clock-badge");
+  badge.textContent = scale > 0 ? `${formatScale(scale)}速` : "一時停止";
+  badge.className = `badge ${scale > 0 ? "running" : "paused"}`;
+  for (const button of document.querySelectorAll("[data-time-scale]")) {
+    button.classList.toggle("active", Number(button.dataset.timeScale) === scale);
+  }
+  if (document.activeElement !== $("time-scale")) $("time-scale").value = scale;
+  if (scale === 0) setText("clock-info", "実効 0倍（停止中）");
+}
+
+function noteClockTick(tick) {
+  // achieved speed = simulation seconds per wall second over the last ~5 s
+  const now = performance.now();
+  const samples = clock.samples;
+  if (samples.length && tick < samples[samples.length - 1].tick) samples.length = 0;
+  samples.push({ tick, now });
+  while (samples.length > 2 && now - samples[0].now > 5000) samples.shift();
+  const first = samples[0];
+  const span = (now - first.now) / 1000;
+  if (clock.scale === 0) setText("clock-info", "実効 0倍（停止中）");
+  else if (span >= 1.5) setText("clock-info", `実効 ${formatScale((tick - first.tick) / span)}`);
+}
+
+async function setTimeScale(scale) {
+  const response = await fetch("/api/clock", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ time_scale: scale }),
+  });
+  if (!response.ok) throw new Error(await response.text());
+  const settings = await response.json();
+  clock.samples.length = 0;
+  showClock(settings.time_scale);
+  setMessage(settings.time_scale > 0 ? `時間倍率を ${formatScale(settings.time_scale)} にしました。` : "シミュレーション時間を一時停止しました。");
+}
+
+function applyTimeScale(scale) {
+  if (!Number.isFinite(scale) || scale < 0 || scale > 100) {
+    setMessage("時間倍率は 0〜100 の数値で指定してください（0 で一時停止）。");
+    return;
+  }
+  setTimeScale(scale).catch((error) => setMessage(`時間倍率の変更エラー: ${error.message}`));
+}
+
+for (const button of document.querySelectorAll("[data-time-scale]")) {
+  button.addEventListener("click", () => applyTimeScale(Number(button.dataset.timeScale)));
+}
+$("clock-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  applyTimeScale(Number($("time-scale").value));
+});
+
+
 // ================================================================== comparison (cards, no horizontal scroll)
 function judge(error, sigma) {
   if (error == null || !Number.isFinite(error) || !(sigma > 0)) return { cls: "s-none", text: "" };
@@ -2021,6 +2083,8 @@ if (window.addEventListener) window.addEventListener("resize", drawCharts);
 function render(snapshot) {
   state.latestSnapshot = snapshot;
   setText("tick", snapshot.tick);
+  if (snapshot.time_scale != null && snapshot.time_scale !== clock.scale) showClock(snapshot.time_scale);
+  noteClockTick(snapshot.tick);
   populateForms(snapshot.config);
   updateRunState(snapshot);
   updateTruth(snapshot.target);
@@ -2050,6 +2114,7 @@ function render(snapshot) {
 function handleUpdate(result, bytes, parseMs) {
   const t0 = performance.now();
   applyTrackUpdates(result.tracks);
+  if (result.timeScale != null) showClock(result.timeScale); // speed changed while paused
   if (result.regionChanged) state.region = result.region;
   if (result.snapshot) {
     for (const estimate of result.snapshot.estimates) {

@@ -6,6 +6,7 @@ from collections import OrderedDict, deque
 from aqua_drift.deployment import default_position
 from aqua_drift.models import (
     BearingReport,
+    ClockStatus,
     CpaResult,
     CurrentEstimate,
     DeploymentFeed,
@@ -37,6 +38,8 @@ from aqua_drift.models import (
 )
 
 BATCH_RETENTION_TICKS = 900
+# above 1x the clock waits for the estimator when it falls this many ticks behind the newest batch
+ESTIMATOR_SLACK_TICKS = 10
 
 
 class ObserverRejected(RuntimeError):
@@ -50,6 +53,8 @@ class SimulationState:
         self.lock = asyncio.Lock()
         self.config = config or ScenarioConfig()
         self.tick = 0
+        self.time_scale = 1.0
+        self.estimator_tick = -1
         self.target: TargetState | None = None
         self.observers: OrderedDict[str, ObserverRecord] = OrderedDict()
         self.archived_observer_ids: list[str] = []  # "obs-03#1" = slot obs-03, session 1
@@ -88,6 +93,31 @@ class SimulationState:
     async def set_tick(self, tick: int) -> None:
         async with self.lock:
             self.tick = max(self.tick, tick)
+
+    async def set_time_scale(self, time_scale: float) -> None:
+        async with self.lock:
+            self.time_scale = time_scale
+
+    async def clock_status(self) -> ClockStatus:
+        async with self.lock:
+            return ClockStatus(tick=self.tick, time_scale=self.time_scale, synced=self._synced())
+
+    def _synced(self) -> bool:
+        """True when the target, every observer and the Doppler engine have published the current
+        tick and the estimator is not falling behind, so the next tick can start without any
+        container skipping an epoch."""
+        tick = self.tick
+        if self.target is None or self.target.tick < tick:
+            return False
+        if any(r.state.tick < tick for r in self.observers.values()):
+            return False
+        last_batch = self.batches[-1].tick if self.batches else -1
+        if self.observers and tick % self.config.doppler_interval_seconds == 0 and last_batch < tick:
+            return False
+        estimator_behind = self.estimator_tick < last_batch - ESTIMATOR_SLACK_TICKS
+        return not (
+            self.estimation.running and last_batch > self.estimation.started_tick and estimator_behind
+        )
 
     async def set_target(self, target: TargetState) -> None:
         async with self.lock:
@@ -430,6 +460,7 @@ class SimulationState:
             ]
             return EstimatorFeed(
                 tick=self.tick,
+                time_scale=self.time_scale,
                 generation=self.generation,
                 estimation=self.estimation,
                 settings=EstimatorSettings.from_config(self.config),
@@ -465,6 +496,7 @@ class SimulationState:
 
     async def set_estimator_output(self, output: EstimatorOutput) -> None:
         async with self.lock:
+            self.estimator_tick = max(self.estimator_tick, output.tick)
             if not self.estimation.running:
                 return  # late output from a stopped run
             self.estimates = output.estimates
@@ -477,6 +509,7 @@ class SimulationState:
             return Snapshot(
                 tick=self.tick,
                 generation=self.generation,
+                time_scale=self.time_scale,
                 deployment=self._deployment_status(),
                 estimation=self.estimation,
                 bearings=[
@@ -499,6 +532,7 @@ class SimulationState:
             return SimState(
                 tick=self.tick,
                 generation=self.generation,
+                time_scale=self.time_scale,
                 config=self.config,
                 target=self.target,
                 observers=list(self.observers.values()),

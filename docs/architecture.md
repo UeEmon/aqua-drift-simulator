@@ -9,7 +9,7 @@ The operator starts/stops the estimator; the GIS shows estimate and truth side b
 
 | Service | Role |
 |---|---|
-| `clock` | Shared 1 s time base |
+| `clock` | Shared 1 s time base; speed set by the operator (`PUT /api/clock`, 0 = pause, up to 100x). Above 1x a tick starts only after target, observers, Doppler engine and estimator finished the previous one, so the achieved rate is capped by the slowest of them (mostly the estimator) |
 | `target` | Constant HDG / through-water speed / depth; changes follow the configured rates (deg/s, kt/s, Ft/s); moved by the current |
 | `observer` (×1..100) | One observer per container; drifts with the water; exact time/position/depth. Start position from env, a queued placement (operator or forward deployment), or the default pattern for the first four; further containers wait in standby |
 | `current-field` | Truth affine current field `v(p) = a + G (p − p_ref)` |

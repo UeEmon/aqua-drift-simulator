@@ -42,7 +42,7 @@ async def run() -> None:
                 continue
             engine.apply_settings(feed.settings)
             if not feed.batches:
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(max(0.02, 0.2 / max(1.0, feed.time_scale)))
                 continue
             started = time.perf_counter()
             for batch in feed.batches:
