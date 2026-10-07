@@ -169,6 +169,17 @@ class ForwardDeploymentConfig(BaseModel):
     optimal_max_sigma_fraction: float = Field(default=0.15, gt=0)  # placement needs a converged track
     schedule_drops: bool = True  # plan the optimal drop time (else: as soon as possible)
     drop_lead_s: int = Field(default=60, ge=0, le=1800)  # in the water this long before detection starts
+    # maneuver-robust planning (optimal strategy): weighted course / speed / depth change
+    # hypotheses, process noise in the information recursion, risk (CVaR) and coverage terms
+    maneuver_weight: float = Field(default=0.4, ge=0, le=0.9)  # total weight of the maneuver hypotheses
+    maneuver_time_s: int = Field(default=600, ge=0, le=7200)  # hypothetical maneuver starts this far ahead
+    maneuver_depth_change_ft: float = Field(default=500.0, ge=0, le=1500)
+    process_velocity_sigma_kt: float = Field(default=0.5, ge=0, le=20)  # velocity drift per 10 min
+    process_depth_rate_sigma_fps: float = Field(default=0.2, ge=0, le=20)  # depth-rate drift per 10 min
+    risk_weight: float = Field(default=0.5, ge=0, le=5)  # weight of the worst-case (CVaR) term
+    risk_quantile: float = Field(default=0.2, gt=0, le=1)  # share of hypotheses in the worst case
+    coverage_loss_yd: float = Field(default=300.0, ge=0)  # error equivalent of a step with < min_coverage
+    use_detection_gate: bool = True  # value the detection start / end (slant range = R_max)
 
 
 class ObserverDeploymentConfig(BaseModel):
@@ -416,6 +427,12 @@ class DeploymentFeed(BaseModel):
     source_frequency_hz: float = 400.0  # operator's (recognized) source frequency
     sound_speed_mps: float = 1500.0
     frequency_sigma_hz: float = 0.03
+    # what the tracker measures besides the Doppler (the planner values the same measurements)
+    use_bearing: bool = True
+    bearing_sigma_deg: float = 15.0
+    bearing_interval_s: float = 15.0
+    range_gate_sigma_yd: float = 15.0
+    max_target_depth_ft: float = 1500.0
 
 
 class DropTask(BaseModel):

@@ -9,7 +9,7 @@ import httpx
 
 from aqua_drift.forward_deployment import plan_forward_deployment_scheduled
 from aqua_drift.models import DeploymentFeed, DeploymentRequest
-from aqua_drift.optimal_deployment import availability_from_feed
+from aqua_drift.optimal_deployment import availability_from_feed, sensor_from_feed
 from aqua_drift.services.common import API_URL, post, wait_for_api
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s deployer %(message)s")
@@ -40,6 +40,8 @@ async def run() -> None:
                 sound_speed_mps=feed.sound_speed_mps,
                 frequency_sigma_hz=feed.frequency_sigma_hz,
                 layer=availability_from_feed(feed),
+                sensor=sensor_from_feed(feed),
+                max_depth_ft=feed.max_target_depth_ft,
             )
             if positions:
                 request = DeploymentRequest(tick=feed.tick, positions=positions, reason=reason, planned_ticks=planned)

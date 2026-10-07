@@ -215,6 +215,11 @@ class SimulationState:
                 + self.config.source.shared_recognition_bias_hz,
                 sound_speed_mps=self.config.source.sound_speed_mps,
                 frequency_sigma_hz=self.config.estimator.model_frequency_sigma_hz,
+                use_bearing=self.config.estimator.use_bearing and self.config.bearing.enabled,
+                bearing_sigma_deg=self.config.estimator.bearing_sigma_deg,
+                bearing_interval_s=self.config.bearing.interval_s,
+                range_gate_sigma_yd=self.config.estimator.range_gate_softness_yd,
+                max_target_depth_ft=self.config.estimator.max_target_depth_ft,
                 **self._layer_availability(),
             )
 

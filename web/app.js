@@ -794,12 +794,15 @@ $("drop-approval").addEventListener("change", () => {
 });
 
 function deployReason(reason) {
-  // optimal planner: "optimal (coverage): 2 observers, depths [..] Ft; predicted error horizontal a -> b YD, depth c -> d Ft"
-  const m = /^optimal \(([^)]+)\): (\d+) observers, depths \[([^\]]*)\] Ft; predicted error horizontal (\d+) -> (\d+) YD, depth (\d+) -> (\d+) Ft(?:; drop in \[([^\]]*)\] s)?/.exec(reason || "");
+  // optimal planner: "optimal (coverage): 2 observers, depths [..] Ft; predicted error e -> f YD
+  // (horizontal a -> b YD, depth c -> d Ft, coverage gaps g -> h %); drop in [..] s; replanned after a maneuver .."
+  const m = /^optimal \(([^)]+)\): (\d+) observers, depths \[([^\]]*)\] Ft; predicted error (\d+) -> (\d+) YD \(horizontal (\d+) -> (\d+) YD, depth (\d+) -> (\d+) Ft, coverage gaps (\d+) -> (\d+) %\)(?:; drop in \[([^\]]*)\] s)?/.exec(reason || "");
   if (!m) return reason;
   const why = { coverage: "探知範囲の不足", "information gain": "追尾精度の改善", "operator request": "操作員の指示" }[m[1]] || m[1];
-  const times = m[8] ? `、投入 ${m[8].split(/,\s*/).map((t) => `${t} s 後`).join("/")}` : "";
-  return `最適配置（${why}）：${m[2]} 本・深度 ${m[3].split(/,\s*/).join("/")} Ft、予測誤差 水平 ${m[4]}→${m[5]} YD・深度 ${m[6]}→${m[7]} Ft${times}`;
+  const times = m[12] ? `、投入 ${m[12].split(/,\s*/).map((t) => `${t} s 後`).join("/")}` : "";
+  const replan = /replanned after a maneuver/.test(reason) ? "（機動を検出して再計画）" : "";
+  return `最適配置（${why}）${replan}：${m[2]} 本・深度 ${m[3].split(/,\s*/).join("/")} Ft、予測誤差 ${m[4]}→${m[5]} YD`
+    + `（水平 ${m[6]}→${m[7]} YD・深度 ${m[8]}→${m[9]} Ft・探知不足 ${m[10]}→${m[11]} %）${times}`;
 }
 
 $("deploy-now").addEventListener("click", async () => {
@@ -1839,6 +1842,8 @@ function populateForms(config) {
     $("fwd-depths").value = (f.depth_options_ft || []).join(", ");
     $("fwd-depth-weight").value = f.depth_weight;
     $("fwd-min-gain").value = Math.round((f.min_relative_gain || 0) * 100);
+    $("fwd-maneuver").value = Math.round((f.maneuver_weight ?? 0.4) * 100);
+    $("fwd-gate").checked = f.use_detection_gate ?? true;
   }
   $("use-bearing").checked = config.estimator.use_bearing;
   const lay = config.layer;
@@ -1942,6 +1947,8 @@ $("config-form").addEventListener("submit", (event) => {
     if (depths.length) next.forward.depth_options_ft = depths;
     next.forward.depth_weight = num("fwd-depth-weight");
     next.forward.min_relative_gain = num("fwd-min-gain") / 100;
+    next.forward.maneuver_weight = num("fwd-maneuver") / 100;
+    next.forward.use_detection_gate = $("fwd-gate").checked;
     next.lloyd.level_noise_db = num("lloyd-noise");
     next.lloyd.noise_correlation_s = num("lloyd-corr");
     next.lloyd.wave_height_rms_m = num("lloyd-wave");
