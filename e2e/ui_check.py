@@ -374,11 +374,13 @@ def main() -> int:
             if start["checked"] or start["cfg"]:
                 fail(f"Lloyd's mirror should be off by default: {start}")
             page.evaluate("() => document.getElementById('lloyd-enabled').click()")
-            # a timeout is reported below
+            # a timeout is reported below. The depth needs an observer whose path difference
+            # changes by more than a fringe inside the fit window (a close pass); when such an
+            # observer is laid depends on the deployment plan, so allow 10 min
             with contextlib.suppress(Exception):
                 page.wait_for_function(
                     """() => { const l = window.aquaDrift.state.latestSnapshot.lloyd;
-                        return l && l.enabled && l.status === 'OK'; }""", timeout=360_000, polling=2000)
+                        return l && l.enabled && l.status === 'OK'; }""", timeout=600_000, polling=2000)
             info = page.evaluate("""() => { const s = window.aquaDrift.state.latestSnapshot;
                 return { lloyd: s.lloyd, truth: s.target && s.target.position.depth_ft,
                          summary: document.getElementById('lloyd-summary').textContent,
@@ -387,7 +389,7 @@ def main() -> int:
             lloyd_result = info["lloyd"] or {}
             note(f"Lloyd's mirror: {info['summary']} | observers {[(o['observer_id'], o['status'], o['fringes']) for o in lloyd_result.get('observers', [])]}")
             if lloyd_result.get("status") != "OK":
-                fail(f"Lloyd's mirror depth not obtained within 6 min: {lloyd_result.get('status')} {info['summary']}")
+                fail(f"Lloyd's mirror depth not obtained within 10 min: {lloyd_result.get('status')} {info['summary']}")
             else:
                 error = lloyd_result["depth_ft"] - info["truth"]
                 online = info["online"]
