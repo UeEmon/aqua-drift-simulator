@@ -245,6 +245,11 @@
               <label>上限斜距離 (YD)<input id="max-range" type="number" min="100" step="100" required /></label>
               <label>観測者上限 (1–99)<input id="observer-limit" type="number" min="1" max="99" step="1" required /></label>
               <label>音源周波数 (Hz)<input id="source-frequency" type="number" min="1" step="0.1" required /></label>
+              <label title="線スペクトルの幅。観測者は線の中心を σ = 帯域幅/√12 の誤差で測る（0 で誤差なし）">帯域幅 (Hz)<input id="source-bandwidth" type="number" min="0" step="0.01" required /></label>
+              <label title="放射周波数の揺らぎ 1σ（全観測者に共通、伝搬遅延だけずれて届く。0 で一定）">安定度 σ (Hz)<input id="source-stability" type="number" min="0" step="0.001" required /></label>
+              <label title="放射周波数の揺らぎの相関時間">安定度の相関時間 (秒)<input id="source-stability-tau" type="number" min="1" step="1" required /></label>
+              <label class="span2" title="1 行に 1 つ：周波数 Hz, 帯域幅 Hz, 安定度 Hz（帯域幅・安定度は省略で 0）">追加の音源周波数（1 行に「周波数, 帯域幅, 安定度」）<textarea id="additional-tonals" rows="3" placeholder="800, 0.2, 0.01"></textarea></label>
+              <label class="check span2" title="観測者には r/c 秒前に目標が出した音が届く（変針・変速による変化の到達時間差が生じる）"><input id="propagation-delay" type="checkbox" />音の伝搬遅延を模擬する</label>
               <label>共通周波数認識偏り (Hz)<input id="frequency-bias" type="number" step="0.01" required /></label>
               <label class="check span2"><input id="bearing-enabled" type="checkbox" />方位観測を生成する</label>
               <label>方位誤差 σ (度)<input id="bearing-sigma" type="number" min="0.1" max="90" step="0.1" required /></label>
@@ -258,6 +263,8 @@
               <label class="check span2"><input id="use-bearing" type="checkbox" />推定に方位情報を使用する</label>
               <label>推定側の方位σ (度)<input id="est-bearing-sigma" type="number" min="0.1" max="90" step="0.1" required /></label>
               <label>推定側の偏り事前σ (Hz)<input id="bias-sigma" type="number" min="0" step="0.01" required /></label>
+              <label title="推定器が想定する放射周波数の揺らぎ 1σ（全観測者に共通の誤差として扱う）">推定側の周波数安定度 σ (Hz)<input id="est-stability" type="number" min="0" step="0.001" required /></label>
+              <label class="check span2" title="変針・変速でドップラーが変化し始める時刻の観測者間の差（伝搬遅延の差）を推定に使う（伝搬遅延の模擬が必要）"><input id="use-maneuver-timing" type="checkbox" />変針・変速の到達時間差を推定に使う</label>
               <label>存在確率 (%)<input id="probability" type="number" min="1" max="99.9" step="0.1" required /></label>
               <label>過去航跡再計算範囲 (秒)<input id="smoothing-window" type="number" min="1" max="10800" step="1" required /></label>
               <label>粒子数<input id="particles" type="number" min="500" max="50000" step="500" required /></label>

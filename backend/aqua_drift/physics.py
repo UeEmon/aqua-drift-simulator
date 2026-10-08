@@ -3,6 +3,7 @@ from __future__ import annotations
 import cmath
 import math
 import random
+from collections import deque
 
 from aqua_drift.models import (
     CurrentFieldConfig,
@@ -12,6 +13,7 @@ from aqua_drift.models import (
     Position,
     ScenarioConfig,
     TargetState,
+    TonalObservation,
     Velocity,
 )
 
@@ -216,30 +218,135 @@ class LevelNoise:
         return value
 
 
+class SourceSignal:
+    """What the target has emitted recently: its states (one per tick) and, per tonal, the
+    emitted-frequency fluctuation (first-order Gauss-Markov with stability_hz and
+    stability_correlation_s, one value per tick). With the propagation delay an observer
+    receives at t what the target emitted at t_e = t - r(t_e) / c."""
+
+    HISTORY_S = 180
+
+    def __init__(self, seed: int = 13) -> None:
+        self.rng = random.Random(seed)
+        self.states: deque[TargetState] = deque()
+        self.drift: dict[int, list[float]] = {}  # tick -> fluctuation per tonal [Hz]
+
+    def add(self, config: ScenarioConfig, target: TargetState) -> None:
+        if self.states and target.tick <= self.states[-1].tick:
+            return
+        tonals = config.source.tonals()
+        previous = self.drift.get(self.states[-1].tick) if self.states else None
+        steps = target.tick - self.states[-1].tick if self.states else 1
+        values = []
+        for index, tonal in enumerate(tonals):
+            sigma = tonal.stability_hz
+            if sigma <= 0:
+                values.append(0.0)
+                continue
+            if previous is None or index >= len(previous):
+                values.append(self.rng.gauss(0.0, sigma))
+                continue
+            a = math.exp(-steps / tonal.stability_correlation_s)
+            values.append(a * previous[index] + math.sqrt(1.0 - a * a) * self.rng.gauss(0.0, sigma))
+        self.states.append(target)
+        self.drift[target.tick] = values
+        while self.states and target.tick - self.states[0].tick > self.HISTORY_S:
+            self.drift.pop(self.states.popleft().tick, None)
+
+    def _bracket(self, t: float) -> tuple[TargetState, TargetState, float]:
+        states = self.states
+        if t <= states[0].tick:
+            return states[0], states[0], t - states[0].tick
+        if t >= states[-1].tick:
+            return states[-1], states[-1], t - states[-1].tick
+        index = min(int(t - states[0].tick), len(states) - 1)
+        while index > 0 and states[index].tick > t:
+            index -= 1
+        while index + 1 < len(states) and states[index + 1].tick <= t:
+            index += 1
+        first, second = states[index], states[index + 1]
+        return first, second, (t - first.tick) / (second.tick - first.tick)
+
+    def at(self, origin: Position, t: float) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+        """Target offset from `origin` (east, north, down m) and ground velocity (m/s) at time t
+        (linear between ticks; extrapolated with the velocity outside the history)."""
+        first, second, f = self._bracket(t)
+        v0, v1 = _velocity_mps(first.ground_velocity), _velocity_mps(second.ground_velocity)
+        o0 = local_offset_m(origin, first.position)
+        if first is second:  # f = seconds beyond the history
+            return tuple(o + v * f for o, v in zip(o0, v0, strict=True)), v0
+        o1 = local_offset_m(origin, second.position)
+        offset = tuple(a + (b - a) * f for a, b in zip(o0, o1, strict=True))
+        velocity = tuple(a + (b - a) * f for a, b in zip(v0, v1, strict=True))
+        return offset, velocity
+
+    def fluctuation(self, t: float, index: int) -> float:
+        first, second, f = self._bracket(t)
+        a = self.drift.get(first.tick, [])
+        b = self.drift.get(second.tick, [])
+        va = a[index] if index < len(a) else 0.0
+        vb = b[index] if index < len(b) else 0.0
+        return va if first is second else va + (vb - va) * f
+
+
+def _velocity_mps(velocity: Velocity) -> tuple[float, float, float]:
+    return (velocity.east_kt * KNOT_TO_MPS, velocity.north_kt * KNOT_TO_MPS, velocity.vertical_fps * FT_TO_M)
+
+
 def doppler_observation(
     config: ScenarioConfig,
     target: TargetState,
     observer: ObserverState,
     rng: random.Random | None = None,
     level_noise: LevelNoise | None = None,
+    signal: SourceSignal | None = None,
 ) -> tuple[DopplerObservation, DopplerTruth]:
-    """Synthesize one error-free Doppler sample (or a non-detection), a noisy horizontal
-    bearing every `bearing.interval_s` while detected, and the truth record."""
-    east_m, north_m, down_m = local_offset_m(observer.position, target.position)
+    """Synthesize one Doppler sample per tonal (or a non-detection), a noisy horizontal
+    bearing every `bearing.interval_s` while detected, and the truth record.
+
+    With `signal` and source.propagation_delay the observer hears what the target emitted at
+    t_e = t - r/c (position, velocity and frequency fluctuation at t_e), so a change of course
+    or speed reaches each observer after its own delay. Without a signal history the geometry
+    is instantaneous. Each tonal's line centre is measured with a normal error of
+    bandwidth / sqrt(12)."""
+    source = config.source
+    c = source.sound_speed_mps
+    delay = 0.0
+    if signal is not None and signal.states and source.propagation_delay:
+        for _ in range(4):
+            offset, velocity = signal.at(observer.position, target.tick - delay)
+            delay = math.sqrt(sum(v * v for v in offset)) / c
+        offset, velocity = signal.at(observer.position, target.tick - delay)
+    else:
+        offset = local_offset_m(observer.position, target.position)
+        velocity = _velocity_mps(target.ground_velocity)
+    east_m, north_m, down_m = offset
     slant_m = math.sqrt(east_m**2 + north_m**2 + down_m**2)
-    rel_e = (target.ground_velocity.east_kt - observer.ground_velocity.east_kt) * KNOT_TO_MPS
-    rel_n = (target.ground_velocity.north_kt - observer.ground_velocity.north_kt) * KNOT_TO_MPS
-    rel_d = (target.ground_velocity.vertical_fps - observer.ground_velocity.vertical_fps) * FT_TO_M
+    observer_v = _velocity_mps(observer.ground_velocity)
+    rel_e, rel_n, rel_d = (a - b for a, b in zip(velocity, observer_v, strict=True))
     relative_speed_mps = math.sqrt(rel_e**2 + rel_n**2 + rel_d**2)
     if slant_m < 1e-9:
         radial_away_mps = 0.0
     else:
         radial_away_mps = (east_m * rel_e + north_m * rel_n + down_m * rel_d) / slant_m
-    source = config.source.source_frequency_hz
-    observed = source * (1.0 - radial_away_mps / config.source.sound_speed_mps)
-    recognized = source + config.source.shared_recognition_bias_hz
     slant_yd = slant_m * M_TO_YD
     detected = slant_yd <= config.max_slant_range_yd
+    scale = 1.0 + source.shared_recognition_bias_hz / source.source_frequency_hz
+    tonals = []
+    for index, tonal in enumerate(source.tonals()):
+        observed = None
+        if detected:
+            emitted = tonal.frequency_hz
+            if signal is not None and tonal.stability_hz > 0:
+                emitted += signal.fluctuation(target.tick - delay, index)
+            observed = emitted * (1.0 - radial_away_mps / c)
+            if tonal.bandwidth_hz > 0:
+                observed += (rng or random).gauss(0.0, tonal.bandwidth_hz / math.sqrt(12.0))
+        tonals.append(TonalObservation(
+            recognized_frequency_hz=tonal.frequency_hz * scale,
+            observed_frequency_hz=observed,
+            bandwidth_hz=tonal.bandwidth_hz,
+        ))
     true_bearing = math.degrees(math.atan2(east_m, north_m)) % 360.0
     bearing = None
     b = config.bearing
@@ -248,7 +355,7 @@ def doppler_observation(
         bearing = (true_bearing + noise) % 360.0
     level = None
     if config.lloyd.enabled and detected:
-        level, _ = lloyd_mirror_level_db(config, target.position, observer.position, observed)
+        level, _ = lloyd_mirror_level_db(config, target.position, observer.position, tonals[0].observed_frequency_hz)
         if level_noise is not None:
             level += level_noise.sample(
                 observer.observer_id, config.lloyd.level_noise_db, config.lloyd.noise_correlation_s
@@ -258,9 +365,10 @@ def doppler_observation(
         tick=target.tick,
         observer_position=observer.position,
         detected=detected,
-        observed_frequency_hz=observed if detected else None,
-        recognized_frequency_hz=recognized,
+        observed_frequency_hz=tonals[0].observed_frequency_hz,
+        recognized_frequency_hz=tonals[0].recognized_frequency_hz,
         bearing_deg=bearing,
+        tonals=tonals,
         received_level_db=level,
     )
     truth = DopplerTruth(
@@ -270,5 +378,6 @@ def doppler_observation(
         relative_speed_kt=relative_speed_mps / KNOT_TO_MPS,
         relative_radial_speed_kt=-radial_away_mps / KNOT_TO_MPS,
         true_bearing_deg=true_bearing,
+        propagation_delay_s=delay,
     )
     return observation, truth

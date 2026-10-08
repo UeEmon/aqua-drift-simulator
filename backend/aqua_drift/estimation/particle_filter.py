@@ -29,6 +29,7 @@ from scipy import ndimage
 
 from aqua_drift.estimation.current_fit import CurrentFit
 from aqua_drift.estimation.frame import KNOT_TO_MPS, YD_TO_M
+from aqua_drift.estimation.maneuver_timing import TimingEvent, emission_times, timing_loglik
 from aqua_drift.estimation.move import (
     Epoch,
     EpochStore,
@@ -49,6 +50,8 @@ class ObservationRow:
     frequency: float | None
     recognized: float
     bearing: float | None = None  # radians, horizontal true bearing observer -> target
+    sigma_meas: float = 0.0  # frequency measurement error [Hz] (line bandwidth), per observer
+    sigma_drift: float = 0.0  # emitted-frequency fluctuation [Hz], common to every observer
 
 
 class DopplerParticleFilter:
@@ -74,6 +77,7 @@ class DopplerParticleFilter:
         move_mismatch_chi2: float = 4.0,
         use_bearing: bool = True,
         bearing_sigma_rad: float = math.radians(15.0),
+        propagation_delay: bool = False,
     ) -> None:
         self.n = particle_count
         self.max_range = max_range_m
@@ -92,6 +96,7 @@ class DopplerParticleFilter:
         self.move_mismatch_chi2 = move_mismatch_chi2
         self.use_bearing = use_bearing
         self.bearing_sigma = bearing_sigma_rad
+        self.delay = propagation_delay
         self.move_window_eff: float | None = None
         self.maneuver_cut_tick: int | None = None
         self.maneuver_detected_tick: int | None = None  # last time a maneuver was detected
@@ -260,13 +265,23 @@ class DopplerParticleFilter:
         self.x[deep, 5] = -np.abs(self.x[deep, 5])
 
     def log_likelihood(self, rows: list[ObservationRow]) -> np.ndarray:
+        """Doppler, range gate and bearing of one epoch. With the propagation delay the
+        geometry is taken at the emission time (position r/c earlier). The emitted-frequency
+        fluctuation is the same for every observer at the epoch, so it is marginalized as a
+        common offset (Sherman-Morrison) instead of being counted once per observer."""
         x = self.x
         pos = x[:, 0:3]
         ground = self.ground_v
         total = np.zeros(len(x))
+        chi2 = np.zeros(len(x))  # sum e^2 / v
+        cross = np.zeros(len(x))  # sum e s / v
+        common = 0.0  # sum s^2 / v
         for row in rows:
             los = pos - row.position
             dist = np.linalg.norm(los, axis=1)
+            if self.delay:
+                los = los - ground * (dist / self.c)[:, None]
+                dist = np.linalg.norm(los, axis=1)
             margin = (self.max_range - dist) / self.gate_soft
             if row.detected:
                 total += -np.logaddexp(0.0, -margin)  # log sigmoid(margin)
@@ -274,20 +289,31 @@ class DopplerParticleFilter:
                     unit = los / np.maximum(dist, 1e-6)[:, None]
                     rdot = np.sum((ground - row.velocity) * unit, axis=1)
                     f0 = row.recognized - x[:, 6]
-                    predicted = f0 * (1.0 - rdot / self.c)
-                    total += -0.5 * ((predicted - row.frequency) / self.sigma_f) ** 2
+                    error = f0 * (1.0 - rdot / self.c) - row.frequency
+                    variance = self.sigma_f**2 + row.sigma_meas**2
+                    chi2 += error * error / variance
+                    if row.sigma_drift > 0:
+                        cross += error * (row.sigma_drift / variance)
+                        common += row.sigma_drift**2 / variance
                 if self.use_bearing and row.bearing is not None:
                     predicted_b = np.arctan2(los[:, 0], los[:, 1])
                     diff = (predicted_b - row.bearing + np.pi) % (2 * np.pi) - np.pi
                     total += -0.5 * (diff / self.bearing_sigma) ** 2
             else:
                 total += -np.logaddexp(0.0, margin)  # log sigmoid(-margin)
-        return total
+        return total - 0.5 * (chi2 - cross * cross / (1.0 + common))
 
     def update(self, rows: list[ObservationRow], current: CurrentFit) -> dict[str, float]:
         """Progressive-correction update: split the likelihood into tempered stages so the
         (error-free, hence very sharp) Doppler likelihood never collapses the particle set."""
-        loglik = self.log_likelihood(rows)
+        info = self.assimilate(lambda: self.log_likelihood(rows), current)
+        self._push_history()
+        return info
+
+    def assimilate(self, loglik_fn, current: CurrentFit) -> dict[str, float]:
+        """Weight update by `loglik_fn()` (re-evaluated after each resample), in tempered
+        stages."""
+        loglik = loglik_fn()
         remaining = 1.0
         stages = 0
         while remaining > 1e-9 and stages < 8:
@@ -303,8 +329,7 @@ class DopplerParticleFilter:
                 self._apply_resample(index)
                 self._roughen(current)
                 if remaining > 1e-9:
-                    loglik = self.log_likelihood(rows)
-        self._push_history()
+                    loglik = loglik_fn()
         return {"stages": stages, "ess": self.ess()}
 
     def _choose_beta(self, loglik: np.ndarray, remaining: float) -> float:
@@ -407,6 +432,7 @@ class DopplerParticleFilter:
                     for r in rows
                 ]),
                 ids=tuple(r.observer_id for r in rows),
+                var=np.array([r.sigma_meas**2 + r.sigma_drift**2 for r in rows]),
             )
         )
 
@@ -421,6 +447,7 @@ class DopplerParticleFilter:
             max_depth=self.max_depth,
             bearing_sigma=self.bearing_sigma,
             depth_fix=self._active_depth_fix(),
+            delay=self.delay,
         )
 
     # ------------------------------------------------------------------ external depth fixes
@@ -456,8 +483,42 @@ class DopplerParticleFilter:
                 break
         return self.ess()
 
-    def move(self, current: CurrentFit, epochs: int = 60, starts: int = 8) -> dict[str, float]:
+    def timing_loglik(
+        self, states: np.ndarray, events: list[TimingEvent], current: CurrentFit
+    ) -> np.ndarray:
+        """Maneuver-timing log-likelihood of states at self.tick: the position at the maneuver
+        time is the state propagated back with its constant velocity (the change of velocity
+        since then moves it by metres, the timing resolves hundreds of metres)."""
+        total = np.zeros(len(states))
+        if not events:
+            return total
+        pos = states[:, 0:3]
+        ground = states[:, 3:6] + current.velocity(pos)
+        for event in events:
+            total += timing_loglik(
+                lambda t: pos - ground * (self.tick - t)[:, None], event, self.c, len(states)
+            )
+        return total
+
+    def assimilate_timing(self, event: TimingEvent, current: CurrentFit) -> dict[str, float]:
+        """Weight update by one maneuver-timing event."""
+        return self.assimilate(lambda: self.timing_loglik(self.x, [event], current), current)
+
+    def timing_emission(self, event: TimingEvent, current: CurrentFit) -> float:
+        """Weighted mean emission (maneuver) time of an event over the particles."""
+        pos = self.x[:, 0:3]
+        ground = self.x[:, 3:6] + current.velocity(pos)
+        _, t_m = emission_times(
+            lambda t: pos - ground * (self.tick - t)[:, None], event, self.c, self.n
+        )
+        return float(self.w @ t_m)
+
+    def move(
+        self, current: CurrentFit, epochs: int = 60, starts: int = 8,
+        timing: list[TimingEvent] | None = None,
+    ) -> dict[str, float]:
         """Optimization-assisted Metropolis-Hastings rejuvenation (see estimation/move.py).
+        Recent maneuver-timing events are part of the target distribution.
 
         The window is adaptive: if even the best constant-velocity fit is inconsistent with
         the data (a maneuver inside the window), the window is shortened; it then grows back
@@ -488,9 +549,16 @@ class DopplerParticleFilter:
             return np.linalg.norm(epoch.pos - nearest, axis=1) <= reach
 
         win = Window.build(now, sample, relevant)
+        timing = [e for e in timing or [] if e.first >= now - self.move_window_eff]
+
+        def loglik(states: np.ndarray) -> np.ndarray:
+            return window_loglik(states, win, current, prm) + self.timing_loglik(
+                states, timing, current
+            )
+
         if self.ess() < 0.999 * self.n:
             self._apply_resample(self._systematic_resample())
-        ll = window_loglik(self.x, win, current, prm)
+        ll = loglik(self.x)
         finite = np.isfinite(ll)
         order = np.argsort(np.where(finite, ll, -np.inf))[::-1]
         chosen: list[int] = []
@@ -519,7 +587,7 @@ class DopplerParticleFilter:
         if modes:
             mixture = GaussianMixture(modes)
             proposal = mixture.sample(self.n, self.rng)
-            ll_prop = window_loglik(proposal, win, current, prm)
+            ll_prop = loglik(proposal)
             with np.errstate(invalid="ignore"):
                 log_alpha = (ll_prop - ll) + (mixture.logpdf(self.x) - mixture.logpdf(proposal))
             log_alpha = np.where(np.isfinite(ll), log_alpha, np.where(np.isfinite(ll_prop), 0.0, -np.inf))
@@ -544,7 +612,7 @@ class DopplerParticleFilter:
         proposal = self.x + step
         if self.bias_sigma == 0:
             proposal[:, 6] = 0.0
-        ll_prop = window_loglik(proposal, win, current, prm)
+        ll_prop = loglik(proposal)
         with np.errstate(invalid="ignore"):
             delta = np.nan_to_num(ll_prop - ll, nan=-np.inf)
         accept = np.log(self.rng.uniform(size=self.n)) < delta

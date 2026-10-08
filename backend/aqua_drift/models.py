@@ -72,13 +72,48 @@ class CurrentFieldConfig(BaseModel):
         return value
 
 
+class Tonal(BaseModel):
+    """One line (tonal) of the target's acoustic signature.
+
+    * bandwidth_hz: width of the spectral line. The observer measures the line centre with a
+      normal error of 1 sigma = bandwidth / sqrt(12) (peak of a line of that width), independent
+      between observers and seconds. 0 = error-free.
+    * stability_hz: 1 sigma of the emitted-frequency fluctuation (first-order Gauss-Markov with
+      stability_correlation_s). It is emitted, so every observer receives the same fluctuation
+      (shifted by its propagation delay). 0 = constant frequency."""
+
+    frequency_hz: float = Field(gt=0)
+    bandwidth_hz: float = Field(default=0.0, ge=0)
+    stability_hz: float = Field(default=0.0, ge=0)
+    stability_correlation_s: float = Field(default=60.0, gt=0)
+
+
 class SourceFrequencyConfig(BaseModel):
-    """Source truth. The frequency is constant; the recognition bias is common to every
-    observer and does not change with time (its magnitude is a free scenario parameter)."""
+    """Source truth. The primary tonal is source_frequency_hz (with bandwidth_hz /
+    stability_hz); additional_tonals are further lines of the same source. The recognition bias
+    is common to every observer and does not change with time; it is given on the primary tonal
+    and applies to every tonal in proportion to its frequency (the source rate is misjudged).
+    With propagation_delay the sound reaching an observer at t left the target at t - r/c."""
 
     source_frequency_hz: float = Field(default=400.0, gt=0)
+    bandwidth_hz: float = Field(default=0.0, ge=0)
+    stability_hz: float = Field(default=0.0, ge=0)
+    stability_correlation_s: float = Field(default=60.0, gt=0)
+    additional_tonals: list[Tonal] = Field(default_factory=list, max_length=15)
     shared_recognition_bias_hz: float = 0.0
     sound_speed_mps: float = Field(default=1500.0, gt=0)
+    propagation_delay: bool = True
+    random_seed: int = 13  # frequency fluctuation (stability)
+
+    def tonals(self) -> list[Tonal]:
+        """Every tonal, the primary first."""
+        primary = Tonal(
+            frequency_hz=self.source_frequency_hz,
+            bandwidth_hz=self.bandwidth_hz,
+            stability_hz=self.stability_hz,
+            stability_correlation_s=self.stability_correlation_s,
+        )
+        return [primary, *self.additional_tonals]
 
 
 class BearingConfig(BaseModel):
@@ -293,6 +328,16 @@ class EstimatorConfig(BaseModel):
     lloyd_depth_step_ft: float = Field(default=2.0, ge=0.5, le=50)
     lloyd_model_error_pct: float = Field(default=3.0, ge=0, le=50)  # assumed sound-speed model error
     lloyd_noise_correlation_s: float = Field(default=20.0, ge=0, le=600)  # assumed
+    # assumed emitted-frequency fluctuation (1 sigma, on the primary tonal; the others in
+    # proportion): common to every observer, so it is not averaged out by more observers
+    assumed_stability_hz: float = Field(default=0.0, ge=0)
+    # time differences between observers of the Doppler change when the target maneuvers
+    # (the change reaches each observer after its own propagation delay r/c)
+    use_maneuver_timing: bool = True
+    maneuver_timing_window_s: int = Field(default=40, ge=15, le=300)  # kink fit window
+    maneuver_timing_chi2: float = Field(default=25.0, gt=0)  # kink detection threshold
+    maneuver_timing_min_slope_hz_s: float = Field(default=0.003, ge=0)  # smallest df/dt step
+    maneuver_timing_sigma_s: float = Field(default=0.3, ge=0)  # added onset-time error
 
 
 class ScenarioConfig(BaseModel):
@@ -324,6 +369,7 @@ class EstimatorSettings(BaseModel):
     sound_speed_mps: float
     estimator: EstimatorConfig
     lloyd_enabled: bool = False  # the on/off switch only; truth-side Lloyd parameters stay hidden
+    propagation_delay: bool = False  # sound travel time is part of the measurement model
 
     @classmethod
     def from_config(cls, config: ScenarioConfig) -> EstimatorSettings:
@@ -334,6 +380,7 @@ class EstimatorSettings(BaseModel):
             sound_speed_mps=config.source.sound_speed_mps,
             estimator=config.estimator,
             lloyd_enabled=config.lloyd.enabled,
+            propagation_delay=config.source.propagation_delay,
         )
 
 
@@ -408,6 +455,15 @@ class OrchestratorFeed(BaseModel):
     initial_remaining: int
 
 
+class TonalObservation(BaseModel):
+    """One tonal as an observer measures it: the line centre (with the bandwidth error) and the
+    line width it sees; recognized_frequency_hz is the observer's belief of the emitted line."""
+
+    recognized_frequency_hz: float
+    observed_frequency_hz: float | None = None  # None while not detected
+    bandwidth_hz: float = 0.0
+
+
 class DopplerObservation(BaseModel):
     """What an observer actually measures at a synchronized 1 s epoch.
 
@@ -422,6 +478,8 @@ class DopplerObservation(BaseModel):
     observed_frequency_hz: float | None = None
     recognized_frequency_hz: float  # observer's belief of the source frequency (biased)
     bearing_deg: float | None = None  # horizontal true bearing with error (every interval_s)
+    # every tonal (the primary first; observed_ / recognized_frequency_hz repeat the primary)
+    tonals: list[TonalObservation] = Field(default_factory=list)
     # received level of the tonal [dB] (direct + surface-reflected path), only while detected
     # and only when the optional Lloyd's mirror calculation is enabled
     received_level_db: float | None = None
@@ -436,6 +494,7 @@ class DopplerTruth(BaseModel):
     relative_speed_kt: float
     relative_radial_speed_kt: float
     true_bearing_deg: float = 0.0
+    propagation_delay_s: float = 0.0  # sound travel time from the target (emission) to here
 
 
 class DopplerBatch(BaseModel):

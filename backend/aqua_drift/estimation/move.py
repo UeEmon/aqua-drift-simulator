@@ -39,6 +39,7 @@ class Epoch:
     rec: np.ndarray  # (R,)
     brg: np.ndarray | None = None  # (R,) radians, nan where no bearing
     ids: tuple[str, ...] = ()
+    var: np.ndarray | None = None  # (R,) frequency variance beyond the model error [Hz^2]
     transition: bool = False  # some observer changed detected/not-detected here (or next)
 
 
@@ -55,6 +56,7 @@ class MoveParams:
     # current depth measurement (metres, sigma) from the optional Lloyd's mirror fit; part of
     # the resample-move target so that the rejuvenation keeps the depth information
     depth_fix: tuple[float, float] | None = None
+    delay: bool = False  # the received sound left the target r/c earlier
 
 
 class EpochStore:
@@ -114,6 +116,7 @@ class Window:
     has_doppler: bool
     brg: np.ndarray | None = None  # (K,) radians (0 where none)
     w_brg: np.ndarray | None = None  # (K,) 1 where a bearing exists
+    var: np.ndarray | None = None  # (K,) frequency variance beyond the model error [Hz^2]
 
     @classmethod
     def build(
@@ -124,7 +127,7 @@ class Window:
     ) -> Window:
         """`relevant(epoch) -> bool mask` drops non-detecting rows that cannot affect any
         particle (observer far beyond max range of the whole particle cloud)."""
-        dt, pos, vel, det, freq, rec, wd, brg, wb = [], [], [], [], [], [], [], [], []
+        dt, pos, vel, det, freq, rec, wd, brg, wb, var = [], [], [], [], [], [], [], [], [], []
         for epoch, weight in sample:
             keep = epoch.det | (relevant(epoch) if relevant is not None else True)
             keep = np.broadcast_to(keep, epoch.det.shape)
@@ -138,6 +141,7 @@ class Window:
             freq.append(np.where(epoch.det[keep], epoch.freq[keep], 0.0))
             rec.append(epoch.rec[keep])
             wd.append(np.where(epoch.det[keep], weight, 0.0))
+            var.append(epoch.var[keep] if epoch.var is not None else np.zeros(k))
             b = epoch.brg[keep] if epoch.brg is not None else np.full(k, np.nan)
             has = np.isfinite(b)
             brg.append(np.where(has, b, 0.0))
@@ -158,6 +162,7 @@ class Window:
             has_doppler=bool(np.any(w_dop > 0)),
             brg=np.concatenate(brg),
             w_brg=np.concatenate(wb),
+            var=np.concatenate(var),
         )
 
 
@@ -173,10 +178,11 @@ def _subset(win: Window, cols: np.ndarray) -> Window:
 
 
 def _geometry(
-    states: np.ndarray, win: Window, current: CurrentFit
+    states: np.ndarray, win: Window, current: CurrentFit, delay_c: float | None = None
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """(los (M,K,3), dist (M,K), rdot (M,K)) with positions back-propagated to each row time
-    under constant through-water velocity in the linear current (2nd order in the gradient)."""
+    under constant through-water velocity in the linear current (2nd order in the gradient).
+    With delay_c (sound speed) the position is taken at the emission time, r/c before the row."""
     p = states[:, 0:3]
     u = states[:, 3:6]
     g = u + current.velocity(p)  # (M,3)
@@ -185,9 +191,15 @@ def _geometry(
     q = p[:, None, :] - g[:, None, :] * dt + 0.5 * dt * dt * gg[:, None, :]
     gq = g[:, None, :] - gg[:, None, :] * dt
     los = q - win.pos[None, :, :]
+    if delay_c:
+        los -= gq * (np.linalg.norm(los, axis=2) / delay_c)[:, :, None]
     dist = np.linalg.norm(los, axis=2)
     rdot = np.sum((gq - win.vel[None, :, :]) * los, axis=2) / np.maximum(dist, 1e-6)
     return los, dist, rdot
+
+
+def _sigma2(win: Window, prm: MoveParams) -> np.ndarray | float:
+    return prm.sigma_f**2 + (win.var if win.var is not None else 0.0)
 
 
 def window_loglik(
@@ -197,18 +209,20 @@ def window_loglik(
     prm: MoveParams,
 ) -> np.ndarray:
     total = np.empty(len(states))
+    delay_c = prm.c if prm.delay else None
+    sigma2 = _sigma2(win, prm)
     chunk = int(max(64, LOGLIK_CHUNK_ELEMENTS // max(len(win.dt), 1)))
     for begin in range(0, len(states), chunk):
         part = states[begin : begin + chunk]
-        _, dist, rdot = _geometry(part, win, current)
+        _, dist, rdot = _geometry(part, win, current, delay_c)
         margin = (prm.max_range - dist) / prm.gate_soft
         gate = np.where(win.det[None, :], -np.logaddexp(0.0, -margin), -np.logaddexp(0.0, margin))
         pred = (win.rec[None, :] - part[:, 6:7]) * (1.0 - rdot / prm.c)
-        dop = win.w_dop[None, :] * ((pred - win.freq[None, :]) / prm.sigma_f) ** 2
+        dop = win.w_dop[None, :] * (pred - win.freq[None, :]) ** 2 / sigma2
         total[begin : begin + chunk] = gate.sum(axis=1) - 0.5 * dop.sum(axis=1)
         if win.w_brg is not None and win.w_brg.any():
             cols = win.w_brg > 0
-            los, _, _ = _geometry(part, _subset(win, cols), current)
+            los, _, _ = _geometry(part, _subset(win, cols), current, delay_c)
             diff = _wrap(np.arctan2(los[..., 0], los[..., 1]) - win.brg[cols][None, :])
             total[begin : begin + chunk] -= 0.5 * np.sum((diff / prm.bearing_sigma) ** 2, axis=1)
     if prm.bias_sigma > 0:
@@ -222,20 +236,21 @@ def window_loglik(
 
 
 def _residuals(x: np.ndarray, win: Window, current: CurrentFit, prm: MoveParams) -> np.ndarray:
-    _, dist, rdot = _geometry(x[None, :], win, current)
+    delay_c = prm.c if prm.delay else None
+    _, dist, rdot = _geometry(x[None, :], win, current, delay_c)
     dist, rdot = dist[0], rdot[0]
     margin = (prm.max_range - dist) / prm.gate_soft
     soft = np.where(win.det, np.logaddexp(0.0, -margin), np.logaddexp(0.0, margin))
     pred = (win.rec - x[6]) * (1.0 - rdot / prm.c)
     if win.w_brg is not None and win.w_brg.any():
-        los, _, _ = _geometry(x[None, :], win, current)
+        los, _, _ = _geometry(x[None, :], win, current, delay_c)
         diff = _wrap(np.arctan2(los[0, :, 0], los[0, :, 1]) - win.brg)
         bearing_part = win.w_brg * diff / prm.bearing_sigma
     else:
         bearing_part = np.zeros(0)
     parts = [
         np.sqrt(2.0 * soft),
-        np.sqrt(win.w_dop) * (pred - win.freq) / prm.sigma_f,
+        np.sqrt(win.w_dop / _sigma2(win, prm)) * (pred - win.freq),
         bearing_part,
         np.array([x[6] / prm.bias_sigma if prm.bias_sigma > 0 else 0.0]),
         np.array([max(0.0, float(np.hypot(x[3], x[4])) - prm.max_speed) * 100.0]),

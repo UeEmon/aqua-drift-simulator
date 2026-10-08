@@ -20,11 +20,13 @@ from aqua_drift.estimation.frame import (
     LocalFrame,
 )
 from aqua_drift.estimation.lloyd import LloydDepthEstimator, LloydFitSettings
+from aqua_drift.estimation.maneuver_timing import ManeuverTiming
 from aqua_drift.estimation.particle_filter import DopplerParticleFilter, ObservationRow
 from aqua_drift.estimation.region import presence_region
 from aqua_drift.models import (
     CurrentEstimate,
     DopplerBatch,
+    DopplerObservation,
     EstimateMode,
     EstimatorOutput,
     EstimatorSettings,
@@ -47,6 +49,40 @@ def _circular_mean_std(angles_rad: np.ndarray, weights: np.ndarray) -> tuple[flo
     mean = math.degrees(math.atan2(s, c)) % 360.0
     std = math.degrees(math.sqrt(max(-2.0 * math.log(max(resultant, 1e-12)), 0.0)))
     return mean, std
+
+
+def fused_frequency(
+    obs: DopplerObservation, model_sigma_hz: float, stability_hz: float
+) -> tuple[float | None, float, float, float]:
+    """All tonals of one observation as one measurement of the primary tonal:
+    (frequency, recognized, measurement sigma, fluctuation sigma).
+
+    Every tonal carries the same Doppler factor (1 - rdot / c) and the recognition bias is in
+    proportion to the frequency, so tonal k times f1 / fk measures the primary line. They are
+    combined with inverse-variance weights (line bandwidth error, model error, the assumed
+    fluctuation in proportion to the frequency, independent between tonals)."""
+    recognized = obs.recognized_frequency_hz
+    if not obs.tonals:
+        return obs.observed_frequency_hz, recognized, 0.0, stability_hz
+    values, meas, drift = [], [], []
+    for tonal in obs.tonals:
+        if tonal.observed_frequency_hz is None:
+            continue
+        scale = recognized / tonal.recognized_frequency_hz
+        values.append(tonal.observed_frequency_hz * scale)
+        meas.append((tonal.bandwidth_hz / math.sqrt(12.0) * scale) ** 2)
+        drift.append(stability_hz**2)  # stability_hz * fk / f1, in primary units
+    if not values:
+        return None, recognized, 0.0, stability_hz
+    meas_v, drift_v = np.array(meas), np.array(drift)
+    weights = 1.0 / (meas_v + drift_v + model_sigma_hz**2)
+    weights /= weights.sum()
+    return (
+        float(weights @ np.array(values)),
+        recognized,
+        float(math.sqrt(weights**2 @ meas_v)),
+        float(math.sqrt(weights**2 @ drift_v)),
+    )
 
 
 def _thin(points: list[TrackPoint]) -> list[TrackPoint]:
@@ -76,8 +112,23 @@ class TrackingEngine:
         self.reinitializations = 0
         self.lloyd = LloydDepthEstimator()
         self.lloyd_result: LloydDepthEstimate | None = None
+        self.timing = self._new_timing()
+        self.timing_applied = 0
+        self.timing_rejected = 0
 
     # ------------------------------------------------------------------ settings
+    def _timing_args(self) -> tuple:
+        e = self.settings.estimator
+        return (e.maneuver_timing_window_s, e.maneuver_timing_chi2, e.maneuver_timing_sigma_s,
+                e.maneuver_timing_min_slope_hz_s, self.settings.max_slant_range_yd * YD_TO_M,
+                self.settings.sound_speed_mps)
+
+    def _new_timing(self) -> ManeuverTiming:
+        return ManeuverTiming(*self._timing_args())
+
+    def _timing_enabled(self) -> bool:
+        return self.settings.propagation_delay and self.settings.estimator.use_maneuver_timing
+
     def _new_filter(self) -> DopplerParticleFilter:
         e = self.settings.estimator
         pf = DopplerParticleFilter(
@@ -99,6 +150,7 @@ class TrackingEngine:
             move_mismatch_chi2=e.move_mismatch_chi2,
             use_bearing=e.use_bearing,
             bearing_sigma_rad=math.radians(e.bearing_sigma_deg),
+            propagation_delay=self.settings.propagation_delay,
         )
         pf.configure_history(self.settings.smoothing_window_seconds, e.track_store_slots)
         return pf
@@ -129,6 +181,8 @@ class TrackingEngine:
         pf.move_mismatch_chi2 = e.move_mismatch_chi2
         pf.use_bearing = e.use_bearing
         pf.bearing_sigma = math.radians(e.bearing_sigma_deg)
+        pf.delay = settings.propagation_delay
+        self.timing.configure(*self._timing_args())
         pf.configure_history(settings.smoothing_window_seconds, e.track_store_slots)
 
     # ------------------------------------------------------------------ processing
@@ -173,24 +227,36 @@ class TrackingEngine:
                 self.settings.estimator.current_gradient_ridge,
             )
         rows: list[ObservationRow] = []
+        e = self.settings.estimator
+        timing = self._timing_enabled()
         for obs in batch.observations:
             point = self.frame.to_local(obs.observer_position)
             velocity = self.current_estimator.observer_velocity(obs.observer_id)
             if velocity is None:
                 velocity = self.current_fit.velocity(point[None])[0]
+            frequency, recognized, sigma_meas, sigma_drift = fused_frequency(
+                obs, e.model_frequency_sigma_hz, e.assumed_stability_hz
+            )
+            if not obs.detected:
+                frequency = None
             rows.append(
                 ObservationRow(
                     observer_id=obs.observer_id,
                     position=point,
                     velocity=velocity,
                     detected=obs.detected,
-                    frequency=obs.observed_frequency_hz,
-                    recognized=obs.recognized_frequency_hz,
+                    frequency=frequency,
+                    recognized=recognized,
                     bearing=(
                         math.radians(obs.bearing_deg) if obs.bearing_deg is not None else None
                     ),
+                    sigma_meas=sigma_meas,
+                    sigma_drift=sigma_drift,
                 )
             )
+            if timing:
+                self.timing.add(batch.tick, obs.observer_id, frequency,
+                                math.hypot(sigma_meas, sigma_drift), point)
             self.cpa.add(
                 obs.observer_id,
                 batch.tick,
@@ -240,9 +306,13 @@ class TrackingEngine:
             else:
                 self.update_info = self.pf.update(rows, self.current_fit)
             est = self.settings.estimator
+            for event in self.timing.step(batch.tick) if timing else []:
+                if self.pf.initialized:
+                    self._apply_timing(event)
             if self.pf.initialized and batch.tick % est.move_interval_s == 0:
                 self.update_info.update(
-                    self.pf.move(self.current_fit, est.move_epochs, est.move_starts)
+                    self.pf.move(self.current_fit, est.move_epochs, est.move_starts,
+                                 [ev for ev in self.timing.events if ev.used] if timing else None)
                 )
 
         self._lloyd_step(batch.tick)
@@ -254,6 +324,35 @@ class TrackingEngine:
         if self.pf.initialized and batch.tick % self.pf.hist_stride == 0:
             self.online_track.append(self._track_point())
             self.online_track = _thin(self.online_track)
+
+    # ------------------------------------------------------------------ maneuver timing
+    TIMING_GATE_CHI2_PER_PAIR = 9.0
+
+    def _apply_timing(self, event) -> None:
+        """Weight update by a maneuver-timing event when some part of the particle cloud can
+        explain its time differences; otherwise (a false kink, a change of the source rather
+        than of the motion seen by only some observers) it is discarded."""
+        loglik = self.pf.timing_loglik(self.pf.x, [event], self.current_fit)
+        best = float(-2.0 * loglik.max())
+        if best > self.TIMING_GATE_CHI2_PER_PAIR * (len(event.onsets) - 1):
+            event.used = False
+            self.timing_rejected += 1
+            return
+        self.pf.assimilate_timing(event, self.current_fit)
+        self.timing_applied += 1
+
+    def _timing_meta(self) -> dict:
+        if not self._timing_enabled():
+            return {"enabled": False}
+        events = list(self.timing.events)
+        last = events[-1] if events else None
+        return {
+            "enabled": True,
+            "events_applied": self.timing_applied,
+            "events_rejected": self.timing_rejected,
+            "last_event": None if last is None else {
+                **last.summary(), "used": last.used},
+        }
 
     # ------------------------------------------------------------------ Lloyd's mirror depth
     LLOYD_MAX_TRACK_SIGMA_M = 150.0
@@ -385,6 +484,7 @@ class TrackingEngine:
             "observation_inputs": (
                 "Doppler frequency, detection flag, observer time/position/depth"
                 + (", horizontal bearing" if e.use_bearing else "")
+                + (", maneuver timing differences" if self._timing_enabled() else "")
                 + (", received level (Lloyd's mirror depth)" if self.settings.lloyd_enabled else "")
             ),
             "detectable_time_s": self.detectable_time_s(),
@@ -393,6 +493,7 @@ class TrackingEngine:
             "history_stride_s": self.pf.hist_stride,
             "reinitializations": self.reinitializations,
             "maneuver_detected_tick": self.pf.maneuver_detected_tick,
+            "maneuver_timing": self._timing_meta(),
         }
         if not self.pf.initialized or self.frame is None:
             estimates = [
