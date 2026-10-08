@@ -38,7 +38,8 @@ SCENARIOS: dict[str, list[tuple[int, float | None, float | None, float | None]]]
 }
 
 
-def run_one(scenario: str, seed: int, bearing: bool, seconds: int, particles: int) -> dict:
+def run_one(scenario: str, seed: int, bearing: bool, seconds: int, particles: int,
+            forward: dict | None = None) -> dict:
     from aqua_drift.models import ScenarioConfig
     from aqua_drift.scenario import ScenarioRun
 
@@ -49,6 +50,8 @@ def run_one(scenario: str, seed: int, bearing: bool, seconds: int, particles: in
     config.bearing.random_seed = 11 + 101 * seed
     config.lloyd.random_seed = 23 + 101 * seed
     config.layer.random_seed = 31 + 101 * seed
+    for key, value in (forward or {}).items():
+        setattr(config.forward, key, value)
     events = {tick: rest for tick, *rest in SCENARIOS[scenario]}
     run = ScenarioRun(config, 4, forward=True)
     horizontal, depth, detecting, sigma, times = [], [], [], [], []
@@ -154,10 +157,13 @@ def main() -> None:
     parser.add_argument("--particles", type=int, default=2000)
     parser.add_argument("--bearing", choices=["both", "on", "off"], default="both")
     parser.add_argument("--jobs", type=int, default=1)
+    parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                        help="override a forward-deployment setting (repeatable)")
     parser.add_argument("--out", default=None, help="per-run series as JSON lines (resumes from it)")
     args = parser.parse_args()
     modes = {"both": [True, False], "on": [True], "off": [False]}[args.bearing]
-    jobs = [(s, seed, b, args.seconds, args.particles)
+    forward = {k: json.loads(v) for k, v in (item.split("=", 1) for item in args.set)}
+    jobs = [(s, seed, b, args.seconds, args.particles, forward)
             for s in args.scenarios.split(",") for b in modes for seed in range(args.seeds)]
     results: list[dict] = []
     done: set[tuple] = set()
