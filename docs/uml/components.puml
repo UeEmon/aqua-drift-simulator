@@ -1,35 +1,38 @@
 @startuml
-title AQUA-DRIFT Component Diagram
+title AQUA-DRIFT Component Diagram (Docker containers)
 left to right direction
 skinparam componentStyle rectangle
 
-component "simulation-clock" as Clock
-component "target-simulator" as Target
-component "observer-001..100" as Observer
-component "current-field" as Field
-component "doppler-engine" as Doppler
-component "estimator\n(online / smoothed)" as Estimator
-database "PostgreSQL + PostGIS" as DB
-component "API / WebSocket" as API
-component "CesiumJS / CZML" as GIS
+node "Docker Compose network: aqua-drift" {
+  component "clock\n(1 s synchronized tick)" as Clock
+  component "target\n(constant HDG/STW/depth,\nrate-limited changes)" as Target
+  component "observer × 1..100\n(one container each,\npassive drift)" as Observer
+  component "current-field\n(affine truth field)" as Field
+  component "doppler\n(acoustic source / Doppler + bearing)" as Doppler
+  component "estimator\n(PF + resample-move + CPA)" as Estimator
+  component "deployer\n(forward / 前程 deployment\nfrom the estimate)" as Deployer
+  component "layer\n(設標者: flies to approved\ndrop points, lays observers)" as Layer
+  component "api\n(FastAPI, WebSocket,\nsingle DB writer)" as API
+  database "db\nPostgreSQL + PostGIS\n(immutable event history)" as DB
+  component "web\n(nginx + CesiumJS,\nNatural Earth II offline)" as GIS
+}
 
-Clock --> Target : synchronized 1 s tick
-Clock --> Observer : synchronized 1 s tick
-Field --> Target : affine current
-Field --> Observer : passive drift
-Target --> Doppler : synthetic truth
-Observer --> Doppler : exact position/depth
-Doppler --> Estimator : Doppler observation
-Observer --> Estimator : position/depth history
-Estimator --> API
-Target --> API
-Observer --> API
+Clock --> API : POST /internal/clock
+Target --> Field : GET /vector
+Observer --> Field : GET /vector
+Target --> API : POST /internal/target (truth)
+Observer --> API : GET assignment / POST state
+Doppler --> API : GET /internal/sim-state\nPOST /internal/doppler (obs + truth)
+Estimator --> API : GET /internal/estimator-feed\n(observations only)\nPOST /internal/estimate
 API --> DB
-API --> GIS : WebSocket snapshot
+Deployer --> API : GET /internal/deployment-feed\n(estimates only)\nPOST /internal/deploy
+Layer --> API : GET /internal/layer-feed\nPOST /internal/layer
+GIS --> API : /api/* , /ws
 
 note bottom of Estimator
-No bearing information is used.
-Absolute position is not asserted
-when it is unobservable.
+Inputs: time, exact observer position/depth,
+Doppler frequency, detected flag,
+recognized source frequency, bearing (σ15°, 15 s).
+No range, no truth. Start/stop by operator.
 end note
 @enduml

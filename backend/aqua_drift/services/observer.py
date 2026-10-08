@@ -1,64 +1,89 @@
+"""Observer container (one per observer). It moves only with the water (passive drift) and
+knows its time, position and depth exactly. Initial position: OBSERVER_LAT/LON/DEPTH_FT env,
+otherwise assigned by the API (queued placement, else the default pattern for the first
+deployment.initial_count observers). Further containers wait as standby observers until the
+forward deployment places them ahead of the estimated target."""
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import math
 import os
 import socket
 
 import httpx
 
-from aqua_drift.models import ObserverState, Position, ScenarioConfig, Velocity
+from aqua_drift.models import ObserverState, Position, ScenarioConfig
 from aqua_drift.physics import advance_observer
-from aqua_drift.services.common import current_vector, post, snapshot, wait_for_api
+from aqua_drift.services.common import (
+    API_URL,
+    current_vector,
+    poll_interval,
+    post,
+    snapshot,
+    wait_for_api,
+)
 
 
-def observer_identity() -> tuple[str, float]:
-    observer_id = os.getenv("OBSERVER_ID", socket.gethostname())
-    digest = hashlib.sha256(observer_id.encode()).digest()
-    angle = int.from_bytes(digest[:2], "big") / 65535.0 * 2.0 * math.pi
-    return observer_id, angle
-
-
-def initial_state(observer_id: str, angle: float, config: ScenarioConfig, tick: int) -> ObserverState:
-    origin = config.target.initial_position
-    radius_nm = float(os.getenv("OBSERVER_RADIUS_NM", "2.0"))
-    north_nm = radius_nm * math.cos(angle)
-    east_nm = radius_nm * math.sin(angle)
-    latitude = origin.latitude + north_nm / 60.0
-    longitude = origin.longitude + east_nm / max(60.0 * math.cos(math.radians(origin.latitude)), 1e-8)
-    depth = float(os.getenv("OBSERVER_DEPTH_FT", str(100.0 + (angle / (2 * math.pi)) * 300.0)))
-    return ObserverState(
-        observer_id=observer_id,
-        tick=tick,
-        position=Position(latitude=latitude, longitude=longitude, depth_ft=depth),
-        ground_velocity=Velocity(),
-    )
+async def initial_position(client: httpx.AsyncClient, observer_id: str) -> tuple[Position, int] | None:
+    """Fixed position from env, otherwise ask the API. HTTP 204 means standby: keep waiting
+    until the forward deployment (or the operator) queues a placement. Returns None when the
+    standby timeout passes (the container then exits and frees its memory)."""
+    lat, lon = os.getenv("OBSERVER_LAT"), os.getenv("OBSERVER_LON")
+    if lat and lon:
+        return Position(
+            latitude=float(lat),
+            longitude=float(lon),
+            depth_ft=float(os.getenv("OBSERVER_DEPTH_FT", "200")),
+        ), 0
+    timeout = float(os.getenv("OBSERVER_STANDBY_TIMEOUT_S", "0"))  # 0 = wait forever
+    waited = 0.0
+    while True:
+        response = await client.get(
+            f"{API_URL}/internal/observer/assignment", params={"observer_id": observer_id}, timeout=5
+        )
+        response.raise_for_status()
+        if response.status_code == 200:
+            data = response.json()
+            return Position.model_validate(data), int(data.get("session", 0))
+        if timeout and waited >= timeout:
+            return None
+        await asyncio.sleep(1.0)
+        waited += 1.0
 
 
 async def run() -> None:
-    observer_id, angle = observer_identity()
+    observer_id = os.getenv("OBSERVER_ID") or socket.gethostname()
     async with httpx.AsyncClient(trust_env=False) as client:
         await wait_for_api(client)
         state: ObserverState | None = None
         last_tick = -1
+        generation = None
         while True:
             data = await snapshot(client)
             tick = int(data["tick"])
             config = ScenarioConfig.model_validate(data["config"])
+            if generation is not None and data.get("generation") != generation:
+                state = None  # runtime reset: return to the assigned start position
+            generation = data.get("generation")
             if state is None:
-                state = initial_state(observer_id, angle, config, tick)
+                start = await initial_position(client, observer_id)
+                if start is None:
+                    return  # standby timeout: nothing to do, free the container
+                position, session = start
+                state = ObserverState(
+                    observer_id=observer_id, tick=tick, position=position, session=session
+                )
+                last_tick = tick - 1
             if tick > last_tick:
-                elapsed = max(1, tick - max(last_tick, 0))
+                elapsed = max(1, tick - last_tick)
                 current = await current_vector(client, config, state.position)
                 state = advance_observer(config, state, elapsed, current)
                 state.tick = tick
                 response = await post(client, "/internal/observer", state.model_dump(mode="json"))
                 if response.status_code == 410:
-                    return
+                    return  # evicted or 3 h limit reached: slot is freed for reuse
                 response.raise_for_status()
                 last_tick = tick
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(poll_interval(data))
 
 
 if __name__ == "__main__":

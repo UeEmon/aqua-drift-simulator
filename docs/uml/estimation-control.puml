@@ -1,0 +1,10 @@
+@startuml
+title Estimation run control
+[*] --> Running : startup (ESTIMATION_AUTOSTART=true)
+[*] --> Stopped : startup (ESTIMATION_AUTOSTART=false)
+Running --> Stopped : POST /api/estimation/stop\n(last estimate kept, shown frozen)
+Stopped --> Running : POST /api/estimation/start\n(new run_id, uses observations from now)
+Running --> Running : POST /api/reset\n(scenario restarts from target initial state,\nnew run_id)
+Running : estimator processes the observation feed
+Stopped : estimator idle; simulation (truth, observers) keeps running
+@enduml

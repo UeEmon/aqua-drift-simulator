@@ -1,27 +1,41 @@
 @startuml
-title AQUA-DRIFT Synchronized Processing
+title AQUA-DRIFT Synchronized Processing (every 1 s)
 participant Clock
+participant API
 participant Target
-participant Field
-participant Observer
-participant Doppler
+participant "Observer ×N" as Observer
+participant "Current field" as Field
+participant "Doppler engine" as Doppler
 participant Estimator
-database Store
+database DB
+participant "Cesium GIS" as GIS
 
-loop every 1 second
-  Clock -> Target : tick
-  Field -> Target : current vector
-  Target -> Target : rate-limited update
-  Clock -> Observer : tick
-  Field -> Observer : passive drift vector
-  Observer -> Doppler : exact position/depth
-  Target -> Doppler : synthetic state
-  alt slant range <= Rmax
-    Doppler -> Estimator : Doppler observation
-    Estimator -> Store : online estimate
-  else outside range
-    Doppler -> Store : no-detection event
-  end
+Clock -> API : tick k
+par
+  Target -> API : sim-state
+  Target -> Field : current at target
+  Target -> Target : rate-limited HDG/STW/depth, move with current
+  Target -> API : target state (truth)
+else
+  Observer -> API : sim-state
+  Observer -> Field : current at observer
+  Observer -> Observer : drift with water
+  Observer -> API : exact position/depth/time
 end
-Estimator -> Store : smoothed estimate for configured window
+Doppler -> API : wait until target & all observers at tick k
+Doppler -> Doppler : slant range ≤ R_max ? frequency (+ bearing every 15 s) : non-detection
+Doppler -> API : DopplerBatch (observations + truth)
+API -> DB : events
+Estimator -> API : estimator-feed (observations only, run control)
+alt estimation stopped
+  Estimator -> Estimator : idle (last estimate stays displayed)
+end
+Estimator -> Estimator : current-field fit (detectable time)
+Estimator -> Estimator : PF predict / update
+alt every move_interval_s
+  Estimator -> Estimator : resample-move (LM + MH, adaptive window)
+end
+Estimator -> Estimator : CPA analysis, HDR region,\nONLINE / SMOOTHED tracks
+Estimator -> API : EstimatorOutput
+API -> GIS : WebSocket snapshot (1 Hz)
 @enduml

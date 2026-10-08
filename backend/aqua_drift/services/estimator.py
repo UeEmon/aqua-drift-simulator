@@ -1,104 +1,65 @@
+"""Estimator container: pulls observation-only feed, runs the tracking engine, publishes
+ONLINE (past track not updated) and SMOOTHED (past track updated) estimates."""
 from __future__ import annotations
 
 import asyncio
-from statistics import fmean
+import logging
+import time
 
 import httpx
 
-from aqua_drift.models import (
-    DopplerObservation,
-    EstimateMode,
-    ObserverRecord,
-    PresenceRegion,
-    PresenceRegionComponent,
-    ScenarioConfig,
-    TrackEstimate,
-)
-from aqua_drift.services.common import post, snapshot, wait_for_api
+from aqua_drift.estimation.engine import TrackingEngine
+from aqua_drift.models import EstimatorFeed
+from aqua_drift.services.common import API_URL, post, wait_for_api
 
-
-def build_estimate(data: dict, mode: EstimateMode) -> TrackEstimate:
-    config = ScenarioConfig.model_validate(data["config"])
-    tick = int(data["tick"])
-    minimum_tick = (
-        max(0, tick - config.smoothing_window_seconds)
-        if mode == EstimateMode.SMOOTHED
-        else tick
-    )
-    observers = {
-        record.state.observer_id: record.state
-        for record in (ObserverRecord.model_validate(item) for item in data["observers"])
-    }
-    latest: dict[str, DopplerObservation] = {}
-    closest: dict[str, DopplerObservation] = {}
-    for raw in data["doppler"]:
-        item = DopplerObservation.model_validate(raw)
-        if item.tick < minimum_tick:
-            continue
-        latest[item.observer_id] = item
-        previous_closest = closest.get(item.observer_id)
-        if mode == EstimateMode.SMOOTHED and (
-            previous_closest is None or item.slant_range_yd < previous_closest.slant_range_yd
-        ):
-            closest[item.observer_id] = item
-    selected = closest if mode == EstimateMode.SMOOTHED else latest
-    components = []
-    speeds = []
-    for observer_id, observation in selected.items():
-        observer = observers.get(observer_id)
-        if not observer:
-            continue
-        speeds.append(observation.relative_speed_kt)
-        components.append(
-            PresenceRegionComponent(
-                observer_id=observer_id,
-                center=observer.position,
-                radius_yd=observation.slant_range_yd,
-                description="Range-only candidate shell; direction data is unavailable.",
-            )
-        )
-    status = "NO_OBSERVATION" if not components else "UNOBSERVABLE_WITHOUT_DIRECTION"
-    return TrackEstimate(
-        mode=mode,
-        tick=tick,
-        observability_status=status,
-        relative_speed_kt=fmean(speeds) if speeds else None,
-        presence_region=PresenceRegion(
-            probability_pct=config.presence_probability_pct,
-            components=components,
-            disconnected=len(components) > 1,
-        ),
-        metadata={
-            "direction_input_available": False,
-            "smoothing_window_seconds": (
-                config.smoothing_window_seconds if mode == EstimateMode.SMOOTHED else 0
-            ),
-            "note": "Absolute horizontal position is intentionally not asserted without direction data.",
-        },
-    )
+logging.basicConfig(level=logging.INFO, format="%(asctime)s estimator %(message)s")
+log = logging.getLogger(__name__)
 
 
 async def run() -> None:
+    engine: TrackingEngine | None = None
+    run_key: tuple[int, int] | None = None
     last_tick = -1
     async with httpx.AsyncClient(trust_env=False) as client:
         await wait_for_api(client)
         while True:
-            data = await snapshot(client)
-            tick = int(data["tick"])
-            if tick <= last_tick:
-                await asyncio.sleep(0.2)
+            response = await client.get(
+                f"{API_URL}/internal/estimator-feed", params={"after_tick": last_tick}, timeout=10
+            )
+            response.raise_for_status()
+            feed = EstimatorFeed.model_validate(response.json())
+            control = feed.estimation
+            if not control.running:
+                engine, run_key = None, None  # stopped: discard; a start begins a new run
+                last_tick = max(last_tick, feed.tick)
+                await asyncio.sleep(0.5)
                 continue
-            if not any(int(item["tick"]) == tick for item in data["doppler"]):
-                await asyncio.sleep(0.2)
+            key = (feed.generation, control.run_id)
+            if engine is None or key != run_key:
+                engine = TrackingEngine(feed.settings)
+                run_key = key
+                last_tick = control.started_tick  # only observations after the start
                 continue
-            for mode in (EstimateMode.ONLINE, EstimateMode.SMOOTHED):
-                estimate = build_estimate(data, mode)
-                response = await post(
-                    client, "/internal/estimate", estimate.model_dump(mode="json")
+            engine.apply_settings(feed.settings)
+            if not feed.batches:
+                await asyncio.sleep(max(0.02, 0.2 / max(1.0, feed.time_scale)))
+                continue
+            started = time.perf_counter()
+            for batch in feed.batches:
+                engine.process(batch)
+                last_tick = batch.tick
+            output = engine.output()
+            posted = await post(client, "/internal/estimate", output.model_dump(mode="json"))
+            posted.raise_for_status()
+            if last_tick % 60 == 0:
+                log.info(
+                    "tick=%s status=%s batches=%s %.0f ms",
+                    last_tick,
+                    output.estimates[0].observability_status,
+                    len(feed.batches),
+                    (time.perf_counter() - started) * 1000,
                 )
-                response.raise_for_status()
-            last_tick = tick
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.05)
 
 
 if __name__ == "__main__":

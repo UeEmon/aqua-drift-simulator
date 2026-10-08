@@ -24,8 +24,14 @@ async def wait_for_api(client: httpx.AsyncClient) -> None:
         await asyncio.sleep(1)
 
 
+def poll_interval(data: dict[str, Any], base: float = 0.1) -> float:
+    """Polling period of a tick-driven container: shorter when the simulation runs faster."""
+    scale = float(data.get("time_scale", 1.0) or 1.0)
+    return max(0.01, base / max(1.0, scale))
+
+
 async def snapshot(client: httpx.AsyncClient) -> dict[str, Any]:
-    response = await client.get(f"{API_URL}/api/snapshot", timeout=5)
+    response = await client.get(f"{API_URL}/internal/sim-state", timeout=5)
     response.raise_for_status()
     return response.json()
 
