@@ -54,6 +54,10 @@ class ObserverRejected(RuntimeError):
     """Raised when an observer can no longer publish active observations."""
 
 
+class StaleGeneration(RuntimeError):
+    """Raised for a post computed for a run that a runtime reset has since replaced."""
+
+
 class SimulationState:
     def __init__(
         self, config: ScenarioConfig | None = None, autostart_estimation: bool = True
@@ -130,8 +134,14 @@ class SimulationState:
             self.estimation.running and last_batch > self.estimation.started_tick and estimator_behind
         )
 
-    async def set_target(self, target: TargetState) -> None:
+    def _check_generation(self, generation: int | None) -> None:
+        """Reject a post computed before the last runtime reset (None: not tagged, accepted)."""
+        if generation is not None and generation != self.generation:
+            raise StaleGeneration(f"generation {generation} replaced by {self.generation}")
+
+    async def set_target(self, target: TargetState, generation: int | None = None) -> None:
         async with self.lock:
+            self._check_generation(generation)
             if self.target is None or target.tick >= self.target.tick:
                 self.target = target
 
@@ -216,11 +226,14 @@ class SimulationState:
         return sum(1 for last in self.standby.values() if self.tick - last <= 10)
 
     # ---------------------------------------------------------------- forward deployment
-    async def queue_deployment(self, request: DeploymentRequest, source: str = "forward") -> DeploymentRecord:
+    async def queue_deployment(
+        self, request: DeploymentRequest, source: str = "forward", generation: int | None = None
+    ) -> DeploymentRecord:
         """A deployment plan. With the layer enabled every point becomes a drop task that is
         proposed to the operator (approved at once in automatic approval mode); the observer is
         in the water when the layer reaches the point. Without the layer: queued at once."""
         async with self.lock:
+            self._check_generation(generation)
             planned = request.planned_ticks or [None] * len(request.positions)
             for position, planned_tick in zip(request.positions, planned, strict=False):
                 if self.config.layer.enabled:
@@ -239,6 +252,7 @@ class SimulationState:
         async with self.lock:
             return DeploymentFeed(
                 tick=self.tick,
+                generation=self.generation,
                 config=self.config.forward,
                 max_slant_range_yd=self.config.max_slant_range_yd,
                 depth_step_ft=self.config.deployment.depth_step_ft,
@@ -425,9 +439,10 @@ class SimulationState:
                 wind_estimate=self.wind_estimates[-1] if self.wind_estimates else None,
             )
 
-    async def set_layer_update(self, update: LayerUpdate) -> list[int]:
+    async def set_layer_update(self, update: LayerUpdate, generation: int | None = None) -> list[int]:
         """Layer position every tick; drop points drift; reached points become observers."""
         async with self.lock:
+            self._check_generation(generation)
             self.layer_state = update.state
             done = []
             by_id = {t.task_id: t for t in self.tasks}
@@ -479,12 +494,13 @@ class SimulationState:
                 task.position = drop.splash_position
                 task.miss_yd = estimate.miss_yd
 
-    async def set_observer(self, observer: ObserverState) -> str | None:
+    async def set_observer(self, observer: ObserverState, generation: int | None = None) -> str | None:
         """Register/update an observer. When a new observer exceeds the limit (1..99) the
         oldest is evicted; each observer may observe for at most max_observation_seconds.
         Evicted / expired observers are archived and their history is kept; posts from an
         ended session (a container that should have stopped) are rejected."""
         async with self.lock:
+            self._check_generation(generation)
             observer_id = observer.observer_id
             current = self.sessions.setdefault(observer_id, observer.session)
             if self._session_key(observer_id, observer.session) in self._archived_set:
@@ -519,8 +535,9 @@ class SimulationState:
             return self.observers[observer_id].model_copy()
 
     # ---------------------------------------------------------------- observations
-    async def add_batch(self, batch: DopplerBatch) -> None:
+    async def add_batch(self, batch: DopplerBatch, generation: int | None = None) -> None:
         async with self.lock:
+            self._check_generation(generation)
             if self.batches and batch.tick <= self.batches[-1].tick:
                 return
             active = set(self.observers)
@@ -579,8 +596,13 @@ class SimulationState:
                 )
             return self.estimation
 
-    async def set_estimator_output(self, output: EstimatorOutput) -> None:
+    async def set_estimator_output(
+        self, output: EstimatorOutput, generation: int | None = None, run_id: int | None = None
+    ) -> None:
         async with self.lock:
+            self._check_generation(generation)
+            if run_id is not None and run_id != self.estimation.run_id:
+                raise StaleGeneration(f"estimation run {run_id} replaced by {self.estimation.run_id}")
             self.estimator_tick = max(self.estimator_tick, output.tick)
             if not self.estimation.running:
                 return  # late output from a stopped run
@@ -626,20 +648,23 @@ class SimulationState:
     async def reset_runtime(self, replace_observers: bool = True) -> None:
         """Restart the scenario from the configured initial target state. Observers return
         to their start points; default-placed observers are re-placed around the (possibly
-        new) initial target position. Event history in the database is retained."""
+        new) initial target position. Everything computed in the old run is dropped: the
+        estimates, queued and flown drops (their points drifted with the old estimated current
+        and were timed on the old run), the layer, the wind estimates. Posts the containers
+        computed for the old run arrive with the old generation and are rejected
+        (StaleGeneration), so no old position or estimate leaks into the new run. Event history
+        in the database is retained."""
         async with self.lock:
             self.generation += 1
             self.target = None
             self.batches.clear()
             self.bearings.clear()
-            # automatic (forward) placements belong to the old run; operator placements stay
-            self.placements = deque(p for p in self.placements if p.source == "manual")
+            self.placements.clear()
             self.deploy_history.clear()
             self.last_deploy_tick = None
-            # automatic drop plans belong to the old run; operator placements are still flown
-            self.tasks = [t for t in self.tasks if t.source == "manual" and t.status == "APPROVED"]
+            self.tasks = []
             self.layer_state = None
-            self.falling = [entry for entry in self.falling if entry[1] == "manual"]
+            self.falling = []
             self.wind_estimates.clear()
             self.standby.clear()
             if replace_observers:
@@ -651,6 +676,7 @@ class SimulationState:
                 self.estimation = EstimationControl(
                     running=True, run_id=self.estimation.run_id + 1, started_tick=self.tick
                 )
+            self.estimator_tick = -1
             self.estimates = []
             self.cpa = []
             self.current_estimate = None

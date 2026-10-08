@@ -545,6 +545,7 @@ class DeploymentFeed(BaseModel):
     """What the deployer may see: estimates and observer positions only (no truth)."""
 
     tick: int
+    generation: int = 0
     config: ForwardDeploymentConfig
     max_slant_range_yd: float
     depth_step_ft: float

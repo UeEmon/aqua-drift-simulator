@@ -33,7 +33,7 @@ async def run() -> None:
                 current = await current_vector(client, config, state.position)
                 state = advance_target(config, state, elapsed, current)
                 state.tick = tick
-                response = await post(client, "/internal/target", state.model_dump(mode="json"))
+                response = await post(client, "/internal/target", state.model_dump(mode="json"), generation)
                 response.raise_for_status()
                 last_tick = tick
             await asyncio.sleep(poll_interval(data))

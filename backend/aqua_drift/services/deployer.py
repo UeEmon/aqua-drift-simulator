@@ -45,7 +45,7 @@ async def run() -> None:
             )
             if positions:
                 request = DeploymentRequest(tick=feed.tick, positions=positions, reason=reason, planned_ticks=planned)
-                result = await post(client, "/internal/deploy", request.model_dump(mode="json"))
+                result = await post(client, "/internal/deploy", request.model_dump(mode="json"), feed.generation)
                 result.raise_for_status()
                 log.info("tick=%s deployed %d observers (%s); the orchestrator starts their containers",
                          feed.tick, len(positions), reason)

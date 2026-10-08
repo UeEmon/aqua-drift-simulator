@@ -38,13 +38,13 @@ async def run() -> None:
                 await asyncio.sleep(poll_interval(data))
                 continue
             config = ScenarioConfig.model_validate(data["config"])
-            if rng is None:
-                rng = random.Random(config.bearing.random_seed)
-            if level_noise is None:
-                level_noise = LevelNoise(config.lloyd.random_seed)
             target = TargetState.model_validate(data["target"])
             if signal is None or data.get("generation") != generation:
-                signal = SourceSignal(config.source.random_seed)  # runtime reset: new run
+                # first epoch or runtime reset: a new run starts from scratch (emitted history,
+                # bearing / level noise streams from their seeds)
+                rng = random.Random(config.bearing.random_seed)
+                level_noise = LevelNoise(config.lloyd.random_seed)
+                signal = SourceSignal(config.source.random_seed)
                 generation = data.get("generation")
             signal.add(config, target)
             records = [ObserverRecord.model_validate(item) for item in data["observers"]]
@@ -61,7 +61,7 @@ async def run() -> None:
                     observations.append(obs)
                     truth.append(tr)
                 batch = DopplerBatch(tick=tick, observations=observations, truth=truth)
-                response = await post(client, "/internal/doppler", batch.model_dump(mode="json"))
+                response = await post(client, "/internal/doppler", batch.model_dump(mode="json"), generation)
                 response.raise_for_status()
             last_tick = tick
             await asyncio.sleep(poll_interval(data))

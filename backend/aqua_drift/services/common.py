@@ -36,8 +36,16 @@ async def snapshot(client: httpx.AsyncClient) -> dict[str, Any]:
     return response.json()
 
 
-async def post(client: httpx.AsyncClient, path: str, payload: dict[str, Any]) -> httpx.Response:
-    return await client.post(f"{API_URL}{path}", json=payload, timeout=5)
+async def post(
+    client: httpx.AsyncClient, path: str, payload: dict[str, Any], generation: int | None = None,
+    **params: Any,
+) -> httpx.Response:
+    """POST to the API. With `generation` (the run the payload was computed for) the API
+    ignores the post when a runtime reset started a new run in the meantime, so nothing of
+    the previous run (old target / observer positions, old estimates) leaks into the new one."""
+    if generation is not None:
+        params["generation"] = generation
+    return await client.post(f"{API_URL}{path}", json=payload, params=params or None, timeout=5)
 
 
 async def current_vector(

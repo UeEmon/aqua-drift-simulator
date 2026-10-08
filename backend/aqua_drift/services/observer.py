@@ -78,7 +78,7 @@ async def run() -> None:
                 current = await current_vector(client, config, state.position)
                 state = advance_observer(config, state, elapsed, current)
                 state.tick = tick
-                response = await post(client, "/internal/observer", state.model_dump(mode="json"))
+                response = await post(client, "/internal/observer", state.model_dump(mode="json"), generation)
                 if response.status_code == 410:
                     return  # evicted or 3 h limit reached: slot is freed for reuse
                 response.raise_for_status()
