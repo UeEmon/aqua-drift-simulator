@@ -51,8 +51,9 @@ Documentation:
 - **Clock**: times are shown as clock time (HH:MM:SS, browser local time) = system time of tick 0 +
   tick. The clock container schedules each tick from the system time, so at 1x the simulation
   time stays on the system time; drop times are entered as HH:MM:SS
-- **設標者 / 風・外力 panel (map, bottom left)**: the layer's state (mode, position, altitude, speed,
-  heading, ground speed and track, bank, arrival time, next drop) and the wind at its flight
+- **設標者 panel (map, bottom left)**: the layer's state (mode, position, altitude, speed,
+  heading, ground speed and track, bank, arrival time, next drop)
+- **風・外力 panel (map, bottom right, above the camera readout)**: the wind at the layer's flight
   altitude, the mean wind used to correct the release points and the external force (current)
   fitted from the observers' drift; the same three are drawn as arrows on the map (toggles in
   表示・観測者)

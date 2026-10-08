@@ -66,9 +66,12 @@
             <label><input id="show-fps" type="checkbox" />FPS</label>
           </div>
         </div>
-        <pre id="camera-hud" aria-label="視点カメラ情報"></pre>
+        <div id="right-huds">
+          <div id="force-info" class="map-panel" aria-label="風・外力" hidden><table><tbody></tbody></table></div>
+          <pre id="camera-hud" aria-label="視点カメラ情報"></pre>
+        </div>
         <pre id="perf-hud" hidden></pre>
-        <div id="map-info" aria-label="設標者の状態と風・外力" hidden><table><tbody></tbody></table></div>
+        <div id="layer-info" class="map-panel" aria-label="設標者の状態" hidden><table><tbody></tbody></table></div>
         <div id="status-strip">
           <span id="connection-status">接続中</span>
           <span title="シミュレーション時刻（システム時刻基準。等倍ではシステム時刻と一致）">時刻 <strong id="clock-time">--:--:--</strong><span id="tick" hidden>0</span></span>

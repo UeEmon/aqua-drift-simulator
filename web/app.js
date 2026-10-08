@@ -949,7 +949,8 @@ function currentAt(current, position) {
   return { east: b.east_kt + g[0][0] * x + g[0][1] * y, north: b.north_kt + g[1][0] * x + g[1][1] * y };
 }
 
-// winds and the external force: arrows on the map and the 設標者・風・外力 panel
+// winds and the external force: arrows on the map; the 設標者 panel (bottom left) and the
+// 風・外力 panel (above the camera readout)
 function updateForces(snapshot, estimate) {
   const deployment = snapshot.deployment || {};
   const layer = deployment.layer;
@@ -982,14 +983,17 @@ function updateForces(snapshot, estimate) {
     hideArrows();
   }
 
-  const panel = $("map-info");
-  if (!panel) return;
+  let rows = [];
+  const row = (k, v, cls = "") => rows.push(`<tr${cls ? ` class="${cls}"` : ""}><th>${k}</th><td>${v}</td></tr>`);
+  const fill = (id, show) => {
+    const panel = $(id);
+    if (!panel) return;
+    panel.hidden = !show;
+    if (show) setHtml(panel.querySelector("tbody"), rows.join(""));
+    rows = [];
+  };
   const showLayer = checked("show-layer-hud");
   const showForces = checked("show-forces");
-  panel.hidden = !showLayer && !showForces;
-  if (panel.hidden) return;
-  const rows = [];
-  const row = (k, v, cls = "") => rows.push(`<tr${cls ? ` class="${cls}"` : ""}><th>${k}</th><td>${v}</td></tr>`);
   if (showLayer) {
     rows.push(`<tr class="head"><th colspan="2">設標者</th></tr>`);
     if (lay.enabled === false) row("状態", "設標者なし");
@@ -1011,6 +1015,7 @@ function updateForces(snapshot, estimate) {
       row("設標待ち", `${open.length - proposed} 件${proposed ? `・了承待ち ${proposed} 件` : ""}`);
     }
   }
+  fill("layer-info", showLayer);
   if (showForces) {
     rows.push(`<tr class="head"><th colspan="2">風・外力</th></tr>`);
     row(`<i class="sw flight-wind"></i>飛行高度の風`, layerOn && layer.wind_speed_kt != null
@@ -1024,7 +1029,7 @@ function updateForces(snapshot, estimate) {
       : "推定なし");
     rows.push(`<tr class="note"><td colspan="2">風は吹いてくる方向、外力は流れる方向。矢印の長さ：風 1 分・外力 20 分の移動量</td></tr>`);
   }
-  setHtml(panel.querySelector("tbody"), rows.join(""));
+  fill("force-info", showForces);
 }
 
 // ================================================================== wind (風向風速) and the mean wind estimates
