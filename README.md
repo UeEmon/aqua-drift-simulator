@@ -53,7 +53,7 @@ Documentation:
   time stays on the system time; drop times are entered as HH:MM:SS
 - **設標者 panel (map, bottom left)**: the layer's state (mode, position, altitude, speed,
   heading, ground speed and track, bank, arrival time, next drop)
-- **風・外力 panel (map, bottom right, above the camera readout)**: the wind at the layer's flight
+- **風・外力 panel (map, bottom right, below the camera readout)**: the wind at the layer's flight
   altitude, the mean wind used to correct the release points and the external force (current)
   fitted from the observers' drift; the same three are drawn as arrows on the map (toggles in
   表示・観測者)

@@ -275,7 +275,7 @@ button.secondary { margin-top: 8px; }
 }
 #view-toolbar select { max-width: 100%; }
 
-/* right column above the status strip: 風・外力 panel on top of the camera readout */
+/* right column above the status strip: camera readout on top of the 風・外力 panel */
 #right-huds {
   position: absolute;
   right: 12px;
@@ -322,7 +322,7 @@ table.kv td:first-child { color: #9cc0e2; }
 #wind-table td { padding: 2px 4px; }
 .tab { min-width: 0; white-space: nowrap; }
 
-/* map panels: layer (設標者) state at the bottom left, winds and external force above the camera readout */
+/* map panels: layer (設標者) state at the bottom left, winds and external force below the camera readout */
 .map-panel {
   max-width: min(400px, calc(100vw - 24px));
   padding: 6px 10px;

@@ -950,7 +950,7 @@ function currentAt(current, position) {
 }
 
 // winds and the external force: arrows on the map; the 設標者 panel (bottom left) and the
-// 風・外力 panel (above the camera readout)
+// 風・外力 panel (below the camera readout)
 function updateForces(snapshot, estimate) {
   const deployment = snapshot.deployment || {};
   const layer = deployment.layer;
