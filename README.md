@@ -30,6 +30,7 @@ Documentation:
 - [docs/observation-mode-comparison.md](docs/observation-mode-comparison.md) – position / range-bearing / bearing-only / Doppler / combinations
 - [docs/optimal-deployment.md](docs/optimal-deployment.md) – automatic observer deployment: positions, number and depths chosen by the Doppler-tracking (Fisher) information within the detection range
 - [docs/depth-from-doppler.md](docs/depth-from-doppler.md) – how to obtain the target depth from Doppler (overflight, vertical baseline, depth-rate prior, Lloyd's mirror), CRLB and particle-filter check; the optional **Lloyd's mirror depth** (direct + surface-reflected path interference of the received level, switch in the 推定と真値 tab, off by default because of its processing load)
+- [docs/doppler-information.md](docs/doppler-information.md) – 複数の音源周波数・帯域幅・安定度、伝搬遅延、変針・変速の到達時間差と、ドップラーから推定に使えるその他の要素
 - [docs/architecture.md](docs/architecture.md) and [docs/uml/](docs/uml/) – PlantUML design
 
 ## GIS panel

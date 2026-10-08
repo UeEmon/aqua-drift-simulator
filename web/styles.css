@@ -104,7 +104,7 @@ code { font-size: 10.5px; color: #cfe6ff; }
 
 form { display: grid; gap: 10px; }
 label { display: grid; gap: 5px; color: #a9c2d9; font-size: 12px; }
-input {
+input, textarea {
   width: 100%;
   padding: 8px 9px;
   color: #e7f2ff;

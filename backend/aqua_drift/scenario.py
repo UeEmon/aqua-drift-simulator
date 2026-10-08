@@ -33,6 +33,7 @@ from aqua_drift.models import (
 from aqua_drift.optimal_deployment import LayerAvailability, SensorModel
 from aqua_drift.physics import (
     LevelNoise,
+    SourceSignal,
     advance_observer,
     advance_target,
     doppler_observation,
@@ -55,6 +56,7 @@ class ScenarioRun:
     tick: int = 0
     rng: random.Random | None = None
     level_noise: LevelNoise | None = None
+    signal: SourceSignal | None = None  # emitted history (propagation delay, fluctuation)
     forward: bool = False  # automatic forward (前程) deployment from the estimate
     deploy_check_s: int = 10
     deployments: list[tuple[int, int]] = field(default_factory=list)  # (tick, count)
@@ -75,6 +77,8 @@ class ScenarioRun:
         self.engine = TrackingEngine(EstimatorSettings.from_config(self.config))
         self.rng = random.Random(self.config.bearing.random_seed)
         self.level_noise = LevelNoise(self.config.lloyd.random_seed)
+        self.signal = SourceSignal(self.config.source.random_seed)
+        self.signal.add(self.config, self.target)
 
     def step(self) -> DopplerBatch:
         self.tick += 1
@@ -83,9 +87,12 @@ class ScenarioRun:
         self.observers = [advance_observer(self.config, item, 1.0) for item in self.observers]
         for item in self.observers:
             item.tick = self.tick
+        self.signal.add(self.config, self.target)
         observations, truth = [], []
         for observer in self.observers:
-            obs, tr = doppler_observation(self.config, self.target, observer, self.rng, self.level_noise)
+            obs, tr = doppler_observation(
+                self.config, self.target, observer, self.rng, self.level_noise, self.signal
+            )
             observations.append(obs)
             truth.append(tr)
         batch = DopplerBatch(tick=self.tick, observations=observations, truth=truth)

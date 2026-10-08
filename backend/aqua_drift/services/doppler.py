@@ -1,10 +1,12 @@
 """Acoustic source / Doppler engine container (音源演算部).
 
-Every synchronized 1 s epoch it produces, for every active observer, the error-free received
-frequency when the target is inside the common maximum slant range, and an explicit
-non-detection otherwise (no missed detections inside the range). Every bearing.interval_s it
-also adds a horizontal true bearing with normal error (sigma_deg), independent in time and
-between observers. When the optional Lloyd's mirror calculation is enabled (config.lloyd),
+Every synchronized 1 s epoch it produces, for every active observer and every tonal of the
+source, the received frequency (line centre with the bandwidth error, emitted-frequency
+fluctuation from the stability) when the target is inside the common maximum slant range, and
+an explicit non-detection otherwise (no missed detections inside the range). With the
+propagation delay each observer hears what the target emitted r/c earlier. Every
+bearing.interval_s it also adds a horizontal true bearing with normal error (sigma_deg),
+independent in time and between observers. When the optional Lloyd's mirror calculation is enabled (config.lloyd),
 it also adds the received level of the tonal (direct + surface-reflected path with level
 fluctuation). Truth (slant range, relative speed) is attached separately and is stripped
 before reaching the estimator.
@@ -17,7 +19,7 @@ import random
 import httpx
 
 from aqua_drift.models import DopplerBatch, ObserverRecord, ScenarioConfig, TargetState
-from aqua_drift.physics import LevelNoise, doppler_observation
+from aqua_drift.physics import LevelNoise, SourceSignal, doppler_observation
 from aqua_drift.services.common import poll_interval, post, snapshot, wait_for_api
 
 
@@ -25,6 +27,8 @@ async def run() -> None:
     last_tick = -1
     rng: random.Random | None = None
     level_noise: LevelNoise | None = None
+    signal: SourceSignal | None = None  # emitted history: propagation delay, frequency fluctuation
+    generation = None
     async with httpx.AsyncClient(trust_env=False) as client:
         await wait_for_api(client)
         while True:
@@ -39,6 +43,10 @@ async def run() -> None:
             if level_noise is None:
                 level_noise = LevelNoise(config.lloyd.random_seed)
             target = TargetState.model_validate(data["target"])
+            if signal is None or data.get("generation") != generation:
+                signal = SourceSignal(config.source.random_seed)  # runtime reset: new run
+                generation = data.get("generation")
+            signal.add(config, target)
             records = [ObserverRecord.model_validate(item) for item in data["observers"]]
             # wait until target and every observer have published this epoch (time sync)
             if target.tick < tick or not records or any(r.state.tick < tick for r in records):
@@ -47,7 +55,7 @@ async def run() -> None:
             if tick % config.doppler_interval_seconds == 0:
                 observations, truth = [], []
                 for record in records:
-                    obs, tr = doppler_observation(config, target, record.state, rng, level_noise)
+                    obs, tr = doppler_observation(config, target, record.state, rng, level_noise, signal)
                     obs.tick = tick
                     tr.tick = tick
                     observations.append(obs)

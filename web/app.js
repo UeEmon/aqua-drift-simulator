@@ -1750,7 +1750,18 @@ function updateComparison(snapshot, estimate) {
     pointInPolygon(tp.longitude, tp.latitude, c.polygon) && tp.depth_ft >= c.min_depth_ft && tp.depth_ft <= c.max_depth_ft);
   setHtml($("region-check"), `<b>${escapeHtml(estimate.observability_status)}</b>　真値は推定存在圏（${fmt(region.probability_pct, 0)} %・${region.components.length} 領域）の` +
     (inside ? `<span class="s-good">内側</span>` : `<span class="s-bad">外側</span>`) +
-    `<br><small>入力：${escapeHtml(estimate.metadata?.observation_inputs || "--")}</small>`);
+    `<br><small>入力：${escapeHtml(estimate.metadata?.observation_inputs || "--")}</small>` +
+    maneuverTimingText(estimate.metadata?.maneuver_timing));
+}
+
+// last maneuver-timing event: when each observer heard the change, relative to the first
+function maneuverTimingText(timing) {
+  if (!timing || !timing.enabled) return "";
+  const last = timing.last_event;
+  const head = `<br><small>変針・変速の到達時間差：採用 ${timing.events_applied} 件・不採用 ${timing.events_rejected} 件`;
+  if (!last) return `${head}</small>`;
+  const rows = last.observers.map((o) => `${escapeHtml(o.observer_id)} +${fmt(o.offset_s, 2)} s（±${fmt(o.sigma_s, 2)}）`).join("、");
+  return `${head}<br>最新（${fmt(last.tick, 1)} s${last.used ? "" : "・不採用"}）：${rows}</small>`;
 }
 
 function pair(a, b) {
@@ -2009,6 +2020,12 @@ function populateForms(config) {
     "observer-limit": config.observer_limit,
     "source-frequency": config.source.source_frequency_hz,
     "frequency-bias": config.source.shared_recognition_bias_hz,
+    "source-bandwidth": config.source.bandwidth_hz,
+    "source-stability": config.source.stability_hz,
+    "source-stability-tau": config.source.stability_correlation_s,
+    "additional-tonals": (config.source.additional_tonals || [])
+      .map((t) => `${t.frequency_hz}, ${t.bandwidth_hz}, ${t.stability_hz}`).join("\n"),
+    "est-stability": config.estimator.assumed_stability_hz,
     "bearing-sigma": config.bearing.sigma_deg,
     "bearing-interval": config.bearing.interval_s,
     "cur-e": config.current_field.base_velocity.east_kt,
@@ -2042,6 +2059,8 @@ function populateForms(config) {
     $("fwd-gate").checked = f.use_detection_gate ?? true;
   }
   $("use-bearing").checked = config.estimator.use_bearing;
+  $("propagation-delay").checked = config.source.propagation_delay;
+  $("use-maneuver-timing").checked = config.estimator.use_maneuver_timing;
   const lay = config.layer;
   if (lay) {
     $("layer-enabled").checked = lay.enabled;
@@ -2071,6 +2090,15 @@ async function putConfig(mutate) {
 }
 
 const num = (id) => Number($(id).value);
+
+// "周波数, 帯域幅, 安定度" per line -> additional tonals (bandwidth / stability default 0)
+function parseTonals(text, correlation) {
+  return text.split(/\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const [frequency, bandwidth = 0, stability = 0] = line.split(/[,\s]+/).map(Number);
+    if (!(frequency > 0) || !(bandwidth >= 0) || !(stability >= 0)) throw new Error(`音源周波数の行が不正です: ${line}`);
+    return { frequency_hz: frequency, bandwidth_hz: bandwidth, stability_hz: stability, stability_correlation_s: correlation };
+  });
+}
 
 $("initial-form").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -2118,6 +2146,13 @@ $("config-form").addEventListener("submit", (event) => {
     next.observer_limit = num("observer-limit");
     next.source.source_frequency_hz = num("source-frequency");
     next.source.shared_recognition_bias_hz = num("frequency-bias");
+    next.source.bandwidth_hz = num("source-bandwidth");
+    next.source.stability_hz = num("source-stability");
+    next.source.stability_correlation_s = num("source-stability-tau");
+    next.source.additional_tonals = parseTonals($("additional-tonals").value, next.source.stability_correlation_s);
+    next.source.propagation_delay = checked("propagation-delay");
+    next.estimator.assumed_stability_hz = num("est-stability");
+    next.estimator.use_maneuver_timing = checked("use-maneuver-timing");
     next.bearing.enabled = checked("bearing-enabled");
     next.bearing.sigma_deg = num("bearing-sigma");
     next.bearing.interval_s = num("bearing-interval");
