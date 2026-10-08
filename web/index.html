@@ -99,6 +99,26 @@
           </div>
         </div>
 
+        <div id="clock-bar" aria-label="時間倍率">
+          <div class="run-state">
+            <span id="clock-badge" class="badge running">1倍速</span>
+            <span id="clock-info" title="実際に進んでいるシミュレーション時間の速さ">実効 --</span>
+          </div>
+          <div class="clock-presets" role="group" aria-label="時間倍率のプリセット">
+            <button type="button" class="secondary" data-time-scale="0">一時停止</button>
+            <button type="button" class="secondary" data-time-scale="0.5">0.5倍</button>
+            <button type="button" class="secondary" data-time-scale="1">1倍</button>
+            <button type="button" class="secondary" data-time-scale="2">2倍</button>
+            <button type="button" class="secondary" data-time-scale="5">5倍</button>
+            <button type="button" class="secondary" data-time-scale="10">10倍</button>
+          </div>
+          <form id="clock-form" class="clock-custom">
+            <label>任意倍率（0〜100、0 で一時停止）
+              <input id="time-scale" type="number" min="0" max="100" step="any" value="1" required /></label>
+            <button type="submit">適用</button>
+          </form>
+        </div>
+
         <nav class="tabs" role="tablist">
           <button role="tab" class="tab active" data-tab="tab-compare">推定と真値</button>
           <button role="tab" class="tab" data-tab="tab-target">目標設定</button>

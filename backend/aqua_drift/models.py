@@ -283,6 +283,23 @@ class TickMessage(BaseModel):
     tick: int = Field(ge=0)
 
 
+MAX_TIME_SCALE = 100.0
+
+
+class ClockSettings(BaseModel):
+    """Simulation time per wall-clock second (1 = real time, 0 = paused)."""
+
+    time_scale: float = Field(default=1.0, ge=0, le=MAX_TIME_SCALE)
+
+
+class ClockStatus(BaseModel):
+    """Polled by the clock container: synced is True once every worker finished the current tick."""
+
+    tick: int
+    time_scale: float
+    synced: bool
+
+
 class TargetState(BaseModel):
     tick: int = Field(ge=0)
     position: Position
@@ -449,13 +466,27 @@ class DropTask(BaseModel):
     position: Position
     status: str = "PROPOSED"
     planned_tick: int | None = None  # optimal / requested drop time (None = as soon as possible)
+    # the planner's optimal (or the operator's) drop time; planned_tick is moved from it only
+    # when the layer cannot be there in the operator's drop order (設標順)
+    requested_tick: int | None = None
+    sequence: int = 0  # drop order among tasks with the same planned time (operator reorder)
     approved_tick: int | None = None
     done_tick: int | None = None
     eta_s: float | None = None  # seconds from now to the expected drop
 
+    def flight_key(self) -> tuple[int, int, int]:
+        """Order the layer flies the drops in: planned time (as soon as possible first), then
+        the operator's drop order."""
+        return (self.planned_tick if self.planned_tick is not None else -1,
+                self.sequence or self.task_id, self.task_id)
+
 
 class DropDecision(BaseModel):
     task_ids: list[int] | None = None  # None = every proposed drop
+
+
+class DropReorder(BaseModel):
+    task_ids: list[int]  # open drops in the new drop order (unlisted open drops follow in their order)
 
 
 class DropReschedule(BaseModel):
@@ -474,6 +505,9 @@ class LayerState(BaseModel):
     orbit_center: Position | None = None
     orbit_radius_yd: float = 0.0
     eta_s: float | None = None
+    # planned flight path ahead (飛行予定経路): [latitude, longitude] from the current position
+    # through the open drop points in order, along the turn-limited guidance path
+    planned_path: list[tuple[float, float]] = Field(default_factory=list)
 
 
 class LayerUpdate(BaseModel):
@@ -508,6 +542,7 @@ class DeploymentStatus(BaseModel):
 
 class EstimatorFeed(BaseModel):
     tick: int
+    time_scale: float = 1.0
     generation: int = 0
     estimation: EstimationControl = EstimationControl()
     settings: EstimatorSettings
@@ -665,6 +700,7 @@ class SimState(BaseModel):
 
     tick: int
     generation: int = 0
+    time_scale: float = 1.0
     config: ScenarioConfig
     target: TargetState | None
     observers: list[ObserverRecord]
@@ -673,6 +709,7 @@ class SimState(BaseModel):
 class Snapshot(BaseModel):
     tick: int
     generation: int = 0
+    time_scale: float = 1.0
     deployment: DeploymentStatus = DeploymentStatus()
     estimation: EstimationControl = EstimationControl()
     bearings: list[BearingReport] = Field(default_factory=list)

@@ -8,7 +8,7 @@ import httpx
 
 from aqua_drift.models import ScenarioConfig, TargetState
 from aqua_drift.physics import advance_target, initial_target
-from aqua_drift.services.common import current_vector, post, snapshot, wait_for_api
+from aqua_drift.services.common import current_vector, poll_interval, post, snapshot, wait_for_api
 
 
 async def run() -> None:
@@ -36,7 +36,7 @@ async def run() -> None:
                 response = await post(client, "/internal/target", state.model_dump(mode="json"))
                 response.raise_for_status()
                 last_tick = tick
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(poll_interval(data))
 
 
 if __name__ == "__main__":

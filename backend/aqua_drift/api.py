@@ -10,11 +10,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from aqua_drift.forward_deployment import plan_forward_deployment_scheduled
 from aqua_drift.models import (
+    ClockSettings,
+    ClockStatus,
     DeploymentFeed,
     DeploymentRecord,
     DeploymentRequest,
     DopplerBatch,
     DropDecision,
+    DropReorder,
     DropReschedule,
     DropTask,
     EstimationControl,
@@ -35,7 +38,7 @@ from aqua_drift.models import (
 from aqua_drift.optimal_deployment import availability_from_feed, sensor_from_feed
 from aqua_drift.state import ObserverRejected, SimulationState
 from aqua_drift.storage import EventStore
-from aqua_drift.wire import WireEncoder
+from aqua_drift.wire import PROTOCOL_VERSION, WireEncoder
 
 initial_config = ScenarioConfig(
     max_slant_range_yd=float(os.getenv("MAX_SLANT_RANGE_YD", "6000"))
@@ -90,6 +93,21 @@ async def get_snapshot() -> Snapshot:
     return await state.snapshot()
 
 
+@app.get("/api/clock", response_model=ClockSettings)
+async def get_clock() -> ClockSettings:
+    return ClockSettings(time_scale=(await state.clock_status()).time_scale)
+
+
+@app.put("/api/clock", response_model=ClockSettings)
+async def put_clock(settings: ClockSettings) -> ClockSettings:
+    """Simulation speed: 1 = real time, 2 = twice as fast, 0.5 = half, 0 = pause. Above 1x the
+    clock never starts a tick before every container finished the previous one, so the
+    achieved rate can stay below the requested one on a slow machine."""
+    await state.set_time_scale(settings.time_scale)
+    await store.append_event("clock_changed", state.tick, settings.model_dump(mode="json"))
+    return settings
+
+
 @app.post("/api/observers/placements")
 async def queue_observer_placement(placement: ObserverPlacement) -> dict[str, int]:
     """Queue an explicit position for the next observer container that starts
@@ -130,6 +148,11 @@ async def reset_runtime(replace_observers: bool = True) -> dict[str, str]:
 @app.get("/internal/sim-state", response_model=SimState)
 async def sim_state() -> SimState:
     return await state.sim_state()
+
+
+@app.get("/internal/clock", response_model=ClockStatus)
+async def clock_status() -> ClockStatus:
+    return await state.clock_status()
 
 
 @app.post("/internal/clock")
@@ -234,6 +257,19 @@ async def reschedule_drop(request: DropReschedule) -> DropTask:
     return task
 
 
+@app.post("/api/drops/reorder", response_model=list[DropTask])
+async def reorder_drops(request: DropReorder) -> list[DropTask]:
+    """Operator changes the drop order (設標順) of the open drops; the drop times are planned
+    again along the new order. Returns the open drops in the new order."""
+    tasks = await state.reorder_tasks(request.task_ids)
+    if tasks is None:
+        raise HTTPException(status_code=404, detail=f"not all of {request.task_ids} are open drop tasks")
+    await store.append_event("drop_decision", state.tick, {
+        "reorder": [t.task_id for t in tasks], "planned_ticks": [t.planned_tick for t in tasks],
+    })
+    return tasks
+
+
 @app.get("/internal/layer-feed", response_model=LayerFeed)
 async def layer_feed() -> LayerFeed:
     return await state.layer_feed()
@@ -307,6 +343,7 @@ async def websocket_snapshot(websocket: WebSocket) -> None:
     encoder = WireEncoder()
     loop = asyncio.get_running_loop()
     last_tick = -1
+    last_scale: float | None = None
     try:
         while True:
             snapshot = await state.snapshot()
@@ -314,6 +351,10 @@ async def websocket_snapshot(websocket: WebSocket) -> None:
                 message = encoder.encode(snapshot, loop.time())
                 await websocket.send_text(json.dumps(message, separators=(",", ":")))
                 last_tick = snapshot.tick
+            elif snapshot.time_scale != last_scale:
+                # speed changed while the tick stands still (paused): clock-only message
+                await websocket.send_text(json.dumps({"v": PROTOCOL_VERSION, "clk": snapshot.time_scale}))
+            last_scale = snapshot.time_scale
             await asyncio.sleep(0.25)  # send each new tick promptly, never twice
     except WebSocketDisconnect:
         return

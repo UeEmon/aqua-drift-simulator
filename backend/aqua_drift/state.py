@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from collections import OrderedDict, deque
+
+import numpy as np
 
 from aqua_drift.deployment import default_position
 from aqua_drift.models import (
     BearingReport,
+    ClockStatus,
     CpaResult,
     CurrentEstimate,
     DeploymentFeed,
@@ -35,8 +39,12 @@ from aqua_drift.models import (
     TargetState,
     TrackEstimate,
 )
+from aqua_drift.optimal_deployment import LayerAvailability
+from aqua_drift.physics import local_offset_m
 
 BATCH_RETENTION_TICKS = 900
+# above 1x the clock waits for the estimator when it falls this many ticks behind the newest batch
+ESTIMATOR_SLACK_TICKS = 10
 
 
 class ObserverRejected(RuntimeError):
@@ -50,6 +58,8 @@ class SimulationState:
         self.lock = asyncio.Lock()
         self.config = config or ScenarioConfig()
         self.tick = 0
+        self.time_scale = 1.0
+        self.estimator_tick = -1
         self.target: TargetState | None = None
         self.observers: OrderedDict[str, ObserverRecord] = OrderedDict()
         self.archived_observer_ids: list[str] = []  # "obs-03#1" = slot obs-03, session 1
@@ -89,6 +99,31 @@ class SimulationState:
         async with self.lock:
             self.tick = max(self.tick, tick)
 
+    async def set_time_scale(self, time_scale: float) -> None:
+        async with self.lock:
+            self.time_scale = time_scale
+
+    async def clock_status(self) -> ClockStatus:
+        async with self.lock:
+            return ClockStatus(tick=self.tick, time_scale=self.time_scale, synced=self._synced())
+
+    def _synced(self) -> bool:
+        """True when the target, every observer and the Doppler engine have published the current
+        tick and the estimator is not falling behind, so the next tick can start without any
+        container skipping an epoch."""
+        tick = self.tick
+        if self.target is None or self.target.tick < tick:
+            return False
+        if any(r.state.tick < tick for r in self.observers.values()):
+            return False
+        last_batch = self.batches[-1].tick if self.batches else -1
+        if self.observers and tick % self.config.doppler_interval_seconds == 0 and last_batch < tick:
+            return False
+        estimator_behind = self.estimator_tick < last_batch - ESTIMATOR_SLACK_TICKS
+        return not (
+            self.estimation.running and last_batch > self.estimation.started_tick and estimator_behind
+        )
+
     async def set_target(self, target: TargetState) -> None:
         async with self.lock:
             if self.target is None or target.tick >= self.target.tick:
@@ -102,7 +137,7 @@ class SimulationState:
         async with self.lock:
             if self.config.layer.enabled and placement.observer_id is None:
                 task = self._new_task(placement.position, "manual", "operator placement")
-                task.planned_tick = placement.planned_tick
+                task.planned_tick = task.requested_tick = placement.planned_tick
                 return len(self.placements) + self._open_task_count()
             self.placements.append(placement)
             return len(self.placements)
@@ -184,7 +219,7 @@ class SimulationState:
             for position, planned_tick in zip(request.positions, planned, strict=False):
                 if self.config.layer.enabled:
                     task = self._new_task(position, source, request.reason)
-                    task.planned_tick = planned_tick
+                    task.planned_tick = task.requested_tick = planned_tick
                 else:
                     self.placements.append(ObserverPlacement(position=position, source="forward"))
             record = DeploymentRecord(
@@ -267,7 +302,7 @@ class SimulationState:
     def _new_task(self, position: Position, source: str, reason: str) -> DropTask:
         self.task_counter += 1
         task = DropTask(task_id=self.task_counter, created_tick=self.tick, source=source,
-                        reason=reason, position=position)
+                        reason=reason, position=position, sequence=self.task_counter)
         if source == "manual" or self.config.layer.approval == "auto":
             self._approve(task)
         self.tasks.append(task)
@@ -317,9 +352,47 @@ class SimulationState:
         async with self.lock:
             for task in self.tasks:
                 if task.task_id == task_id and task.status in self.OPEN_TASK_STATES:
-                    task.planned_tick = planned_tick
+                    task.planned_tick = task.requested_tick = planned_tick
                     return task
             return None
+
+    async def reorder_tasks(self, task_ids: list[int]) -> list[DropTask] | None:
+        """Operator sets the drop order (設標順) of the open drops: the listed ones first in
+        that order, the others after them in their current order. The drop times are planned
+        again along the new order: each drop at its requested (optimal) time, or when the layer
+        can be there after the previous drop (flight at the layer speed from the previous point,
+        with the turn), whichever is later. Drops 'as soon as possible' stay so while only such
+        drops come before them. Returns the open drops in the new order (None: unknown id)."""
+        async with self.lock:
+            self._expire_tasks()
+            open_tasks = sorted((t for t in self.tasks if t.status in self.OPEN_TASK_STATES),
+                                key=lambda t: t.flight_key())
+            by_id = {t.task_id: t for t in open_tasks}
+            if len(set(task_ids)) != len(task_ids) or any(i not in by_id for i in task_ids):
+                return None
+            order = [by_id[i] for i in task_ids] + [t for t in open_tasks if t.task_id not in task_ids]
+            sequences = sorted(t.sequence or t.task_id for t in order)
+            layer = self.config.layer
+            if self.layer_state is not None:
+                previous, heading = self.layer_state.position, self.layer_state.heading_deg
+            else:
+                previous, heading = self.config.target.initial_position, None
+            ready, timed = float(self.tick), False
+            for task, sequence in zip(order, sequences, strict=True):
+                task.sequence = sequence
+                if layer.enabled:
+                    east, north, _ = local_offset_m(previous, task.position)
+                    flight = LayerAvailability(ready_s=0.0, position=previous, speed_kt=layer.speed_kt,
+                                               max_bank_deg=layer.max_bank_deg, heading_deg=heading)
+                    ready += float(flight.earliest_s(previous, np.array([[east, north, 0.0]]))[0])
+                timed = timed or task.requested_tick is not None
+                if timed:
+                    task.planned_tick = max(task.requested_tick or 0, math.ceil(ready))
+                    ready = float(task.planned_tick)
+                else:
+                    task.planned_tick = None
+                previous, heading = task.position, None
+            return order
 
     async def layer_feed(self) -> LayerFeed:
         async with self.lock:
@@ -329,10 +402,7 @@ class SimulationState:
             if datum is None:
                 datum = self.config.target.initial_position  # operator's datum until an estimate exists
             current = self.current_estimate.base_velocity if self.current_estimate else None
-            approved = sorted(
-                (t for t in self.tasks if t.status == "APPROVED"),
-                key=lambda t: (t.planned_tick if t.planned_tick is not None else -1, t.task_id),
-            )
+            approved = sorted((t for t in self.tasks if t.status == "APPROVED"), key=lambda t: t.flight_key())
             return LayerFeed(
                 tick=self.tick,
                 generation=self.generation,
@@ -435,6 +505,7 @@ class SimulationState:
             ]
             return EstimatorFeed(
                 tick=self.tick,
+                time_scale=self.time_scale,
                 generation=self.generation,
                 estimation=self.estimation,
                 settings=EstimatorSettings.from_config(self.config),
@@ -470,6 +541,7 @@ class SimulationState:
 
     async def set_estimator_output(self, output: EstimatorOutput) -> None:
         async with self.lock:
+            self.estimator_tick = max(self.estimator_tick, output.tick)
             if not self.estimation.running:
                 return  # late output from a stopped run
             self.estimates = output.estimates
@@ -482,6 +554,7 @@ class SimulationState:
             return Snapshot(
                 tick=self.tick,
                 generation=self.generation,
+                time_scale=self.time_scale,
                 deployment=self._deployment_status(),
                 estimation=self.estimation,
                 bearings=[
@@ -504,6 +577,7 @@ class SimulationState:
             return SimState(
                 tick=self.tick,
                 generation=self.generation,
+                time_scale=self.time_scale,
                 config=self.config,
                 target=self.target,
                 observers=list(self.observers.values()),

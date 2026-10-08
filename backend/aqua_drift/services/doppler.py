@@ -18,7 +18,7 @@ import httpx
 
 from aqua_drift.models import DopplerBatch, ObserverRecord, ScenarioConfig, TargetState
 from aqua_drift.physics import LevelNoise, doppler_observation
-from aqua_drift.services.common import post, snapshot, wait_for_api
+from aqua_drift.services.common import poll_interval, post, snapshot, wait_for_api
 
 
 async def run() -> None:
@@ -31,7 +31,7 @@ async def run() -> None:
             data = await snapshot(client)
             tick = int(data["tick"])
             if tick <= last_tick or not data.get("target"):
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(poll_interval(data))
                 continue
             config = ScenarioConfig.model_validate(data["config"])
             if rng is None:
@@ -42,7 +42,7 @@ async def run() -> None:
             records = [ObserverRecord.model_validate(item) for item in data["observers"]]
             # wait until target and every observer have published this epoch (time sync)
             if target.tick < tick or not records or any(r.state.tick < tick for r in records):
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(poll_interval(data))
                 continue
             if tick % config.doppler_interval_seconds == 0:
                 observations, truth = [], []
@@ -56,7 +56,7 @@ async def run() -> None:
                 response = await post(client, "/internal/doppler", batch.model_dump(mode="json"))
                 response.raise_for_status()
             last_tick = tick
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(poll_interval(data))
 
 
 if __name__ == "__main__":

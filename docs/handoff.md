@@ -44,6 +44,7 @@ node --check web/app.js
 
 | 要求 | 内容 | 主なファイル |
 |---|---|---|
+| 4.16 | 設標順の入れ替え：「設標者」タブの計画一覧で ▲▼。投入時刻は新しい順で再計算（最適時刻 `requested_tick` か前の設標点から到着できる時刻の遅い方）。API `/api/drops/reorder` | `state.py`（`reorder_tasks`）、`models.py`（`DropTask.flight_key`）、`web/app.js`（`moveDrop`） |
 | 4.15 | 設標者の旋回は左旋回が基準。右旋回は経路が `turn_margin_s`（既定 10 秒）× 速力以上短い場合だけ。「設標者」タブ（状態表、有無・一時停止・了承方式・基準旋回・速力などの設定、計画一覧で了承／却下／今すぐ／時刻変更／中止、手動配置）。API `/api/drops/cancel`・`/api/drops/reschedule` | `backend/aqua_drift/layer.py`（`dubins_turn`、`preferred_side`）、`state.py`、`api.py`、`web/index.html`（`tab-layer`）、`web/app.js`（`updateLayer`） |
 | 4.14 | 最適な投入予定時刻を計算し、設標者が計画時刻に設標（出発待ち、速力選択、HOLD） | `optimal_deployment.py`（`LayerAvailability`、`drop_times`）、`layer.advance` |
 | 4.13 | 追加の観測者は設標者（200±50 kt、バンク 15° 以内）が配置。提案→了承（既定は自動）→設標。待機中は推定位置の周囲を旋回 | `layer.py`、`services/layer.py`、`models.py`（`LayerConfig`、`DropTask`） |
@@ -66,7 +67,7 @@ node --check web/app.js
 ## 6. 新しいセッションの最初の手順
 
 1. リポジトリを取得し、`feature/doppler-estimation` をチェックアウト。
-2. この文書と `docs/requirements.md` の 4.12〜4.15 を読む。
+2. この文書と `docs/requirements.md` の 4.12〜4.16 を読む。
 3. 第 2 節の手順で依存を入れ、全テストが通ることを確認（PyPI が 403 ならユーザーに報告）。
 4. `gh run list --branch feature/doppler-estimation --limit 1` で最新の CI が成功していることを確認。
 5. ユーザーの次の指示を待つ。

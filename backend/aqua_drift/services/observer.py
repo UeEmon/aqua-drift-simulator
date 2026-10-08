@@ -13,7 +13,14 @@ import httpx
 
 from aqua_drift.models import ObserverState, Position, ScenarioConfig
 from aqua_drift.physics import advance_observer
-from aqua_drift.services.common import API_URL, current_vector, post, snapshot, wait_for_api
+from aqua_drift.services.common import (
+    API_URL,
+    current_vector,
+    poll_interval,
+    post,
+    snapshot,
+    wait_for_api,
+)
 
 
 async def initial_position(client: httpx.AsyncClient, observer_id: str) -> tuple[Position, int] | None:
@@ -76,7 +83,7 @@ async def run() -> None:
                     return  # evicted or 3 h limit reached: slot is freed for reuse
                 response.raise_for_status()
                 last_tick = tick
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(poll_interval(data))
 
 
 if __name__ == "__main__":

@@ -121,6 +121,7 @@ class WireEncoder:
             "v": PROTOCOL_VERSION,
             "t": data["tick"],
             "gen": data["generation"],
+            "clk": data["time_scale"],
             "ctl": data["estimation"],
             "target": data["target"],
             "obs": [
