@@ -102,9 +102,12 @@ class DopplerParticleFilter:
         self.ground_v = np.zeros((self.n, 3))
         self.initialized = False
         self.tick = 0
-        # fixed-lag history (positions + ground velocities) for past-track updating
-        self.hist = np.zeros((0, self.n, 6), dtype=np.float32)
+        # fixed-lag history (positions + ground velocities) for past-track updating: a ring
+        # buffer of hist_slots rows (n x 6 float32 each), allocated once and overwritten in
+        # place; hist_rows[i] is the buffer row of hist_ticks[i] (oldest first)
+        self.hist: np.ndarray | None = None
         self.hist_ticks: list[int] = []
+        self.hist_rows: list[int] = []
         self.hist_stride = 1
         self.hist_slots = 0
         self.epochs = EpochStore(900)
@@ -119,19 +122,27 @@ class DopplerParticleFilter:
         if stride != self.hist_stride or count != self.hist_slots:
             self.hist_stride = stride
             self.hist_slots = count
-            self.hist = np.zeros((0, self.n, 6), dtype=np.float32)
-            self.hist_ticks = []
+            self._clear_history()
+
+    def _clear_history(self) -> None:
+        self.hist = None
+        self.hist_ticks = []
+        self.hist_rows = []
 
     def _push_history(self) -> None:
-        if self.tick % self.hist_stride != 0:
+        if self.tick % self.hist_stride != 0 or self.hist_slots <= 0:
             return
-        row = np.concatenate([self.x[:, 0:3], self.ground_v], axis=1).astype(np.float32)[None]
-        self.hist = np.concatenate([self.hist, row], axis=0)
+        if self.hist is None:
+            self.hist = np.empty((self.hist_slots, self.n, 6), dtype=np.float32)
+        if len(self.hist_rows) < self.hist_slots:
+            row = len(self.hist_rows)
+        else:  # full: overwrite the oldest row
+            row = self.hist_rows.pop(0)
+            self.hist_ticks.pop(0)
+        self.hist[row, :, 0:3] = self.x[:, 0:3]
+        self.hist[row, :, 3:6] = self.ground_v
+        self.hist_rows.append(row)
         self.hist_ticks.append(self.tick)
-        if len(self.hist_ticks) > self.hist_slots:
-            drop = len(self.hist_ticks) - self.hist_slots
-            self.hist = self.hist[drop:]
-            self.hist_ticks = self.hist_ticks[drop:]
 
     # ------------------------------------------------------------------ initialization
     def initialize(
@@ -203,8 +214,7 @@ class DopplerParticleFilter:
         self.tick = tick
         self.ground_v = self.x[:, 3:6] + current.velocity(self.x[:, 0:3])
         self.initialized = True
-        self.hist = np.zeros((0, self.n, 6), dtype=np.float32)
-        self.hist_ticks = []
+        self._clear_history()
         return True
 
     # ------------------------------------------------------------------ predict / update
@@ -333,8 +343,9 @@ class DopplerParticleFilter:
         self.x = self.x[index]
         self.ground_v = self.ground_v[index]
         self.w = np.full(self.n, 1.0 / self.n)
-        if len(self.hist_ticks):
-            self.hist = self.hist[:, index]
+        # row by row: a temporary of one row instead of a copy of the whole history
+        for row in self.hist_rows:
+            self.hist[row] = self.hist[row][index]
 
     def clusters(self) -> np.ndarray:
         """Label particles by horizontally connected groups (keeps separate modes apart)."""
@@ -555,8 +566,8 @@ class DopplerParticleFilter:
     def smoothed_history(self) -> list[tuple[int, np.ndarray, np.ndarray]]:
         """Fixed-lag smoothed (tick, mean[6], cov_pos[3x3]) using ancestor-traced paths."""
         output = []
-        for slot, tick in enumerate(self.hist_ticks):
-            values = self.hist[slot].astype(np.float64)
+        for row, tick in zip(self.hist_rows, self.hist_ticks, strict=True):
+            values = self.hist[row].astype(np.float64)
             mean = self.w @ values
             diff = values[:, 0:3] - mean[0:3]
             cov = (diff * self.w[:, None]).T @ diff
