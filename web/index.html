@@ -125,6 +125,7 @@
           <button role="tab" class="tab" data-tab="tab-conditions">観測・推定条件</button>
           <button role="tab" class="tab" data-tab="tab-display">表示・観測者</button>
           <button role="tab" class="tab" data-tab="tab-layer">設標者</button>
+          <button role="tab" class="tab" data-tab="tab-wind">風</button>
         </nav>
 
         <!-- ================================================= 推定と真値 -->
@@ -373,6 +374,10 @@
               <label title="旋回半径より小さい場合は旋回半径に合わせる">旋回待機の半径 (YD)<input id="layer-orbit" type="number" min="100" step="100" required /></label>
               <label title="反対方向の旋回を選ぶのは、この秒数以上早く着く場合だけ">反対旋回を選ぶ差 (秒)<input id="layer-turn-margin" type="number" min="0" max="600" step="1" required /></label>
               <label title="手動了承で応答がない提案はこの時間で失効">提案の有効時間 (秒)<input id="layer-timeout" type="number" min="10" max="7200" step="10" required /></label>
+              <label title="旋回待機中の飛行高度">巡航高度 (ft)<input id="layer-cruise-alt" type="number" min="100" max="30000" step="100" required /></label>
+              <label title="設標に向かう間にこの高度まで降下（上昇）して投下">投下高度 (ft)<input id="layer-drop-alt" type="number" min="100" max="30000" step="100" required /></label>
+              <label>昇降率 (ft/分)<input id="layer-climb" type="number" min="100" max="20000" step="100" required /></label>
+              <label class="check" title="直前の投下から推定した平均風の分だけ風上で投下する"><input id="layer-wind-correction" type="checkbox" />平均風で投下点を修正</label>
               <button type="submit" class="span2">設標者の設定を反映</button>
             </form>
           </section>
@@ -403,6 +408,47 @@
               <button type="submit">設標者に指示</button>
             </form>
             <p class="note">観測者は obs-01〜obs-99。初期は目標を囲む4点で、前程配置・手動配置のたびに観測者コンテナが自動で起動し、観測を終えると停止します（番号は再利用、履歴は保持）。上限超過時は最古の観測者から削除。</p>
+          </section>
+        </div>
+
+        <!-- ================================================= 風 -->
+        <div id="tab-wind" class="tab-panel" role="tabpanel">
+          <section>
+            <h2>平均風の推定（投下高度から海面まで）</h2>
+            <p class="summary" id="wind-status">--</p>
+            <div class="table-wrap">
+              <table id="wind-estimate-table">
+                <colgroup><col style="width:12%" /><col style="width:22%" /><col style="width:22%" /><col style="width:22%" /><col style="width:22%" /></colgroup>
+                <thead><tr><th>#</th><th>投下高度・落下</th><th>無風予想との差</th><th>推定 平均風</th><th>真値（高度平均）・着水誤差</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p class="note">観測者は設標者の対地速度で放出され、各高度の風を受けながら海面まで自由落下します（重力と空気抵抗、終端速度は下で設定）。着水位置と無風の自由落下での着水予想地点の差から、投下高度から海面までの平均風向風速を算出し、次の投下点をその分だけ風上に修正します（「設標者」タブで修正のオン／オフ）。風向は吹いてくる方向。</p>
+          </section>
+
+          <section>
+            <h2>風向風速の設定（海面〜30,000 ft、1,000 ft ごと）</h2>
+            <div class="grid2">
+              <label class="check span2"><input id="wind-enabled" type="checkbox" />風を有効にする（オフ：全高度で無風）</label>
+              <label title="観測者が自由落下で到達する終端速度">観測者の終端速度 (ft/秒)<input id="wind-terminal" type="number" min="5" max="1000" step="1" /></label>
+            </div>
+            <div class="grid2">
+              <label>一括：風向 (度)<input id="wind-fill-dir" type="number" min="0" max="360" step="1" value="270" /></label>
+              <label>一括：風速 (kt)<input id="wind-fill-speed" type="number" min="0" max="300" step="1" value="20" /></label>
+            </div>
+            <div class="button-row">
+              <button type="button" id="wind-fill" class="mini">全高度に一括入力</button>
+              <button type="button" id="wind-calm" class="mini ghost">無風を入力</button>
+            </div>
+            <div class="table-wrap">
+              <table id="wind-table">
+                <colgroup><col style="width:30%" /><col style="width:35%" /><col style="width:35%" /></colgroup>
+                <thead><tr><th>高度 (ft)</th><th>風向 (度)</th><th>風速 (kt)</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <button type="button" id="wind-apply">風向風速を反映</button>
+            <p class="note">高度の間は東西・南北成分で直線補間します。設標者は飛行高度の風で流され、観測者は落下中に各高度の風で流されます。</p>
           </section>
         </div>
 

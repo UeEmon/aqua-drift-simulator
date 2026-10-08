@@ -16,6 +16,15 @@
   direct flight time (along the same turn-then-straight path the guidance flies) and takes up
   the rest on the way by a detour with left turns, re-planned every second. The speed is
   changed only when no path can arrive on time (e.g. the point is inside the turning circle).
+* 3-D flight in the wind (feed.wind): the layer cruises at cruise_altitude_ft, descends to
+  drop_altitude_ft on the way to a drop point (climb_rate_fpm) and flies through the air mass:
+  its ground velocity is the air velocity plus the wind at its altitude. The guidance runs in
+  the air-mass frame (a ground point moves there with current - wind), aiming at the
+  interception point. The observer is released at the release point (the drop point less the
+  predicted fall displacement: the throw of the layer's ground speed and the drift of the
+  estimated mean wind), the exact release instant within the 1 s step is where the path passes
+  closest to it, and it falls freely through the true wind profile to the sea surface
+  (aqua_drift.wind).
 """
 from __future__ import annotations
 
@@ -24,8 +33,9 @@ import random
 
 import numpy as np
 
+from aqua_drift import wind as windlib
 from aqua_drift.deployment import _offset
-from aqua_drift.models import LayerConfig, LayerFeed, LayerState, LayerUpdate, Position
+from aqua_drift.models import DropRelease, LayerConfig, LayerFeed, LayerState, LayerUpdate, Position
 from aqua_drift.physics import local_offset_m
 
 G = 9.80665
@@ -59,7 +69,7 @@ def initial_state(config: LayerConfig, datum: Position, tick: int, rng: random.R
     heading = 270.0 if preferred_side(config) < 0 else 90.0  # left turn: counter-clockwise
     return LayerState(
         tick=tick, position=start, heading_deg=heading, speed_kt=speed, mode="ORBIT",
-        orbit_center=datum, orbit_radius_yd=radius / YD_TO_M,
+        orbit_center=datum, orbit_radius_yd=radius / YD_TO_M, altitude_ft=config.cruise_altitude_ft,
     )
 
 
@@ -241,6 +251,7 @@ def step(
         orbit_center=center if mode != "TRANSIT" else None,
         orbit_radius_yd=orbit_radius / YD_TO_M if mode != "TRANSIT" else 0.0,
         eta_s=eta,
+        altitude_ft=state.altitude_ft,
     ), arrived
 
 
@@ -370,30 +381,94 @@ PATH_LEG_LIMIT_S = 1200.0  # longest leg drawn
 PATH_MAX_POINTS = 400
 
 
-def planned_path(state: LayerState, config: LayerConfig, points: list[Position]) -> list[tuple[float, float]]:
+def _shift(position: Position, east_m: float, north_m: float) -> Position:
+    if not east_m and not north_m:
+        return position
+    return _offset(position, east_m, north_m, position.depth_ft)
+
+
+def _intercept_s(east: float, north: float, drift_e: float, drift_n: float, v: float) -> float:
+    """Time to meet a point at (east, north) m that moves at (drift_e, drift_n) m/s, flying
+    straight at v m/s: |d + u t| = v t."""
+    a = drift_e * drift_e + drift_n * drift_n - v * v
+    b = 2.0 * (east * drift_e + north * drift_n)
+    c = east * east + north * north
+    if a >= -1e-9:
+        return math.sqrt(c) / max(v, 1.0)
+    return (b + math.sqrt(max(b * b - 4.0 * a * c, 0.0))) / (-2.0 * a)
+
+
+def _lead(origin: Position, point: Position, drift_e: float, drift_n: float, v: float) -> Position:
+    """Where a point moving at (drift_e, drift_n) m/s is met (air-mass frame interception)."""
+    if not drift_e and not drift_n:
+        return point
+    east, north, _ = local_offset_m(origin, point)
+    t = _intercept_s(east, north, drift_e, drift_n, v)
+    return _shift(point, drift_e * t, drift_n * t)
+
+
+def planned_path(state: LayerState, config: LayerConfig, points: list[Position],
+                 wind_mps: tuple[float, float] = (0.0, 0.0)) -> list[tuple[float, float]]:
     """Planned flight path (飛行予定経路) from the current state through the drop points in
     order: the same turn-limited guidance as the flight (turn, then straight; a loop when a
     point is inside the turning circle), simulated at the current speed in PATH_STEP_S steps.
-    The detours that take up early time on a timed leg are not predicted. Empty without points."""
+    In the wind (wind_mps at the current altitude) the path is flown in the air mass and drawn
+    over the ground. The detours that take up early time on a timed leg are not predicted.
+    Empty without points."""
     if not points:
         return []
     probe = state.model_copy(update={"mode": "TRANSIT", "task_id": -1, "planned_path": []})
     rng = random.Random(0)
+    we, wn = wind_mps
+    v = max(state.speed_kt, 1.0) * KNOT_TO_MPS
+    total = 0.0  # ground = air mass + wind x total
     path = [(round(probe.position.latitude, 5), round(probe.position.longitude, 5))]
     for k, point in enumerate(points):
         elapsed = 0.0
         while elapsed < PATH_LEG_LIMIT_S and len(path) < PATH_MAX_POINTS:
-            probe, arrived = step(probe, config, point, -1 - k, point, rng, dt=PATH_STEP_S,
+            aim = _lead(probe.position, _shift(point, -we * total, -wn * total), -we, -wn, v)
+            probe, arrived = step(probe, config, aim, -1 - k, aim, rng, dt=PATH_STEP_S,
                                   wanted_speed_kt=state.speed_kt)
             elapsed += PATH_STEP_S
+            total += PATH_STEP_S
             if arrived:
                 break
-            path.append((round(probe.position.latitude, 5), round(probe.position.longitude, 5)))
+            over_ground = _shift(probe.position, we * total, wn * total)
+            path.append((round(over_ground.latitude, 5), round(over_ground.longitude, 5)))
         path.append((round(point.latitude, 5), round(point.longitude, 5)))
         if len(path) >= PATH_MAX_POINTS:
             break
-        probe = probe.model_copy(update={"position": point, "task_id": -1 - k})
+        probe = probe.model_copy(update={"position": _shift(point, -we * total, -wn * total), "task_id": -1 - k})
     return path
+
+
+def _climb(state: LayerState, config: LayerConfig, wanted_ft: float, dt: float = 1.0) -> LayerState:
+    change = config.climb_rate_fpm / 60.0 * dt
+    altitude = state.altitude_ft + max(-change, min(change, wanted_ft - state.altitude_ft))
+    return state if altitude == state.altitude_ft else state.model_copy(update={"altitude_ft": altitude})
+
+
+def release_point(layer_position: Position, altitude_ft: float, speed_kt: float, config: LayerConfig,
+                  point: Position, wind_mps: tuple[float, float], estimate_mps: tuple[float, float],
+                  current_mps: tuple[float, float], terminal_mps: float) -> tuple[Position, float]:
+    """Release point (投下点) for an observer that should enter the water at `point`.
+
+    The layer approaches on the bearing to the point with the ground speed its airspeed
+    (speed_kt) makes in the wind at its altitude (its navigation knows its own drift) and releases at the
+    altitude it will have reached (it descends towards drop_altitude_ft on the way). The fall
+    is predicted with the estimated mean wind from the drop altitude to the sea surface (0
+    without an estimate: the no-wind free fall); the drop point drifts with the current during
+    the fall. Returns (release point, predicted fall time s)."""
+    east, north, _ = local_offset_m(layer_position, point)
+    course = math.atan2(east, north)
+    ge, gn = windlib.ground_velocity(course, max(speed_kt, 1.0) * KNOT_TO_MPS, *wind_mps)
+    eta = math.hypot(east, north) / max(math.hypot(ge, gn), 1.0)
+    change = config.climb_rate_fpm / 60.0 * eta
+    altitude = altitude_ft + max(-change, min(change, config.drop_altitude_ft - altitude_ft))
+    predicted = windlib.release_offset(altitude, ge, gn, *estimate_mps, terminal_mps)
+    t = predicted.time_s
+    release = _shift(point, current_mps[0] * t - predicted.east_m, current_mps[1] * t - predicted.north_m)
+    return release, t
 
 
 def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[LayerState, LayerUpdate]:
@@ -404,53 +479,121 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
     arrives at the planned time (see timed_turn; the speed is kept unless no path can make it).
     Arriving early anyway, it comes round again (HOLD) when that ends closer to the planned
     time. Tasks without a planned time are flown at once.
-    Drop points drift with the estimated current."""
+    Drop points drift with the estimated current.
+
+    With feed.wind the layer flies in the air mass (the wind at its altitude carries it), heads
+    for the release point of each drop (see release_point: corrected for the observer's fall in
+    the estimated mean wind) and the released observer falls through the true wind profile;
+    the completed drop is the point where it enters the water (releases: the fall)."""
+    config = feed.config
     tasks = sorted(feed.tasks, key=lambda t: t.flight_key())
     positions = {t.task_id: t.position for t in tasks}
     completed: dict[int, Position] = {}
+    releases: dict[int, DropRelease] = {}
+    profile = windlib.WindProfile(feed.wind) if feed.wind is not None else None
+    estimate = (0.0, 0.0)
+    if profile is not None and feed.wind_estimate is not None and config.wind_correction:
+        estimate = (feed.wind_estimate.east_kt * KNOT_TO_MPS, feed.wind_estimate.north_kt * KNOT_TO_MPS)
+    current = (feed.current_east_kt * KNOT_TO_MPS, feed.current_north_kt * KNOT_TO_MPS)
+    wind = (0.0, 0.0)
+    offset = [0.0, 0.0]  # over the ground = air-mass frame + offset (the wind carries the layer)
+
+    def air(position: Position) -> Position:
+        return _shift(position, -offset[0], -offset[1])
+
+    def over_ground(position: Position) -> Position:
+        return _shift(position, offset[0], offset[1])
+
     tick = state.tick
     for _ in range(max(min(feed.tick - state.tick, 30), 0)):
         tick += 1
         positions = {k: drift(p, feed.current_east_kt, feed.current_north_kt) for k, p in positions.items()}
+        if profile is not None:
+            wind = profile.at(state.altitude_ft)
         open_tasks = [t for t in tasks if t.task_id not in completed]
-        task = open_tasks[0] if open_tasks and not feed.config.paused else None
-        target = hold = wanted = rate = None
+        task = open_tasks[0] if open_tasks and not config.paused else None
+        target = hold = wanted = rate = aim = None
         task_id = None
+        datum = air(feed.datum)
         if task is not None:
-            point = positions[task.task_id]
+            aim = positions[task.task_id]
+            if profile is not None:
+                aim, _ = release_point(over_ground(state.position), state.altitude_ft, state.speed_kt, config,
+                                       aim, wind, estimate, current, profile.terminal_mps)
+            point = air(aim)
+            if profile is not None:  # in the air mass a ground point moves with current - wind
+                point = _lead(state.position, point, current[0] - wind[0], current[1] - wind[1],
+                              max(state.speed_kt, 1.0) * KNOT_TO_MPS)
             timed = task.planned_tick is not None
             left = task.planned_tick - tick if timed else 0
             committed = state.task_id == task.task_id and state.mode == "TRANSIT"
             holding = state.mode == "HOLD" and state.task_id == task.task_id
             decision = "leave"
             if timed and not committed:
-                fastest = feed.config.speed_kt + feed.config.speed_spread_kt
-                near = eta_to(state.model_copy(update={"speed_kt": fastest}), feed.config, point) <= left + 600
-                decision = departure(state, feed.config, point, left, feed.datum, point if holding else None) \
+                fastest = config.speed_kt + config.speed_spread_kt
+                near = eta_to(state.model_copy(update={"speed_kt": fastest}), config, point) <= left + 600
+                decision = departure(state, config, point, left, datum, point if holding else None) \
                     if near else ("hold" if holding else "wait")
             if decision == "leave":
                 target, task_id = point, task.task_id
                 if timed:
-                    rate, wanted = timed_turn(state, feed.config, point, left)
+                    rate, wanted = timed_turn(state, config, point, left)
             elif holding:
                 hold, task_id = point, task.task_id
                 wanted = state.speed_kt
-        state, arrived = step(state, feed.config, target, task_id, feed.datum, rng, hold_center=hold,
+        to_drop = target is not None or hold is not None
+        state = _climb(state, config, config.drop_altitude_ft if to_drop else config.cruise_altitude_ft)
+        before = over_ground(state.position)
+        state, arrived = step(state, config, target, task_id, datum, rng, hold_center=hold,
                               wanted_speed_kt=wanted, turn_rate=rate)
+        offset[0] += wind[0]
+        offset[1] += wind[1]
+        if profile is not None and target is not None:
+            # release at the instant the path passes the release point: abeam of it within this
+            # second and inside the capture radius (the guidance' arrival can be up to the capture
+            # radius early)
+            arrived = _passes(before, over_ground(state.position), aim, config.capture_radius_yd * YD_TO_M)
         if arrived and task is not None:
             planned = task.planned_tick if task.planned_tick is not None else tick
             early = planned - tick
             # drop now when on time; otherwise come round again (HOLD) if that ends closer to the
             # planned time than dropping early now (coming round takes at least one flight back)
-            back = loop_s(state.speed_kt, feed.config)  # once past the point: at least one loop
+            back = loop_s(state.speed_kt, config)  # once past the point: at least one loop
             if early <= ON_TIME_TOLERANCE_S or max(back - early, 0.0) >= early:
-                completed[task.task_id] = positions[task.task_id]
+                if profile is None:
+                    completed[task.task_id] = positions[task.task_id]
+                else:
+                    drop = _release(task.task_id, tick, before, over_ground(state.position), aim,
+                                    state.altitude_ft, positions[task.task_id], profile, current)
+                    releases[task.task_id] = drop
+                    completed[task.task_id] = drop.splash_position
             else:
                 state = state.model_copy(update={"mode": "HOLD", "task_id": task.task_id})
+    state = state.model_copy(update={"position": over_ground(state.position)})
     state.tick = max(state.tick, feed.tick)
-    if not feed.config.paused:
-        open_points = [positions[t.task_id] for t in tasks if t.task_id not in completed]
-        state = state.model_copy(update={"planned_path": planned_path(state, feed.config, open_points)})
+    open_ids = [t.task_id for t in tasks if t.task_id not in completed]
+    release_positions: dict[int, Position] = {}
+    if profile is not None:
+        wind = profile.at(state.altitude_ft)
+        v = state.speed_kt * KNOT_TO_MPS
+        heading = math.radians(state.heading_deg)
+        ge, gn = v * math.sin(heading) + wind[0], v * math.cos(heading) + wind[1]
+        direction, speed = windlib.wind_from(*wind)
+        state = state.model_copy(update={
+            "ground_speed_kt": math.hypot(ge, gn) / KNOT_TO_MPS,
+            "track_deg": math.degrees(math.atan2(ge, gn)) % 360.0,
+            "wind_direction_deg": direction,
+            "wind_speed_kt": speed / KNOT_TO_MPS,
+        })
+        previous = state.position
+        for task_id in open_ids:
+            release_positions[task_id], _ = release_point(
+                previous, state.altitude_ft, state.speed_kt, config, positions[task_id], wind, estimate,
+                current, profile.terminal_mps)
+            previous = positions[task_id]
+    if not config.paused:
+        open_points = [release_positions.get(k, positions[k]) for k in open_ids]
+        state = state.model_copy(update={"planned_path": planned_path(state, config, open_points, wind)})
     eta: dict[int, float] = {}
     previous, elapsed = state.position, 0.0
     for task in (t for t in tasks if t.task_id not in completed):
@@ -459,7 +602,7 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
             elapsed = state.eta_s
         else:
             east, north, _ = local_offset_m(previous, point)
-            elapsed += math.hypot(east, north) / (feed.config.speed_kt * KNOT_TO_MPS)
+            elapsed += math.hypot(east, north) / (config.speed_kt * KNOT_TO_MPS)
         planned = task.planned_tick
         # expected drop time from now: the planned time when it can be met, else the arrival
         eta[task.task_id] = round(max(elapsed, (planned - feed.tick) if planned is not None else 0.0), 1)
@@ -470,4 +613,37 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
         task_positions={k: v for k, v in positions.items() if k not in completed},
         task_eta_s=eta,
         completed=completed,
+        releases=releases,
+        release_positions=release_positions,
+    )
+
+
+def _passes(before: Position, after: Position, point: Position, radius_m: float) -> bool:
+    """The step before -> after reaches the point abeam (or has passed it) within radius_m."""
+    se, sn, _ = local_offset_m(before, after)
+    pe, pn, _ = local_offset_m(before, point)
+    along = (pe * se + pn * sn) / max(se * se + sn * sn, 1e-9)
+    if along > 1.0:
+        return False  # still ahead
+    along = max(along, 0.0)
+    return math.hypot(pe - along * se, pn - along * sn) <= radius_m
+
+
+def _release(task_id: int, tick: int, before: Position, after: Position, aim: Position, altitude_ft: float,
+             point: Position, profile: windlib.WindProfile, current: tuple[float, float]) -> DropRelease:
+    """The observer leaves the layer where its path in this second passes closest to the
+    release point (before -> after: the 1 s step over the ground) and falls freely through the
+    true wind profile to the sea surface."""
+    se, sn, _ = local_offset_m(before, after)  # 1 s step: also the ground velocity in m/s
+    pe, pn, _ = local_offset_m(before, aim)
+    along = max(0.0, min(1.0, (pe * se + pn * sn) / max(se * se + sn * sn, 1e-9)))
+    release = _shift(before, along * se, along * sn).model_copy(update={"depth_ft": 0.0})
+    result = windlib.fall(altitude_ft, se, sn, profile.at, profile.terminal_mps)
+    splash = _shift(release, result.east_m, result.north_m).model_copy(update={"depth_ft": point.depth_ft})
+    planned = _shift(point, current[0] * result.time_s, current[1] * result.time_s)
+    return DropRelease(
+        task_id=task_id, release_tick=tick, release_position=release, altitude_ft=altitude_ft,
+        ground_east_kt=se / KNOT_TO_MPS, ground_north_kt=sn / KNOT_TO_MPS,
+        splash_tick=tick + math.ceil(result.time_s), splash_position=splash,
+        fall_time_s=result.time_s, planned_position=planned,
     )

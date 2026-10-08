@@ -129,6 +129,7 @@ const gpu = {
   layerLines: scene.primitives.add(new Cesium.PolylineCollection()),
   taskPoints: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
   taskLabels: scene.primitives.add(new Cesium.LabelCollection()),
+  releaseLines: scene.primitives.add(new Cesium.PolylineCollection()), // release point -> drop / entry point
   region: { current: null, pending: null },
   regionOutline: { current: null, pending: null },
   voxels: { current: null, pending: null },
@@ -629,7 +630,7 @@ function updateLayer(deployment) {
     state.layerMarker.set(Cesium.Cartesian3.fromDegrees(layer.position.longitude, layer.position.latitude, 0));
     const doing = layer.mode === "TRANSIT" ? `設標へ #${layer.task_id} 到着 ${fmt(layer.eta_s, 0)} s`
       : layer.mode === "HOLD" ? `#${layer.task_id} 設標点で計画時刻待ち` : "旋回待機";
-    state.layerMarker.label.text = `設標者 ${fmt(layer.speed_kt, 0)} kt ${doing}`;
+    state.layerMarker.label.text = `設標者 ${fmt(layer.altitude_ft, 0)} ft ${fmt(layer.speed_kt, 0)} kt ${doing}`;
     // planned flight path (飛行予定経路, dashed): the turn-limited path the layer will fly through
     // the drop points, from the backend (straight legs from an older backend without it)
     const approved = open.filter((t) => t.status === "APPROVED");
@@ -654,11 +655,31 @@ function updateLayer(deployment) {
     state.layerRoute.show = false;
     state.layerOrbit.show = false;
   }
-  const taskKey = open.map((t) => `${t.task_id}:${t.status}:${t.planned_tick}:${t.sequence}:${t.position.latitude.toFixed(4)}:${t.position.longitude.toFixed(4)}`).join("|") + `|${exaggeration()}`;
+  const releaseKey = (p) => (p ? `${p.latitude.toFixed(4)}:${p.longitude.toFixed(4)}` : "");
+  // the latest released drops: release point -> entry point (where the observer fell in the wind)
+  const released = tasks.filter((t) => t.status === "DONE" && t.release_position).slice(-6);
+  const taskKey = open.map((t) => `${t.task_id}:${t.status}:${t.planned_tick}:${t.sequence}:${t.position.latitude.toFixed(4)}:${t.position.longitude.toFixed(4)}:${releaseKey(t.release_position)}`).join("|")
+    + `|${released.map((t) => `${t.task_id}:${t.splash_tick}:${t.miss_yd}`).join(",")}|${exaggeration()}`;
   if (taskKey !== state.taskKey) {
     state.taskKey = taskKey;
     gpu.taskPoints.removeAll();
     gpu.taskLabels.removeAll();
+    gpu.releaseLines.removeAll();
+    const surface = (p) => Cesium.Cartesian3.fromDegrees(p.longitude, p.latitude, 0);
+    for (const t of open.filter((x) => x.release_position)) {
+      // corrected release point (投下点) and its predicted fall to the drop point
+      gpu.taskPoints.add({ position: surface(t.release_position), pixelSize: 6, color: COLORS.layer, outlineColor: COLORS.drop, outlineWidth: 1 });
+      gpu.releaseLines.add({ width: 1, material: dashMaterial(COLORS.drop.withAlpha(0.8), 6), positions: [surface(t.release_position), surface(t.position)] });
+    }
+    for (const t of released) {
+      const target = t.planned_position || t.position;
+      gpu.releaseLines.add({ width: 1, material: colorMaterial(COLORS.drop.withAlpha(0.6)), positions: [surface(t.release_position), surface(t.position)] });
+      gpu.taskPoints.add({ position: surface(target), pixelSize: 5, color: Cesium.Color.TRANSPARENT, outlineColor: COLORS.proposed, outlineWidth: 1 });
+      if (t.miss_yd != null) {
+        gpu.taskLabels.add({ position: surface(t.position), text: `#${t.task_id} 着水誤差 ${Math.round(t.miss_yd)} YD`, font: "10px sans-serif",
+          fillColor: COLORS.drop, pixelOffset: new Cesium.Cartesian2(0, 14) });
+      }
+    }
     for (const [index, t] of open.entries()) {
       const proposed = t.status === "PROPOSED";
       const color = proposed ? COLORS.proposed : COLORS.drop;
@@ -688,7 +709,10 @@ function updateLayer(deployment) {
   const detail = layer && enabled ? [
     ["状態", { ORBIT: "旋回待機", TRANSIT: "設標へ移動", HOLD: "設標点で時刻待ち" }[layer.mode] || layer.mode],
     ["位置", `${fmt(layer.position.latitude, 4)}, ${fmt(layer.position.longitude, 4)}`],
+    ["高度", `${fmt(layer.altitude_ft, 0)} ft（巡航 ${fmt(lay.cruise_altitude_ft, 0)} ft・投下 ${fmt(lay.drop_altitude_ft, 0)} ft）`],
     ["速力・針路", `${fmt(layer.speed_kt, 0)} kt・${fmt(layer.heading_deg, 0)}°`],
+    ["対地速力・航跡", layer.ground_speed_kt != null ? `${fmt(layer.ground_speed_kt, 0)} kt・${fmt(layer.track_deg, 0)}°` : "--"],
+    ["飛行高度の風", layer.wind_speed_kt != null ? `${fmt(layer.wind_direction_deg, 0)}°・${fmt(layer.wind_speed_kt, 1)} kt` : "--"],
     ["バンク", `${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）`],
     ["基準旋回", `${lay.preferred_turn === "right" ? "右" : "左"}旋回（反対旋回は ${fmt(lay.turn_margin_s ?? 10, 0)} 秒以上早い場合）`],
     ["実施中", layer.task_id != null ? `#${layer.task_id}・到着 ${fmt(layer.eta_s, 0)} s` : "なし"],
@@ -713,7 +737,9 @@ function updateLayer(deployment) {
           + `<button type="button" class="mini ghost" data-cancel="${t.task_id}">中止</button>` : "");
     const plan = t.planned_tick != null ? `計画 ${t.planned_tick} s` : "すぐ";
     const late = t.status === "DONE" && t.planned_tick != null ? `（${t.done_tick - t.planned_tick >= 0 ? "+" : ""}${t.done_tick - t.planned_tick} s）` : "";
-    const when = t.status === "APPROVED" ? `${plan}・あと ${fmt(t.eta_s, 0)} s` : t.status === "DONE" ? `${t.done_tick} s 投入${late}` : plan;
+    const fall = t.status === "DONE" && t.splash_tick != null
+      ? (t.miss_yd != null ? `・着水 ${t.splash_tick} s（誤差 ${Math.round(t.miss_yd)} YD）` : "・落下中") : "";
+    const when = t.status === "APPROVED" ? `${plan}・あと ${fmt(t.eta_s, 0)} s` : t.status === "DONE" ? `${t.done_tick} s 投下${late}${fall}` : plan;
     const src = { forward: "自動", operator: "即時配置", manual: "手動配置" }[t.source] || t.source;
     const rank = index >= 0 && open.length > 1 ? `・${index + 1}番目` : "";
     return `<tr><td>${t.task_id}<br /><small>${src}${rank}</small></td><td>${TASK_STATUS[t.status] || t.status}</td>`
@@ -809,11 +835,89 @@ $("layer-form").addEventListener("submit", (event) => {
     next.layer.orbit_radius_yd = num("layer-orbit");
     next.layer.turn_margin_s = num("layer-turn-margin");
     next.layer.proposal_timeout_s = num("layer-timeout");
+    next.layer.cruise_altitude_ft = num("layer-cruise-alt");
+    next.layer.drop_altitude_ft = num("layer-drop-alt");
+    next.layer.climb_rate_fpm = num("layer-climb");
   })
     .then(() => setMessage("設標者の条件を反映しました。"))
     .catch((error) => setMessage(`設定エラー: ${error.message}`));
 });
+$("layer-wind-correction").addEventListener("change", () => {
+  const on = checked("layer-wind-correction");
+  putConfig((next) => { next.layer.wind_correction = on; })
+    .then(() => setMessage(on ? "推定した平均風で投下点を修正します。" : "投下点を風で修正しません（無風の自由落下で計算）。"))
+    .catch((error) => setMessage(`設定エラー: ${error.message}`));
+});
 $("drop-reject-all").addEventListener("click", () => decideDrops(null, false));
+
+// ================================================================== wind (風向風速) and the mean wind estimates
+const WIND_TOP_FT = 30000;
+const WIND_STEP_FT = 1000;
+
+function windRows(config) {
+  // one row every 1,000 ft from the sea surface to 30,000 ft (missing levels: interpolated value)
+  const levels = (config.wind?.levels || []).slice().sort((a, b) => a.altitude_ft - b.altitude_ft);
+  const rows = [];
+  for (let alt = 0; alt <= WIND_TOP_FT; alt += WIND_STEP_FT) {
+    const exact = levels.find((l) => l.altitude_ft === alt);
+    if (exact) { rows.push(exact); continue; }
+    const below = levels.filter((l) => l.altitude_ft < alt).pop();
+    const above = levels.find((l) => l.altitude_ft > alt);
+    const pick = below && above ? (alt - below.altitude_ft <= above.altitude_ft - alt ? below : above) : below || above;
+    rows.push({ altitude_ft: alt, direction_deg: pick ? pick.direction_deg : 0, speed_kt: pick ? pick.speed_kt : 0 });
+  }
+  return rows;
+}
+
+function fillWindTable(config) {
+  const rows = windRows(config).reverse().map((l) => `<tr><td>${l.altitude_ft.toLocaleString()}</td>`
+    + `<td><input type="number" min="0" max="360" step="1" data-wind-dir="${l.altitude_ft}" value="${l.direction_deg}" /></td>`
+    + `<td><input type="number" min="0" max="300" step="1" data-wind-speed="${l.altitude_ft}" value="${l.speed_kt}" /></td></tr>`);
+  setHtml($("wind-table").querySelector("tbody"), rows.join(""));
+  $("wind-enabled").checked = config.wind?.enabled !== false;
+  $("wind-terminal").value = config.wind?.terminal_velocity_fps ?? 100;
+}
+
+function setAllWind(direction, speed) {
+  for (const input of $("wind-table").querySelectorAll("[data-wind-dir]")) input.value = direction;
+  for (const input of $("wind-table").querySelectorAll("[data-wind-speed]")) input.value = speed;
+}
+
+$("wind-fill").addEventListener("click", () => setAllWind(num("wind-fill-dir") % 360, Math.max(0, num("wind-fill-speed"))));
+$("wind-calm").addEventListener("click", () => setAllWind(0, 0));
+$("wind-apply").addEventListener("click", () => {
+  const levels = [];
+  for (let alt = 0; alt <= WIND_TOP_FT; alt += WIND_STEP_FT) {
+    const dir = Number($("wind-table").querySelector(`[data-wind-dir="${alt}"]`)?.value || 0);
+    const speed = Number($("wind-table").querySelector(`[data-wind-speed="${alt}"]`)?.value || 0);
+    levels.push({ altitude_ft: alt, direction_deg: ((dir % 360) + 360) % 360, speed_kt: Math.max(0, speed) });
+  }
+  putConfig((next) => {
+    next.wind = { ...(next.wind || {}), enabled: checked("wind-enabled"), levels, terminal_velocity_fps: num("wind-terminal") };
+  })
+    .then(() => setMessage("風向風速を反映しました（海面〜30,000 ft）。"))
+    .catch((error) => setMessage(`設定エラー: ${error.message}`));
+});
+
+function updateWind(deployment) {
+  if (!tabVisible("tab-wind")) return;
+  const estimates = (deployment?.wind_estimates || []).slice().reverse();
+  const latest = estimates[0];
+  const falling = deployment?.falling || 0;
+  const correction = state.latestConfig?.layer?.wind_correction !== false;
+  $("wind-status").textContent = (latest
+    ? `最新の推定（#${latest.task_id}、${fmt(latest.altitude_ft, 0)} ft〜海面）：${fmt(latest.direction_deg, 0)}°・${fmt(latest.speed_kt, 1)} kt`
+      + `（真値 ${fmt(latest.true_direction_deg, 0)}°・${fmt(latest.true_speed_kt, 1)} kt）`
+      + `　次の投下点を${correction ? "この平均風で修正" : "修正しない設定"}`
+    : "まだ着水した観測者がありません（最初の投下は無風の自由落下で投下点を計算）")
+    + (falling ? `　落下中 ${falling}` : "");
+  const rows = estimates.map((w) => `<tr><td>${w.task_id}<br /><small>${w.tick} s</small></td>`
+    + `<td>${fmt(w.altitude_ft, 0)} ft<br /><small>落下 ${fmt(w.fall_time_s, 1)} s</small></td>`
+    + `<td>${fmt(w.offset_yd, 0)} YD</td>`
+    + `<td>${fmt(w.direction_deg, 0)}°・${fmt(w.speed_kt, 1)} kt</td>`
+    + `<td>${fmt(w.true_direction_deg, 0)}°・${fmt(w.true_speed_kt, 1)} kt<br /><small>着水誤差 ${fmt(w.miss_yd, 0)} YD</small></td></tr>`);
+  setHtml($("wind-estimate-table").querySelector("tbody"), rows.join("") || "<tr><td colspan='5'>推定なし</td></tr>");
+}
 $("drop-approval").addEventListener("change", () => {
   const mode = $("drop-approval").value;
   state.dropApprovalPending = true;
@@ -1944,9 +2048,12 @@ function populateForms(config) {
     $("layer-paused").checked = Boolean(lay.paused);
     $("layer-turn").value = lay.preferred_turn || "left";
     const layValues = { "layer-speed": lay.speed_kt, "layer-spread": lay.speed_spread_kt, "layer-bank": lay.max_bank_deg,
-      "layer-orbit": lay.orbit_radius_yd, "layer-turn-margin": lay.turn_margin_s ?? 10, "layer-timeout": lay.proposal_timeout_s };
+      "layer-orbit": lay.orbit_radius_yd, "layer-turn-margin": lay.turn_margin_s ?? 10, "layer-timeout": lay.proposal_timeout_s,
+      "layer-cruise-alt": lay.cruise_altitude_ft ?? 3000, "layer-drop-alt": lay.drop_altitude_ft ?? 1000, "layer-climb": lay.climb_rate_fpm ?? 2000 };
     for (const [id, value] of Object.entries(layValues)) $(id).value = value;
+    $("layer-wind-correction").checked = lay.wind_correction !== false;
   }
+  fillWindTable(config);
   const l = config.lloyd || {};
   const lloydValues = { "lloyd-noise": l.level_noise_db, "lloyd-corr": l.noise_correlation_s, "lloyd-wave": l.wave_height_rms_m,
     "lloyd-path-error": l.path_difference_error_pct, "est-lloyd-model-error": config.estimator.lloyd_model_error_pct,
@@ -2134,6 +2241,7 @@ function render(snapshot) {
   updateLloyd(snapshot.lloyd, snapshot.config, snapshot.target);
   updateDeployment(snapshot.deployment);
   updateLayer(snapshot.deployment);
+  updateWind(snapshot.deployment);
   drawCharts();
   if (state.firstFix && snapshot.target) {
     state.firstFix = false;

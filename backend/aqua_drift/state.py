@@ -17,6 +17,7 @@ from aqua_drift.models import (
     DeploymentRequest,
     DeploymentStatus,
     DopplerBatch,
+    DropRelease,
     DropTask,
     EstimationControl,
     EstimatorFeed,
@@ -38,9 +39,11 @@ from aqua_drift.models import (
     Snapshot,
     TargetState,
     TrackEstimate,
+    WindEstimate,
 )
 from aqua_drift.optimal_deployment import LayerAvailability
 from aqua_drift.physics import local_offset_m
+from aqua_drift.wind import WindProfile, wind_estimate
 
 BATCH_RETENTION_TICKS = 900
 # above 1x the clock waits for the estimator when it falls this many ticks behind the newest batch
@@ -83,6 +86,8 @@ class SimulationState:
         self.tasks: list[DropTask] = []  # additional observers laid by the layer (設標者)
         self.task_counter = 0
         self.layer_state: LayerState | None = None
+        self.falling: list[tuple[DropRelease, str]] = []  # released observers in free fall (source)
+        self.wind_estimates: deque[WindEstimate] = deque(maxlen=20)  # mean wind from each drop
 
     async def set_config(self, config: ScenarioConfig) -> None:
         async with self.lock:
@@ -98,6 +103,7 @@ class SimulationState:
     async def set_tick(self, tick: int) -> None:
         async with self.lock:
             self.tick = max(self.tick, tick)
+            self._splash()
 
     async def set_time_scale(self, time_scale: float) -> None:
         async with self.lock:
@@ -239,12 +245,13 @@ class SimulationState:
                 estimates=list(self.estimates),
                 observer_positions=[r.state.position for r in self.observers.values()],
                 pending_positions=[p.position for p in self.placements]
-                + [t.position for t in self.tasks if t.status in self.OPEN_TASK_STATES],
+                + [t.position for t in self.tasks if t.status in self.OPEN_TASK_STATES]
+                + [drop.splash_position for drop, _ in self.falling],
                 standby_count=self._standby_count(),
                 last_deploy_tick=self.last_deploy_tick,
                 free_slots=max(
                     self.config.observer_limit - len(self.observers) - len(self.placements)
-                    - self._open_task_count(), 0
+                    - self._open_task_count() - len(self.falling), 0
                 ),
                 source_frequency_hz=self.config.source.source_frequency_hz
                 + self.config.source.shared_recognition_bias_hz,
@@ -291,6 +298,8 @@ class SimulationState:
             approval=self.config.layer.approval,
             tasks=self.tasks[-30:],
             layer=self.layer_state if self.config.layer.enabled else None,
+            falling=len(self.falling),
+            wind_estimates=list(self.wind_estimates),
         )
 
     # ---------------------------------------------------------------- layer (設標者)
@@ -412,6 +421,8 @@ class SimulationState:
                 current_east_kt=current.east_kt if current else 0.0,
                 current_north_kt=current.north_kt if current else 0.0,
                 state=self.layer_state,
+                wind=self.config.wind,
+                wind_estimate=self.wind_estimates[-1] if self.wind_estimates else None,
             )
 
     async def set_layer_update(self, update: LayerUpdate) -> list[int]:
@@ -425,19 +436,48 @@ class SimulationState:
                 if task and task.status == "APPROVED":
                     task.position = position
                     task.eta_s = update.task_eta_s.get(task_id)
+                    task.release_position = update.release_positions.get(task_id)
             for task_id, position in update.completed.items():
                 task = by_id.get(task_id)
                 if not task or task.status != "APPROVED":
                     continue
                 task.status = "DONE"
                 task.done_tick = update.state.tick
-                task.position = position
                 task.eta_s = 0.0
-                self.placements.append(ObserverPlacement(
-                    position=position, source="manual" if task.source == "manual" else "forward"
-                ))
+                source = "manual" if task.source == "manual" else "forward"
+                drop = update.releases.get(task_id)
+                if drop is None:  # no free fall: in the water at the drop point at once
+                    task.position = position
+                    self.placements.append(ObserverPlacement(position=position, source=source))
+                else:  # released: falls through the wind and is in the water at splash_tick
+                    task.release_position = drop.release_position
+                    task.release_altitude_ft = drop.altitude_ft
+                    task.planned_position = drop.planned_position
+                    task.splash_tick = drop.splash_tick
+                    self.falling.append((drop, source))
                 done.append(task_id)
+            self._splash()
             return done
+
+    def _splash(self) -> None:
+        """Released observers that reached the sea surface are in the water (the orchestrator
+        starts their containers). Where each entered the water, compared with the predicted entry
+        point of the same fall without wind, gives the mean wind from its drop altitude to the
+        sea surface; the layer corrects the next release point with it."""
+        due = [entry for entry in self.falling if entry[0].splash_tick <= self.tick]
+        if not due:
+            return
+        self.falling = [entry for entry in self.falling if entry[0].splash_tick > self.tick]
+        by_id = {t.task_id: t for t in self.tasks}
+        profile = WindProfile(self.config.wind)
+        for drop, source in due:
+            self.placements.append(ObserverPlacement(position=drop.splash_position, source=source))
+            estimate = wind_estimate(drop, profile)
+            self.wind_estimates.append(estimate)
+            task = by_id.get(drop.task_id)
+            if task is not None:
+                task.position = drop.splash_position
+                task.miss_yd = estimate.miss_yd
 
     async def set_observer(self, observer: ObserverState) -> str | None:
         """Register/update an observer. When a new observer exceeds the limit (1..99) the
@@ -599,6 +639,8 @@ class SimulationState:
             # automatic drop plans belong to the old run; operator placements are still flown
             self.tasks = [t for t in self.tasks if t.source == "manual" and t.status == "APPROVED"]
             self.layer_state = None
+            self.falling = [entry for entry in self.falling if entry[1] == "manual"]
+            self.wind_estimates.clear()
             self.standby.clear()
             if replace_observers:
                 explicit = {k: v for k, v in self.assignments.items() if k in self.explicit_ids}
