@@ -532,15 +532,19 @@ function updateObservers(records, batch, config) {
   setText("detecting-count", String(detecting.size));
 }
 
-function updateBearings(bearings, config) {
+// Solid while the observer holds contact and its bearing is current; once contact is lost the
+// last bearing stays as a dashed line until the observer is evicted or the run is reset.
+function updateBearings(bearings, batch, observers, config) {
   const show = checked("show-bearing");
-  const seen = new Set();
+  const detecting = new Set((batch?.observations || []).filter((o) => o.detected).map((o) => o.observer_id));
+  const active = new Set(observers.map((r) => r.state.observer_id));
+  const fresh = new Set();
   const length = config.max_slant_range_yd * YD_TO_M;
   for (const item of bearings) {
-    seen.add(item.observer_id);
+    fresh.add(item.observer_id);
     let line = state.bearingLines.get(item.observer_id);
     if (!line) {
-      line = { polyline: gpu.lines.add({ positions: [], width: 1.5, material: dashMaterial(COLORS.bearing.withAlpha(0.85), 8) }), key: "" };
+      line = { polyline: gpu.lines.add({ positions: [], width: 1.5 }), key: "", solid: null };
       state.bearingLines.set(item.observer_id, line);
     }
     const key = `${item.tick}-${exaggeration()}`;
@@ -549,9 +553,20 @@ function updateBearings(bearings, config) {
       line.polyline.positions = [cartOf(item.observer_position), cart(end.longitude, end.latitude, item.observer_position.depth_ft)];
       line.key = key;
     }
-    line.polyline.show = show;
   }
-  for (const [id, line] of state.bearingLines) if (!seen.has(id)) line.polyline.show = false;
+  for (const [id, line] of state.bearingLines) {
+    const solid = fresh.has(id) && detecting.has(id);
+    if (line.solid !== solid) {
+      line.polyline.material = solid ? colorMaterial(COLORS.bearing.withAlpha(0.85)) : dashMaterial(COLORS.bearing.withAlpha(0.85), 8);
+      line.solid = solid;
+    }
+    line.polyline.show = show && active.has(id);
+  }
+}
+
+function clearBearings() {
+  for (const line of state.bearingLines.values()) gpu.lines.remove(line.polyline);
+  state.bearingLines.clear();
 }
 
 // ================================================================== forward deployment
@@ -1593,6 +1608,7 @@ function updateRunState(snapshot) {
     state.trueCpa.clear();
     if (snapshot.generation !== state.generation) {
       state.generation = snapshot.generation;
+      clearBearings();
     }
   }
 }
@@ -2263,7 +2279,7 @@ function render(snapshot) {
   updateRunState(snapshot);
   updateTruth(snapshot.target);
   updateObservers(snapshot.observers, snapshot.doppler, snapshot.config);
-  updateBearings(snapshot.bearings || [], snapshot.config);
+  updateBearings(snapshot.bearings || [], snapshot.doppler, snapshot.observers, snapshot.config);
   updateEstimateLayers(snapshot.estimates);
   const estimate = selectedEstimate(snapshot);
   updateRegion(estimate);
