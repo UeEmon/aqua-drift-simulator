@@ -66,7 +66,6 @@ import math
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy.special import erfc
 
 from aqua_drift.deployment import _offset
 from aqua_drift.models import ForwardDeploymentConfig, Position, TrackEstimate
@@ -83,6 +82,12 @@ DEPTH_RATE = 2.0 * FT_TO_M
 MIN_DEPTH_M = 50.0 * FT_TO_M
 MIRROR_DOPPLER_SIGMA_HZ = 0.1  # model-error floor for the mirror discrimination (one per step)
 MIN_SEPARATION = 0.3  # x R_max between new observers
+
+
+def _erfc(x: np.ndarray) -> np.ndarray:
+    """Complementary error function of a small array. math.erfc instead of scipy.special:
+    importing scipy.special costs ~30 MB in every process that plans deployments (API, deployer)."""
+    return np.array([math.erfc(v) for v in np.ravel(x)], dtype=float).reshape(np.shape(x))
 
 
 @dataclass
@@ -317,7 +322,7 @@ def _mirror_cost(
         db = (b_true - b_mirror + np.pi) % (2 * np.pi) - np.pi
         D += np.sum(np.where(det, db, 0.0) ** 2, axis=(1, 2)) * (
             STEP_S / sensor.bearing_interval_s / math.radians(sensor.bearing_sigma_deg) ** 2)
-    confuse = 0.5 * erfc(np.sqrt(D) / 2.0 / math.sqrt(2.0))
+    confuse = 0.5 * _erfc(np.sqrt(D) / 2.0 / math.sqrt(2.0))
     gap = np.sum((pos[None, :, 0:2] - mpos[:, :, 0:2]) ** 2, axis=2)  # (M,K)
     gap = np.mean(gap[:, evaluate], axis=1) if evaluate.any() else np.zeros(M)
     return np.where(count >= 2, confuse * gap, 0.0)

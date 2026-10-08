@@ -23,6 +23,11 @@ from scipy.optimize import least_squares
 
 from aqua_drift.estimation.current_fit import CurrentFit
 
+# particles x window rows evaluated at once by window_loglik. Each block makes ~20 temporaries
+# of this many float64 (the (M,K,3) geometry arrays count three times), so 250k keeps the peak
+# near 40 MB; 1.5M made the estimator jump by ~250 MB at every move step.
+LOGLIK_CHUNK_ELEMENTS = 250_000
+
 
 @dataclass
 class Epoch:
@@ -192,7 +197,7 @@ def window_loglik(
     prm: MoveParams,
 ) -> np.ndarray:
     total = np.empty(len(states))
-    chunk = int(max(64, 1_500_000 // max(len(win.dt), 1)))
+    chunk = int(max(64, LOGLIK_CHUNK_ELEMENTS // max(len(win.dt), 1)))
     for begin in range(0, len(states), chunk):
         part = states[begin : begin + chunk]
         _, dist, rdot = _geometry(part, win, current)
