@@ -559,6 +559,12 @@ class DeploymentFeed(BaseModel):
     layer_ready_tick: int | None = None
     layer_ready_position: Position | None = None
     layer_ready_heading_deg: float | None = None
+    # where it is now and its open drops in flight order (planned drop tick, None: at once):
+    # a new plan is routed on after them
+    layer_position: Position | None = None
+    layer_heading_deg: float | None = None
+    layer_queue: list[Position] = Field(default_factory=list)
+    layer_queue_ticks: list[int | None] = Field(default_factory=list)
     layer_speed_kt: float = 200.0
     layer_max_bank_deg: float = 15.0
     source_frequency_hz: float = 400.0  # operator's (recognized) source frequency
@@ -633,6 +639,15 @@ class LayerState(BaseModel):
     orbit_center: Position | None = None
     orbit_radius_yd: float = 0.0
     eta_s: float | None = None
+    # heading the layer crosses its current drop point on (lined up for the next drop point;
+    # None: any heading) and the drops it was chosen for ("task>next")
+    approach_deg: float | None = None
+    approach_key: str = ""
+    # the Dubins path being flown to the current drop point (turn sides +1 right / -1 left / 0
+    # straight and the remaining lengths in metres): followed as it is when a fresh plan comes out
+    # longer (small errors at the joins of the path can make the exact plan jump to a detour)
+    path_sides: list[int] = Field(default_factory=list)
+    path_lengths_m: list[float] = Field(default_factory=list)
     # planned flight path ahead (飛行予定経路): [latitude, longitude] from the current position
     # through the open drop points in order, along the turn-limited guidance path
     planned_path: list[tuple[float, float]] = Field(default_factory=list)

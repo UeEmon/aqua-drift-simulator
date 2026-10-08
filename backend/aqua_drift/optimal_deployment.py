@@ -67,6 +67,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from aqua_drift import route as routelib
 from aqua_drift.deployment import _offset
 from aqua_drift.models import ForwardDeploymentConfig, Position, TrackEstimate
 from aqua_drift.physics import local_offset_m
@@ -337,6 +338,11 @@ class LayerAvailability:
     speed_kt: float
     max_bank_deg: float
     heading_deg: float | None = None  # its heading then (None: unknown -> an average half turn)
+    # where it is now and its open drops in flight order (planned drop time s from now, None:
+    # at once): a new plan is routed on after them
+    now_position: Position | None = None
+    now_heading_deg: float | None = None
+    queue: list[tuple[Position, float | None]] = field(default_factory=list)
 
     def earliest_s(self, origin: Position, points: np.ndarray) -> np.ndarray:
         """Earliest drop time (s from now) at each point (water-frame metres from origin):
@@ -557,7 +563,6 @@ def plan_optimal_deployment(
             f"optimal: best new observer would improve the predicted error by only "
             f"{first_gain * 100:.0f} % (< {config.trigger_gain * 100:.0f} %)"
         ), report
-    positions = [_offset(origin, float(grid[i, 0]), float(grid[i, 1]), float(grid[i, 2] / FT_TO_M)) for i in chosen]
     if config.schedule_drops:
         times = drop_times(
             grid[chosen], earliest[chosen], [h.pos for h in hyps], r_max, float(config.drop_lead_s),
@@ -565,6 +570,27 @@ def plan_optimal_deployment(
         )
     else:
         times = earliest[chosen]
+    if layer is not None:
+        # the layer lays them one after the other: the order with the least delay and the times
+        # it can keep along its route (each drop crossed lined up for the next one)
+        # (after its open drops when they are known: the approach to the last one is chosen
+        # again for the new ones)
+        queued = layer.queue and layer.now_position is not None and layer.now_heading_deg is not None
+        start = layer.now_position if queued else layer.position
+        heading = layer.now_heading_deg if queued else layer.heading_deg
+        start_e, start_n, _ = local_offset_m(origin, start)
+        prefix = None
+        if queued:
+            offsets = [local_offset_m(start, p) for p, _ in layer.queue]
+            prefix = ([o[0] for o in offsets], [o[1] for o in offsets], [s for _, s in layer.queue])
+        order, times = routelib.schedule(
+            [float(grid[i, 0]) - start_e for i in chosen], [float(grid[i, 1]) - start_n for i in chosen],
+            None if heading is None else math.radians(heading), layer.speed_kt,
+            layer.max_bank_deg, [float(t) for t in times], start_s=0.0 if queued else layer.ready_s, prefix=prefix,
+        )
+        chosen = [chosen[k] for k in order]
+        report.depths_ft = [report.depths_ft[k] for k in order]
+    positions = [_offset(origin, float(grid[i, 0]), float(grid[i, 1]), float(grid[i, 2] / FT_TO_M)) for i in chosen]
     report.drop_times_s = [float(t) for t in times]
     why = "operator request" if force else ("coverage" if coverage_short else "information gain")
     reason = (
@@ -588,6 +614,10 @@ def availability_from_feed(feed) -> LayerAvailability | None:
         speed_kt=feed.layer_speed_kt,
         max_bank_deg=feed.layer_max_bank_deg,
         heading_deg=feed.layer_ready_heading_deg,
+        now_position=feed.layer_position,
+        now_heading_deg=feed.layer_heading_deg,
+        queue=[(p, None if t is None else float(t - feed.tick))
+               for p, t in zip(feed.layer_queue, feed.layer_queue_ticks, strict=True)],
     )
 
 

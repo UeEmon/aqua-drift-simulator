@@ -4,8 +4,8 @@ import asyncio
 import math
 from collections import OrderedDict, deque
 
-import numpy as np
-
+from aqua_drift import layer as layerlib
+from aqua_drift import route as routelib
 from aqua_drift.deployment import default_position
 from aqua_drift.models import (
     BearingReport,
@@ -41,7 +41,6 @@ from aqua_drift.models import (
     TrackEstimate,
     WindEstimate,
 )
-from aqua_drift.optimal_deployment import LayerAvailability
 from aqua_drift.physics import local_offset_m
 from aqua_drift.wind import WindProfile, wind_estimate
 
@@ -270,20 +269,18 @@ class SimulationState:
         layer = self.config.layer
         if not layer.enabled:
             return {"layer_enabled": False}
-        ready_tick, ready_position, heading = self.tick, None, None
-        if self.layer_state is not None:
-            ready_position, heading = self.layer_state.position, self.layer_state.heading_deg
-        for task in self.tasks:
-            if task.status not in self.OPEN_TASK_STATES:
-                continue
-            due = task.planned_tick if task.planned_tick is not None else self.tick + int(task.eta_s or 0)
-            if due >= ready_tick:
-                ready_tick, ready_position, heading = due, task.position, None
+        queue = sorted((t for t in self.tasks if t.status in self.OPEN_TASK_STATES), key=lambda t: t.flight_key())
+        ready_tick, ready_position, heading = layerlib.ready_pose(
+            self.layer_state, layer, queue, self.tick, self.config.target.initial_position)
         return {
             "layer_enabled": True,
             "layer_ready_tick": ready_tick,
-            "layer_ready_position": ready_position or self.config.target.initial_position,
+            "layer_ready_position": ready_position,
             "layer_ready_heading_deg": heading,
+            "layer_position": self.layer_state.position if self.layer_state is not None else None,
+            "layer_heading_deg": self.layer_state.heading_deg if self.layer_state is not None else None,
+            "layer_queue": [t.position for t in queue],
+            "layer_queue_ticks": [t.planned_tick for t in queue],
             "layer_speed_kt": layer.speed_kt,
             "layer_max_bank_deg": layer.max_bank_deg,
         }
@@ -369,8 +366,8 @@ class SimulationState:
         """Operator sets the drop order (設標順) of the open drops: the listed ones first in
         that order, the others after them in their current order. The drop times are planned
         again along the new order: each drop at its requested (optimal) time, or when the layer
-        can be there after the previous drop (flight at the layer speed from the previous point,
-        with the turn), whichever is later. Drops 'as soon as possible' stay so while only such
+        can be there after the previous drop (along the route at the layer speed, see
+        route.route), whichever is later. Drops 'as soon as possible' stay so while only such
         drops come before them. Returns the open drops in the new order (None: unknown id)."""
         async with self.lock:
             self._expire_tasks()
@@ -386,21 +383,22 @@ class SimulationState:
                 previous, heading = self.layer_state.position, self.layer_state.heading_deg
             else:
                 previous, heading = self.config.target.initial_position, None
-            ready, timed = float(self.tick), False
-            for task, sequence in zip(order, sequences, strict=True):
+            offsets = [local_offset_m(previous, t.position) for t in order]
+            if heading is None and order:  # unknown: on its way towards the first drop
+                heading = math.degrees(math.atan2(offsets[0][0], offsets[0][1]))
+            legs = routelib.route([o[0] for o in offsets], [o[1] for o in offsets], math.radians(heading or 0.0),
+                                  layer.speed_kt, layer.max_bank_deg,
+                                  [None if t.requested_tick is None else float(t.requested_tick - self.tick)
+                                   for t in order]) if layer.enabled else []
+            timed = False
+            for k, (task, sequence) in enumerate(zip(order, sequences, strict=True)):
                 task.sequence = sequence
-                if layer.enabled:
-                    east, north, _ = local_offset_m(previous, task.position)
-                    flight = LayerAvailability(ready_s=0.0, position=previous, speed_kt=layer.speed_kt,
-                                               max_bank_deg=layer.max_bank_deg, heading_deg=heading)
-                    ready += float(flight.earliest_s(previous, np.array([[east, north, 0.0]]))[0])
+                ready = self.tick + legs[k].drop_s if legs else float(self.tick)
                 timed = timed or task.requested_tick is not None
                 if timed:
-                    task.planned_tick = max(task.requested_tick or 0, math.ceil(ready))
-                    ready = float(task.planned_tick)
+                    task.planned_tick = max(task.requested_tick or 0, math.ceil(ready - 1e-6))
                 else:
                     task.planned_tick = None
-                previous, heading = task.position, None
             return order
 
     async def layer_feed(self) -> LayerFeed:
