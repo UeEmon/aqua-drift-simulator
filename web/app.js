@@ -115,6 +115,9 @@ const COLORS = {
   layer: Cesium.Color.fromCssColorString("#e9e4ff"),
   proposed: Cesium.Color.fromCssColorString("#ffd479"),
   error: Cesium.Color.WHITE,
+  flightWind: Cesium.Color.fromCssColorString("#a0e7ff"), // wind at the layer's flight altitude
+  dropWind: Cesium.Color.fromCssColorString("#d59bff"), // mean wind used to correct the release points
+  current: Cesium.Color.fromCssColorString("#3d8bff"), // external force (current) from observer drift
 };
 
 // GPU-batched primitive collections: one draw call per collection instead of one per entity
@@ -130,6 +133,8 @@ const gpu = {
   taskPoints: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
   taskLabels: scene.primitives.add(new Cesium.LabelCollection()),
   releaseLines: scene.primitives.add(new Cesium.PolylineCollection()), // release point -> drop / entry point
+  vectors: scene.primitives.add(new Cesium.PolylineCollection()), // wind and external-force arrows
+  vectorLabels: scene.primitives.add(new Cesium.LabelCollection()),
   region: { current: null, pending: null },
   regionOutline: { current: null, pending: null },
   voxels: { current: null, pending: null },
@@ -185,6 +190,38 @@ function setText(id, text) {
 }
 function setMessage(text) {
   setText("message", text);
+}
+// ---- simulation time of day: tick t is at epoch_s + t (epoch_s = system time of tick 0, fixed by
+// the clock, which keeps the simulation on the system time at real-time speed). Shown as local
+// clock time HH:MM:SS; seconds since start only while the epoch is not known yet.
+function epochS() {
+  const epoch = state.latestSnapshot?.epoch_s;
+  return epoch == null || !Number.isFinite(Number(epoch)) ? null : Number(epoch);
+}
+const pad2 = (n) => String(n).padStart(2, "0");
+function clockAt(tick) {
+  if (tick == null || !Number.isFinite(Number(tick))) return "--:--:--";
+  const epoch = epochS();
+  if (epoch == null) return `${Math.round(Number(tick))} s`;
+  const d = new Date(Math.round((epoch + Number(tick)) * 1000));
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+// "HH:MM" / "HH:MM:SS" (local) -> tick, the occurrence nearest to the current simulation time;
+// a plain number is taken as a tick (seconds since tick 0). null when it cannot be read.
+function tickFromClock(text) {
+  const value = String(text || "").trim();
+  if (/^\d+(\.\d+)?$/.test(value)) return Math.round(Number(value));
+  const m = value.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  const epoch = epochS();
+  const tick = state.latestSnapshot?.tick ?? 0;
+  if (!m || epoch == null) return null;
+  const now = new Date(Math.round((epoch + tick) * 1000));
+  const at = new Date(now);
+  at.setHours(Number(m[1]), Number(m[2]), Number(m[3] || 0), 0);
+  let diff = (at - now) / 1000;
+  if (diff < -43200) diff += 86400;
+  if (diff > 43200) diff -= 86400;
+  return Math.max(0, tick + Math.round(diff));
 }
 function latText(lat) {
   return `${Math.abs(lat).toFixed(5)}°${lat >= 0 ? "N" : "S"}`;
@@ -570,7 +607,7 @@ function updateDeployment(deployment) {
         if (record.positions.length) {
           gpu.dropLabels.add({
             position: cartOf(record.positions[0]),
-            text: `前程 ${record.tick}s`,
+            text: `前程 ${clockAt(record.tick)}`,
             font: "11px sans-serif",
             fillColor: COLORS.drop,
             pixelOffset: new Cesium.Cartesian2(0, -14),
@@ -583,10 +620,10 @@ function updateDeployment(deployment) {
   const enabled = state.latestConfig?.forward?.enabled;
   const starting = status.pending_placements > 0 ? "（観測者コンテナを起動中）" : "";
   setHtml($("deploy-status"), `自動前程配置 <b>${enabled ? "有効" : "無効"}</b>　投入待ち ${status.pending_placements}${starting}　` +
-    `待機中 ${status.standby_count}　最終配置 ${status.last_deploy_tick ?? "--"} s`);
+    `待機中 ${status.standby_count}　最終配置 ${status.last_deploy_tick == null ? "--" : clockAt(status.last_deploy_tick)}`);
   const rows = status.history.slice().reverse().map((r) => {
     const depths = r.positions.map((p) => Math.round(p.depth_ft)).join("/");
-    return `<tr><td>${r.tick} s</td><td>${r.positions.length}<br /><small>${depths} Ft</small></td><td>${escapeHtml(deployReason(r.reason))}</td></tr>`;
+    return `<tr><td>${clockAt(r.tick)}</td><td>${r.positions.length}<br /><small>${depths} Ft</small></td><td>${escapeHtml(deployReason(r.reason))}</td></tr>`;
   });
   setHtml($("deploy-table").querySelector("tbody"), rows.join("") || "<tr><td colspan='3'>配置なし</td></tr>");
 }
@@ -628,7 +665,7 @@ function updateLayer(deployment) {
     }
     state.layerMarker.show(true);
     state.layerMarker.set(Cesium.Cartesian3.fromDegrees(layer.position.longitude, layer.position.latitude, 0));
-    const doing = layer.mode === "TRANSIT" ? `設標へ #${layer.task_id} 到着 ${fmt(layer.eta_s, 0)} s`
+    const doing = layer.mode === "TRANSIT" ? `設標へ #${layer.task_id} 到着 ${layer.eta_s != null ? clockAt((layer.tick || 0) + layer.eta_s) : "--"}`
       : layer.mode === "HOLD" ? `#${layer.task_id} 設標点で計画時刻待ち` : "旋回待機";
     state.layerMarker.label.text = `設標者 ${fmt(layer.altitude_ft, 0)} ft ${fmt(layer.speed_kt, 0)} kt ${doing}`;
     // planned flight path (飛行予定経路, dashed): the turn-limited path the layer will fly through
@@ -687,7 +724,7 @@ function updateLayer(deployment) {
       gpu.taskLabels.add({
         position: cartOf(t.position),
         text: `${open.length > 1 ? `${index + 1}番目 ` : ""}${proposed ? "提案 " : ""}#${t.task_id}（${Math.round(t.position.depth_ft)} Ft）`
-          + (t.planned_tick != null ? `計画 ${t.planned_tick} s` : "すぐ") + (proposed ? " 了承待ち" : ""),
+          + (t.planned_tick != null ? `計画 ${clockAt(t.planned_tick)}` : "すぐ") + (proposed ? " 了承待ち" : ""),
         font: "11px sans-serif", fillColor: color, pixelOffset: new Cesium.Cartesian2(0, -14),
       });
     }
@@ -701,9 +738,8 @@ function updateLayer(deployment) {
   const lay = state.latestConfig?.layer || {};
   const enabled = lay.enabled !== false;
   const paused = Boolean(lay.paused);
-  const turnName = (bank) => (Math.abs(bank) < 0.5 ? "直進" : bank < 0 ? "左旋回" : "右旋回");
   $("layer-status").textContent = !enabled ? "設標者なし（追加の観測者は即時に投入）"
-    : layer ? `設標者 ${fmt(layer.speed_kt, 0)} kt・バンク ${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）・${layer.mode === "TRANSIT" ? `設標 #${layer.task_id} へ移動中（到着 ${fmt(layer.eta_s, 0)} s）` : layer.mode === "HOLD" ? `設標 #${layer.task_id} の地点で計画時刻まで旋回` : "目標推定位置の周囲を旋回待機"}${paused ? "【設標一時停止中】" : ""}　了承待ち ${proposed.length}・設標待ち ${open.length - proposed.length}`
+    : layer ? `設標者 ${fmt(layer.speed_kt, 0)} kt・バンク ${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）・${layer.mode === "TRANSIT" ? `設標 #${layer.task_id} へ移動中（到着 ${layer.eta_s != null ? clockAt((layer.tick || 0) + layer.eta_s) : "--"}）` : layer.mode === "HOLD" ? `設標 #${layer.task_id} の地点で計画時刻まで旋回` : "目標推定位置の周囲を旋回待機"}${paused ? "【設標一時停止中】" : ""}　了承待ち ${proposed.length}・設標待ち ${open.length - proposed.length}`
       : "設標者の準備中";
   const next = open.find((t) => t.status === "APPROVED");
   const detail = layer && enabled ? [
@@ -715,8 +751,8 @@ function updateLayer(deployment) {
     ["飛行高度の風", layer.wind_speed_kt != null ? `${fmt(layer.wind_direction_deg, 0)}°・${fmt(layer.wind_speed_kt, 1)} kt` : "--"],
     ["バンク", `${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）`],
     ["基準旋回", `${lay.preferred_turn === "right" ? "右" : "左"}旋回（反対旋回は ${fmt(lay.turn_margin_s ?? 10, 0)} 秒以上早い場合）`],
-    ["実施中", layer.task_id != null ? `#${layer.task_id}・到着 ${fmt(layer.eta_s, 0)} s` : "なし"],
-    ["次の設標", next ? `#${next.task_id}・${next.planned_tick != null ? `計画 ${next.planned_tick} s（あと ${Math.max(0, next.planned_tick - (layer.tick || 0))} s）` : "すぐ"}` : "なし"],
+    ["実施中", layer.task_id != null ? `#${layer.task_id}・到着 ${layer.eta_s != null ? `${clockAt((layer.tick || 0) + layer.eta_s)}（あと ${fmt(layer.eta_s, 0)} s）` : "--"}` : "なし"],
+    ["次の設標", next ? `#${next.task_id}・${next.planned_tick != null ? `計画 ${clockAt(next.planned_tick)}（あと ${Math.max(0, next.planned_tick - (layer.tick || 0))} s）` : "すぐ"}` : "なし"],
     ["設標", paused ? "一時停止中" : "実施"],
   ] : [];
   setHtml($("layer-detail").querySelector("tbody") || $("layer-detail"),
@@ -732,14 +768,14 @@ function updateLayer(deployment) {
       ? `<button type="button" data-approve="${t.task_id}">了承</button><button type="button" class="ghost" data-reject="${t.task_id}">却下</button>`
       : t.status === "APPROVED"
         ? `<button type="button" class="mini" data-now="${t.task_id}">今すぐ</button>`
-          + `<input class="time" type="number" min="0" step="10" placeholder="時刻 s" data-time-input="${t.task_id}" />`
+          + `<input class="time" type="text" inputmode="numeric" placeholder="HH:MM:SS" title="投入時刻（時:分:秒）" data-time-input="${t.task_id}" />`
           + `<button type="button" class="mini" data-time="${t.task_id}">時刻</button>`
           + `<button type="button" class="mini ghost" data-cancel="${t.task_id}">中止</button>` : "");
-    const plan = t.planned_tick != null ? `計画 ${t.planned_tick} s` : "すぐ";
+    const plan = t.planned_tick != null ? `計画 ${clockAt(t.planned_tick)}` : "すぐ";
     const late = t.status === "DONE" && t.planned_tick != null ? `（${t.done_tick - t.planned_tick >= 0 ? "+" : ""}${t.done_tick - t.planned_tick} s）` : "";
     const fall = t.status === "DONE" && t.splash_tick != null
-      ? (t.miss_yd != null ? `・着水 ${t.splash_tick} s（誤差 ${Math.round(t.miss_yd)} YD）` : "・落下中") : "";
-    const when = t.status === "APPROVED" ? `${plan}・あと ${fmt(t.eta_s, 0)} s` : t.status === "DONE" ? `${t.done_tick} s 投下${late}${fall}` : plan;
+      ? (t.miss_yd != null ? `・着水 ${clockAt(t.splash_tick)}（誤差 ${Math.round(t.miss_yd)} YD）` : "・落下中") : "";
+    const when = t.status === "APPROVED" ? `${plan}・あと ${fmt(t.eta_s, 0)} s` : t.status === "DONE" ? `${clockAt(t.done_tick)} 投下${late}${fall}` : plan;
     const src = { forward: "自動", operator: "即時配置", manual: "手動配置" }[t.source] || t.source;
     const rank = index >= 0 && open.length > 1 ? `・${index + 1}番目` : "";
     return `<tr><td>${t.task_id}<br /><small>${src}${rank}</small></td><td>${TASK_STATUS[t.status] || t.status}</td>`
@@ -775,7 +811,7 @@ async function postDrops(path, body, done) {
 
 const cancelDrops = (taskIds) => postDrops("cancel", { task_ids: taskIds }, (changed) => `設標計画 ${changed.length} 件を中止しました。`);
 const rescheduleDrop = (taskId, plannedTick) => postDrops("reschedule", { task_id: taskId, planned_tick: plannedTick },
-  (task) => (task.planned_tick == null ? `設標 #${task.task_id} はすぐに向かいます。` : `設標 #${task.task_id} の投入時刻を ${task.planned_tick} s にしました。`));
+  (task) => (task.planned_tick == null ? `設標 #${task.task_id} はすぐに向かいます。` : `設標 #${task.task_id} の投入時刻を ${clockAt(task.planned_tick)} にしました。`));
 
 // move an open drop one place earlier (-1) or later (+1) in the drop order; the backend plans
 // the drop times again along the new order
@@ -800,8 +836,9 @@ $("drop-table").addEventListener("click", (event) => {
   if ((el = target("down"))) moveDrop(id(el, "down"), 1);
   if ((el = target("time"))) {
     const input = $("drop-table").querySelector(`[data-time-input="${el.dataset.time}"]`);
-    if (!input || input.value === "") { setMessage("投入時刻（シミュレーション時刻 s）を入力してください。"); return; }
-    rescheduleDrop(id(el, "time"), Math.round(Number(input.value)));
+    const tick = input ? tickFromClock(input.value) : null;
+    if (tick == null) { setMessage("投入時刻を 時:分:秒（例 14:05:30）で入力してください。"); return; }
+    rescheduleDrop(id(el, "time"), tick);
     input.blur();
   }
 });
@@ -849,6 +886,146 @@ $("layer-wind-correction").addEventListener("change", () => {
     .catch((error) => setMessage(`設定エラー: ${error.message}`));
 });
 $("drop-reject-all").addEventListener("click", () => decideDrops(null, false));
+
+// ================================================================== map: layer state, winds and the external force
+const KT_TO_MPS = 1852 / 3600;
+const WIND_ARROW_S = 60; // wind arrows: distance the air moves in 1 min
+const CURRENT_ARROW_S = 1200; // current arrows: distance the water moves in 20 min
+const turnName = (bank) => (Math.abs(bank) < 0.5 ? "直進" : bank < 0 ? "左旋回" : "右旋回");
+const dirSpeedText = (dirFrom, speed, digits = 1) => `${pad3(dirFrom)}°・${fmt(speed, digits)} kt`;
+function pad3(deg) {
+  return deg == null || !Number.isFinite(Number(deg)) ? "---" : String(Math.round(((Number(deg) % 360) + 360) % 360) % 360).padStart(3, "0");
+}
+// direction the vector points to (towards), degrees true
+const towards = (east, north) => (Math.atan2(east, north) * 180 / Math.PI + 360) % 360;
+
+// one arrow (PolylineArrow) and its label, created once and moved every update
+function vectorArrow(key, color) {
+  state.vectors = state.vectors || {};
+  if (!state.vectors[key]) {
+    state.vectors[key] = {
+      line: gpu.vectors.add({ width: 9, material: Cesium.Material.fromType("PolylineArrow", { color }), positions: [] }),
+      label: gpu.vectorLabels.add({ text: "", font: "11px sans-serif", fillColor: color, outlineColor: Cesium.Color.BLACK,
+        outlineWidth: 2, style: Cesium.LabelStyle.FILL_AND_OUTLINE, pixelOffset: new Cesium.Cartesian2(8, 0),
+        horizontalOrigin: Cesium.HorizontalOrigin.LEFT }),
+    };
+  }
+  return state.vectors[key];
+}
+function setArrow(key, color, from, east, north, seconds, text) {
+  const arrow = vectorArrow(key, color);
+  const speed = Math.hypot(east, north);
+  if (!from || !(speed > 0.01)) {
+    arrow.line.show = false;
+    arrow.label.show = false;
+    return;
+  }
+  const length = speed * KT_TO_MPS * seconds;
+  const tip = destination(from, towards(east, north), length);
+  const start = Cesium.Cartesian3.fromDegrees(from.longitude, from.latitude, 0);
+  const end = Cesium.Cartesian3.fromDegrees(tip.longitude, tip.latitude, 0);
+  arrow.line.positions = [start, end];
+  arrow.line.show = true;
+  arrow.label.position = end;
+  arrow.label.text = text;
+  arrow.label.show = true;
+}
+function hideArrows() {
+  for (const arrow of Object.values(state.vectors || {})) {
+    arrow.line.show = false;
+    arrow.label.show = false;
+  }
+}
+
+// current estimated from the observers' drift: v(p) = a + G (p - p_ref), G in kt/NM
+function currentAt(current, position) {
+  const b = current.base_velocity;
+  const ref = current.reference_position;
+  if (!ref || !position) return { east: b.east_kt, north: b.north_kt };
+  const d = offsetM(ref, position);
+  const x = d.east / 1852;
+  const y = d.north / 1852;
+  const g = current.gradient_per_nm || [[0, 0], [0, 0]];
+  return { east: b.east_kt + g[0][0] * x + g[0][1] * y, north: b.north_kt + g[1][0] * x + g[1][1] * y };
+}
+
+// winds and the external force: arrows on the map and the 設標者・風・外力 panel
+function updateForces(snapshot, estimate) {
+  const deployment = snapshot.deployment || {};
+  const layer = deployment.layer;
+  const config = state.latestConfig || snapshot.config || {};
+  const lay = config.layer || {};
+  const layerOn = lay.enabled !== false && layer;
+  const windEstimate = (deployment.wind_estimates || []).slice(-1)[0];
+  const current = snapshot.current_estimate;
+  const correction = lay.wind_correction !== false;
+  const where = layerOn ? layer.position : null;
+  if (checked("show-forces")) {
+    // wind at the flight altitude (from -> towards) and the mean wind of the drop correction,
+    // both drawn from the layer; the external force at the fit's reference point and the estimate
+    const flightRad = ((layer?.wind_direction_deg ?? 0) + 180) * Math.PI / 180;
+    const fw = layerOn && layer.wind_speed_kt != null
+      ? { east: layer.wind_speed_kt * Math.sin(flightRad), north: layer.wind_speed_kt * Math.cos(flightRad) } : null;
+    setArrow("flightWind", COLORS.flightWind, fw ? where : null, fw?.east || 0, fw?.north || 0, WIND_ARROW_S,
+      fw ? `飛行高度の風 ${dirSpeedText(layer.wind_direction_deg, layer.wind_speed_kt)}` : "");
+    setArrow("dropWind", COLORS.dropWind, windEstimate ? where : null, windEstimate?.east_kt || 0, windEstimate?.north_kt || 0, WIND_ARROW_S,
+      windEstimate ? `投下修正の風 ${dirSpeedText(windEstimate.direction_deg, windEstimate.speed_kt)}${correction ? "" : "（修正オフ）"}` : "");
+    const refPos = current?.reference_position;
+    const atRef = current ? currentAt(current, refPos) : null;
+    setArrow("currentRef", COLORS.current, current ? refPos : null, atRef?.east || 0, atRef?.north || 0, CURRENT_ARROW_S,
+      atRef ? `外力 流向 ${dirSpeedText(towards(atRef.east, atRef.north), Math.hypot(atRef.east, atRef.north), 2)}（観測者の移動量）` : "");
+    const estPos = estimate?.current_position;
+    const atEst = current && estPos ? currentAt(current, estPos) : null;
+    setArrow("currentEst", COLORS.current, atEst ? estPos : null, atEst?.east || 0, atEst?.north || 0, CURRENT_ARROW_S,
+      atEst ? `外力 ${fmt(Math.hypot(atEst.east, atEst.north), 2)} kt` : "");
+  } else {
+    hideArrows();
+  }
+
+  const panel = $("map-info");
+  if (!panel) return;
+  const showLayer = checked("show-layer-hud");
+  const showForces = checked("show-forces");
+  panel.hidden = !showLayer && !showForces;
+  if (panel.hidden) return;
+  const rows = [];
+  const row = (k, v, cls = "") => rows.push(`<tr${cls ? ` class="${cls}"` : ""}><th>${k}</th><td>${v}</td></tr>`);
+  if (showLayer) {
+    rows.push(`<tr class="head"><th colspan="2">設標者</th></tr>`);
+    if (lay.enabled === false) row("状態", "設標者なし");
+    else if (!layer) row("状態", "準備中");
+    else {
+      const tasks = deployment.tasks || [];
+      const open = tasks.filter((t) => t.status === "PROPOSED" || t.status === "APPROVED").sort(flightOrder);
+      const next = open.find((t) => t.status === "APPROVED" && t.task_id !== layer.task_id);
+      const proposed = open.filter((t) => t.status === "PROPOSED").length;
+      const mode = { ORBIT: "旋回待機", TRANSIT: `設標 #${layer.task_id} へ移動`, HOLD: `設標 #${layer.task_id} の地点で時刻待ち` }[layer.mode] || layer.mode;
+      row("状態", `${mode}${lay.paused ? "（一時停止中）" : ""}`);
+      row("位置", `${latText(layer.position.latitude)} ${lonText(layer.position.longitude)}`);
+      row("高度", `${fmt(layer.altitude_ft, 0)} ft`);
+      row("速力・針路", `${fmt(layer.speed_kt, 0)} kt・${pad3(layer.heading_deg)}°`);
+      row("対地・航跡", layer.ground_speed_kt != null ? `${fmt(layer.ground_speed_kt, 0)} kt・${pad3(layer.track_deg)}°` : "--");
+      row("バンク", `${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）`);
+      if (layer.task_id != null && layer.eta_s != null) row("到着", `${clockAt((layer.tick || 0) + layer.eta_s)}（あと ${fmt(layer.eta_s, 0)} s）`);
+      if (next) row("次の設標", `#${next.task_id} ${next.planned_tick != null ? `計画 ${clockAt(next.planned_tick)}` : "すぐ"}`);
+      row("設標待ち", `${open.length - proposed} 件${proposed ? `・了承待ち ${proposed} 件` : ""}`);
+    }
+  }
+  if (showForces) {
+    rows.push(`<tr class="head"><th colspan="2">風・外力</th></tr>`);
+    row(`<i class="sw flight-wind"></i>飛行高度の風`, layerOn && layer.wind_speed_kt != null
+      ? `${dirSpeedText(layer.wind_direction_deg, layer.wind_speed_kt)}（${fmt(layer.altitude_ft, 0)} ft）` : "--");
+    row(`<i class="sw drop-wind"></i>投下修正の風`, windEstimate
+      ? `${dirSpeedText(windEstimate.direction_deg, windEstimate.speed_kt)}（#${windEstimate.task_id}・${fmt(windEstimate.altitude_ft, 0)} ft〜海面・${clockAt(windEstimate.tick)}）${correction ? "" : " 修正オフ"}`
+      : "推定なし（無風で投下点を計算）");
+    const base = current ? currentAt(current, current.reference_position) : null;
+    row(`<i class="sw current-force"></i>外力（潮流）`, base
+      ? `流向 ${dirSpeedText(towards(base.east, base.north), Math.hypot(base.east, base.north), 2)}（観測者 ${current.observer_count}・${fmt(current.window_seconds / 60, 0)} 分、残差 ${fmt(current.residual_kt, 2)} kt）`
+      : "推定なし");
+    rows.push(`<tr class="note"><td colspan="2">風は吹いてくる方向、外力は流れる方向。矢印の長さ：風 1 分・外力 20 分の移動量</td></tr>`);
+  }
+  setHtml(panel.querySelector("tbody"), rows.join(""));
+}
 
 // ================================================================== wind (風向風速) and the mean wind estimates
 const WIND_TOP_FT = 30000;
@@ -911,7 +1088,7 @@ function updateWind(deployment) {
       + `　次の投下点を${correction ? "この平均風で修正" : "修正しない設定"}`
     : "まだ着水した観測者がありません（最初の投下は無風の自由落下で投下点を計算）")
     + (falling ? `　落下中 ${falling}` : "");
-  const rows = estimates.map((w) => `<tr><td>${w.task_id}<br /><small>${w.tick} s</small></td>`
+  const rows = estimates.map((w) => `<tr><td>${w.task_id}<br /><small>${clockAt(w.tick)}</small></td>`
     + `<td>${fmt(w.altitude_ft, 0)} ft<br /><small>落下 ${fmt(w.fall_time_s, 1)} s</small></td>`
     + `<td>${fmt(w.offset_yd, 0)} YD</td>`
     + `<td>${fmt(w.direction_deg, 0)}°・${fmt(w.speed_kt, 1)} kt</td>`
@@ -1583,8 +1760,8 @@ function updateRunState(snapshot) {
   badge.textContent = control.running ? "推定中" : "停止中";
   badge.className = `badge ${control.running ? "running" : "stopped"}`;
   const end = control.running ? snapshot.tick : (control.stopped_tick ?? snapshot.tick);
-  setText("run-info", `Run #${control.run_id ?? 0}　開始 ${control.started_tick ?? 0} s　経過 ${Math.max(0, end - (control.started_tick ?? 0))} s` +
-    (control.running ? "" : `　停止 ${control.stopped_tick ?? "--"} s`));
+  setText("run-info", `Run #${control.run_id ?? 0}　開始 ${clockAt(control.started_tick ?? 0)}　経過 ${Math.max(0, end - (control.started_tick ?? 0))} s` +
+    (control.running ? "" : `　停止 ${control.stopped_tick == null ? "--" : clockAt(control.stopped_tick)}`));
   $("est-stop").disabled = !control.running;
   const key = `${snapshot.generation}-${control.run_id}`;
   if (key !== state.runKey) {
@@ -1761,7 +1938,7 @@ function maneuverTimingText(timing) {
   const head = `<br><small>変針・変速の到達時間差：採用 ${timing.events_applied} 件・不採用 ${timing.events_rejected} 件`;
   if (!last) return `${head}</small>`;
   const rows = last.observers.map((o) => `${escapeHtml(o.observer_id)} +${fmt(o.offset_s, 2)} s（±${fmt(o.sigma_s, 2)}）`).join("、");
-  return `${head}<br>最新（${fmt(last.tick, 1)} s${last.used ? "" : "・不採用"}）：${rows}</small>`;
+  return `${head}<br>最新（${clockAt(last.tick)}${last.used ? "" : "・不採用"}）：${rows}</small>`;
 }
 
 function pair(a, b) {
@@ -1799,7 +1976,7 @@ function updateCpa(cpa) {
     .map((item) => {
       const tr = state.trueCpa.get(item.observer_id);
       return `<tr class="${item.final ? "" : "provisional"}"><td>${escapeHtml(item.observer_id)}#${item.pass_index}</td>` +
-        `<td>${pair(`${fmt(item.cpa_tick, 0)}±${fmt(item.cpa_tick_sigma_s, 0)} s`, `${tr ? tr.tick : "--"} s`)}</td>` +
+        `<td>${pair(`${clockAt(item.cpa_tick)}±${fmt(item.cpa_tick_sigma_s, 0)} s`, tr ? clockAt(tr.tick) : "--")}</td>` +
         `<td>${pair(`${fmt(item.cpa_slant_range_yd, 0)}±${fmt(item.cpa_slant_range_sigma_yd, 0)} YD`, `${tr ? fmt(tr.range, 0) : "--"} YD`)}</td>` +
         `<td>${fmt(item.relative_speed_kt, 2)}<br><small>±${fmt(item.relative_speed_sigma_kt, 2)} kt</small></td></tr>`;
     });
@@ -1825,7 +2002,7 @@ function updateLloyd(lloyd, config, target) {
     const truth = target ? target.position.depth_ft : null;
     const error = truth == null ? "" : `、真値 ${fmt(truth, 0)}・誤差 ${lloyd.depth_ft - truth >= 0 ? "+" : ""}${fmt(lloyd.depth_ft - truth, 0)}`;
     summary.textContent = `深度 ${fmt(lloyd.depth_ft, 0)} Ft ±${fmt(lloyd.sigma_ft, 0)}${error}（観測者 ${lloyd.used_observers}、`
-      + `${lloyd.tick} s 時点、計算 ${fmt(lloyd.fit_ms, 0)} ms${lloyd.applied ? "、推定に反映" : ""}）`;
+      + `${clockAt(lloyd.tick)} 時点、計算 ${fmt(lloyd.fit_ms, 0)} ms${lloyd.applied ? "、推定に反映" : ""}）`;
   } else if (lloyd.status === "WAITING") {
     summary.textContent = "待機中（追尾の水平精度、または受信レベルの蓄積を待っています）";
   } else {
@@ -1925,9 +2102,9 @@ function drawChart(canvas, points, opts) {
     ctx.fillText(String(Math.round(v)), pad.l - 4, y(v) + 3);
   }
   ctx.textAlign = "left";
-  ctx.fillText(`${t0} s`, pad.l, height - 5);
+  ctx.fillText(clockAt(t0), pad.l, height - 5);
   ctx.textAlign = "right";
-  ctx.fillText(`${t1} s`, pad.l + w, height - 5);
+  ctx.fillText(clockAt(t1), pad.l + w, height - 5);
   ctx.fillStyle = CHART.band;
   ctx.beginPath();
   points.forEach((p, i) => (i ? ctx.lineTo(x(p.tick), y(opts.sigma(p))) : ctx.moveTo(x(p.tick), y(opts.sigma(p)))));
@@ -1987,7 +2164,7 @@ for (const [id, opts] of Object.entries(chartDefs)) {
     const p = nearest(chart.points, canvas._hoverTick);
     const tip = $("chart-tooltip");
     tip.hidden = false;
-    tip.textContent = `${p.tick} s　誤差 ${signed(opts.value(p), 0)} ${opts.unit}　1σ ${fmt(opts.sigma(p), 0)} ${opts.unit}`;
+    tip.textContent = `${clockAt(p.tick)}　誤差 ${signed(opts.value(p), 0)} ${opts.unit}　1σ ${fmt(opts.sigma(p), 0)} ${opts.unit}`;
     tip.style.left = `${event.clientX + 12}px`;
     tip.style.top = `${event.clientY - 28}px`;
     drawChart(canvas, state.history, opts);
@@ -2197,7 +2374,10 @@ $("config-form").addEventListener("submit", (event) => {
 $("placement-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const body = { position: { latitude: num("place-lat"), longitude: num("place-lon"), depth_ft: num("place-depth") } };
-  if ($("place-time").value !== "") body.planned_tick = num("place-time");
+  if ($("place-time").value.trim() !== "") {
+    body.planned_tick = tickFromClock($("place-time").value);
+    if (body.planned_tick == null) { setMessage("投入時刻を 時:分:秒（例 14:05:30）で入力してください。"); return; }
+  }
   const response = await fetch("/api/observers/placements", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (response.ok) {
     const result = await response.json();
@@ -2238,7 +2418,7 @@ $("depth-exaggeration").addEventListener("change", () => {
   }
   if (state.latestSnapshot) render(state.latestSnapshot);
 });
-for (const id of ["show-truth", "show-online", "show-smoothed", "show-region", "show-voxels", "show-range", "show-bearing", "show-error-line", "show-drops"]) {
+for (const id of ["show-truth", "show-online", "show-smoothed", "show-region", "show-voxels", "show-range", "show-bearing", "show-error-line", "show-drops", "show-forces", "show-layer-hud"]) {
   $(id).addEventListener("change", () => {
     state.lastRegionKey = "";
     if (state.latestSnapshot) render(state.latestSnapshot);
@@ -2257,6 +2437,7 @@ if (window.addEventListener) window.addEventListener("resize", drawCharts);
 function render(snapshot) {
   state.latestSnapshot = snapshot;
   setText("tick", snapshot.tick);
+  setText("clock-time", clockAt(snapshot.tick));
   if (snapshot.time_scale != null && snapshot.time_scale !== clock.scale) showClock(snapshot.time_scale);
   noteClockTick(snapshot.tick);
   populateForms(snapshot.config);
@@ -2277,6 +2458,7 @@ function render(snapshot) {
   updateDeployment(snapshot.deployment);
   updateLayer(snapshot.deployment);
   updateWind(snapshot.deployment);
+  updateForces(snapshot, estimate);
   drawCharts();
   if (state.firstFix && snapshot.target) {
     state.firstFix = false;

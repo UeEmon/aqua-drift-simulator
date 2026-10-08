@@ -20,6 +20,9 @@
           <span><i class="sw bearing"></i>方位観測</span>
           <span><i class="sw drop"></i>前程配置の投入点</span>
           <span><i class="sw layer"></i>設標者・設標予定点</span>
+          <span><i class="sw flight-wind"></i>飛行高度の風</span>
+          <span><i class="sw drop-wind"></i>投下修正の風</span>
+          <span><i class="sw current-force"></i>外力（潮流）</span>
         </div>
         <div id="view-toolbar" role="toolbar" aria-label="視点">
           <div class="vt-row">
@@ -65,9 +68,10 @@
         </div>
         <pre id="camera-hud" aria-label="視点カメラ情報"></pre>
         <pre id="perf-hud" hidden></pre>
+        <div id="map-info" aria-label="設標者の状態と風・外力" hidden><table><tbody></tbody></table></div>
         <div id="status-strip">
           <span id="connection-status">接続中</span>
-          <span>時刻 <strong id="tick">0</strong> s</span>
+          <span title="シミュレーション時刻（システム時刻基準。等倍ではシステム時刻と一致）">時刻 <strong id="clock-time">--:--:--</strong><span id="tick" hidden>0</span></span>
           <span>観測者 <strong id="observer-count">0</strong>（探知中 <strong id="detecting-count">0</strong>）</span>
           <span>推定状態 <strong id="observability">--</strong></span>
           <span>位置算出 <strong id="position-basis">--</strong></span>
@@ -323,6 +327,8 @@
             <label class="check"><input id="show-error-line" type="checkbox" checked />推定–真値の誤差線</label>
             <label class="check"><input id="show-range" type="checkbox" />観測者の上限斜距離</label>
             <label class="check"><input id="show-drops" type="checkbox" checked />前程配置の投入点</label>
+            <label class="check"><input id="show-layer-hud" type="checkbox" checked />設標者の状態（地図上）</label>
+            <label class="check"><input id="show-forces" type="checkbox" checked />風（飛行高度・投下修正）と外力（地図上）</label>
             <label class="check"><input id="show-basemap-2" type="checkbox" />背景地図（Natural Earth II、通常はオフ）</label>
             <label>深度強調倍率<input id="depth-exaggeration" type="number" min="1" max="50" step="1" value="10" /></label>
           </section>
@@ -411,7 +417,7 @@
               <label>緯度<input id="place-lat" type="number" step="0.0001" required /></label>
               <label>経度<input id="place-lon" type="number" step="0.0001" required /></label>
               <label>深度 (Ft)<input id="place-depth" type="number" min="0" step="10" value="200" required /></label>
-              <label title="設標者が投入する時刻（シミュレーション時刻 s）。空欄ならすぐに向かう">投入時刻 (s)<input id="place-time" type="number" min="0" step="10" placeholder="すぐ" /></label>
+              <label title="設標者が投入する時刻（時:分:秒）。空欄ならすぐに向かう">投入時刻<input id="place-time" type="text" inputmode="numeric" placeholder="すぐ（例 14:05:30）" /></label>
               <button type="submit">設標者に指示</button>
             </form>
             <p class="note">観測者は obs-01〜obs-99。初期は目標を囲む4点で、前程配置・手動配置のたびに観測者コンテナが自動で起動し、観測を終えると停止します（番号は再利用、履歴は保持）。上限超過時は最古の観測者から削除。</p>

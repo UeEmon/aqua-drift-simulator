@@ -48,6 +48,14 @@ Documentation:
   (direction selectable), orthographic top view, **centre on truth (default centre target)**,
   centre on estimate, **follow** on/off (default **on, following the truth**) with the follow target truth / estimate
   (the target is kept at the view centre every frame; altitude, depression and heading are kept), FPS overlay
+- **Clock**: times are shown as clock time (HH:MM:SS, browser local time) = system time of tick 0 +
+  tick. The clock container schedules each tick from the system time, so at 1x the simulation
+  time stays on the system time; drop times are entered as HH:MM:SS
+- **設標者 / 風・外力 panel (map, bottom left)**: the layer's state (mode, position, altitude, speed,
+  heading, ground speed and track, bank, arrival time, next drop) and the wind at its flight
+  altitude, the mean wind used to correct the release points and the external force (current)
+  fitted from the observers' drift; the same three are drawn as arrows on the map (toggles in
+  表示・観測者)
 - **Camera readout (map, bottom right)**: camera latitude / longitude, altitude above the sea
   surface in ft, depression angle, heading and the view-centre coordinates. The camera starts at
   10000 ft without a fly-in or automatic zoom

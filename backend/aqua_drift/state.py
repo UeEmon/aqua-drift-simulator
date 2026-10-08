@@ -61,6 +61,7 @@ class SimulationState:
         self.lock = asyncio.Lock()
         self.config = config or ScenarioConfig()
         self.tick = 0
+        self.epoch_s: float | None = None  # system time of tick 0, set by the first clock tick
         self.time_scale = 1.0
         self.estimator_tick = -1
         self.target: TargetState | None = None
@@ -100,8 +101,12 @@ class SimulationState:
                 evicted_id, _ = self.observers.popitem(last=False)
                 self._archive(evicted_id)
 
-    async def set_tick(self, tick: int) -> None:
+    async def set_tick(self, tick: int, wall_s: float | None = None) -> None:
+        """wall_s: system time the clock scheduled this tick for. The first one fixes the time
+        of day of tick 0, so simulation time = epoch_s + tick (system time at real-time speed)."""
         async with self.lock:
+            if self.epoch_s is None and wall_s is not None:
+                self.epoch_s = wall_s - tick
             self.tick = max(self.tick, tick)
             self._splash()
 
@@ -111,7 +116,9 @@ class SimulationState:
 
     async def clock_status(self) -> ClockStatus:
         async with self.lock:
-            return ClockStatus(tick=self.tick, time_scale=self.time_scale, synced=self._synced())
+            return ClockStatus(
+                tick=self.tick, time_scale=self.time_scale, synced=self._synced(), epoch_s=self.epoch_s
+            )
 
     def _synced(self) -> bool:
         """True when the target, every observer and the Doppler engine have published the current
@@ -595,6 +602,7 @@ class SimulationState:
                 tick=self.tick,
                 generation=self.generation,
                 time_scale=self.time_scale,
+                epoch_s=self.epoch_s,
                 deployment=self._deployment_status(),
                 estimation=self.estimation,
                 bearings=[

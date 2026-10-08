@@ -310,3 +310,33 @@ table.kv td:first-child { color: #9cc0e2; }
 #wind-table input { width: 100%; min-width: 0; padding: 2px 4px; font-size: 12px; box-sizing: border-box; }
 #wind-table td { padding: 2px 4px; }
 .tab { min-width: 0; white-space: nowrap; }
+
+/* map panel: layer (設標者) state, winds and the external force */
+#map-info {
+  position: absolute;
+  left: 12px;
+  bottom: 60px;
+  max-width: min(400px, calc(100% - 24px));
+  padding: 6px 10px;
+  color: #d7eaff;
+  background: rgba(3, 10, 18, 0.84);
+  border: 1px solid rgba(107, 181, 255, 0.28);
+  border-radius: 6px;
+  font-size: 12px;
+  pointer-events: none;
+  z-index: 2;
+}
+#map-info[hidden] { display: none; }
+#map-info table { width: auto; table-layout: auto; border-collapse: collapse; font-size: inherit; }
+#map-info th, #map-info td { position: static; padding: 1px 8px 1px 0; text-align: left; vertical-align: top;
+  font-weight: normal; background: none; border: 0; }
+#map-info th { color: #9cc0e2; white-space: nowrap; }
+#map-info tr.head th { color: #e9e4ff; font-weight: 600; padding-top: 4px; border-bottom: 1px solid rgba(107, 181, 255, 0.28); }
+#map-info tr.note td { color: #8faecb; font-size: 11px; padding-top: 3px; }
+#perf-hud:not([hidden]) ~ #map-info { bottom: 200px; }
+.sw.flight-wind { background: #a0e7ff; }
+.sw.drop-wind { background: #d59bff; }
+.sw.current-force { background: #3d8bff; }
+@media (max-width: 760px) {
+  #map-info { font-size: 11px; bottom: 110px; }
+}

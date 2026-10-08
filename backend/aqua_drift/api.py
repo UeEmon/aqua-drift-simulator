@@ -157,7 +157,7 @@ async def clock_status() -> ClockStatus:
 
 @app.post("/internal/clock")
 async def set_clock(message: TickMessage) -> dict[str, int]:
-    await state.set_tick(message.tick)
+    await state.set_tick(message.tick, message.wall_s)
     return {"tick": message.tick}
 
 
