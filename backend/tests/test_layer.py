@@ -381,3 +381,53 @@ async def test_paused_layer_keeps_orbiting_and_operator_can_cancel_or_reschedule
     state = await _layer_steps(sim, 10, rng, state)
     assert state.mode == "TRANSIT" and state.task_id == first.task_id
     assert [t.status for t in await sim.cancel_tasks(None)] == ["CANCELLED"]
+
+
+@pytest.mark.asyncio
+async def test_operator_reorders_drops_and_the_times_follow_the_new_order() -> None:
+    sim = SimulationState(ScenarioConfig())
+    near = _offset(DATUM, 4000.0, 0.0, 300.0)
+    far = _offset(DATUM, 18000.0, 0.0, 300.0)
+    await sim.queue_deployment(DeploymentRequest(tick=0, positions=[near, far], reason="plan", planned_ticks=[400, 700]))
+    rng = random.Random(4)
+    state = await _layer_steps(sim, 5, rng)
+    first, second = (await sim.layer_feed()).tasks
+    assert (first.planned_tick, second.planned_tick) == (400, 700)
+    # unknown or repeated ids: nothing changes
+    assert await sim.reorder_tasks([999]) is None
+    assert await sim.reorder_tasks([second.task_id, second.task_id]) is None
+    # the far drop first: it keeps its time; the near one follows when the layer can be back
+    order = await sim.reorder_tasks([second.task_id])
+    assert [t.task_id for t in order] == [second.task_id, first.task_id]
+    assert order[0].planned_tick == 700
+    back = 14000.0 / (LayerConfig().speed_kt * 0.5144444)  # far -> near at the layer speed
+    assert order[1].planned_tick >= 700 + back
+    assert order[1].requested_tick == 400  # the optimal time is kept for a later reorder
+    feed = await sim.layer_feed()
+    assert [t.task_id for t in feed.tasks] == [second.task_id, first.task_id]
+    # back to the original order: the original times again
+    order = await sim.reorder_tasks([first.task_id, second.task_id])
+    assert [(t.task_id, t.planned_tick) for t in order] == [(first.task_id, 400), (second.task_id, 700)]
+    # far first again: the layer lays the far drop at its time, then flies to the near one
+    await sim.reorder_tasks([second.task_id])
+    state = await _layer_steps(sim, 700, rng, state)
+    done = {t.task_id: t for t in (await sim.snapshot()).deployment.tasks}
+    assert done[second.task_id].status == "DONE" and abs(done[second.task_id].done_tick - 700) <= 15
+    assert done[first.task_id].status == "APPROVED" and state.task_id == first.task_id
+
+
+@pytest.mark.asyncio
+async def test_reorder_of_drops_as_soon_as_possible() -> None:
+    config = ScenarioConfig()
+    config.layer.paused = True
+    sim = SimulationState(config)
+    a = _offset(DATUM, 5000.0, 0.0, 300.0)
+    b = _offset(DATUM, 9000.0, 0.0, 300.0)
+    await sim.queue_deployment(DeploymentRequest(tick=0, positions=[a, b], reason="plan"))
+    first, second = (await sim.layer_feed()).tasks
+    order = await sim.reorder_tasks([second.task_id, first.task_id])
+    assert [t.planned_tick for t in order] == [None, None]  # still as soon as possible
+    assert [t.task_id for t in (await sim.layer_feed()).tasks] == [second.task_id, first.task_id]
+    # a new drop goes after the reordered ones
+    await sim.queue_deployment(DeploymentRequest(tick=0, positions=[a], reason="plan"))
+    assert (await sim.layer_feed()).tasks[-1].task_id > first.task_id

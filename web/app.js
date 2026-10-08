@@ -603,11 +603,17 @@ function circlePositions(center, radiusM, n = 72) {
   return out;
 }
 
+// order the layer flies the drops in (設標順): planned time (as soon as possible first), then the
+// operator's drop order -- the same key as the backend (DropTask.flight_key)
+const flightOrder = (a, b) => (a.planned_tick ?? -1) - (b.planned_tick ?? -1)
+  || (a.sequence || a.task_id) - (b.sequence || b.task_id) || a.task_id - b.task_id;
+
 function updateLayer(deployment) {
   const status = deployment || {};
   const layer = status.layer;
   const tasks = status.tasks || [];
-  const open = tasks.filter((t) => t.status === "PROPOSED" || t.status === "APPROVED");
+  const open = tasks.filter((t) => t.status === "PROPOSED" || t.status === "APPROVED").sort(flightOrder);
+  state.openDropOrder = open.map((t) => t.task_id);
   // ---- map: layer marker, route to the drop points, orbit circle, task points
   if (layer) {
     if (!state.layerMarker) {
@@ -648,18 +654,18 @@ function updateLayer(deployment) {
     state.layerRoute.show = false;
     state.layerOrbit.show = false;
   }
-  const taskKey = open.map((t) => `${t.task_id}:${t.status}:${t.planned_tick}:${t.position.latitude.toFixed(4)}:${t.position.longitude.toFixed(4)}`).join("|") + `|${exaggeration()}`;
+  const taskKey = open.map((t) => `${t.task_id}:${t.status}:${t.planned_tick}:${t.sequence}:${t.position.latitude.toFixed(4)}:${t.position.longitude.toFixed(4)}`).join("|") + `|${exaggeration()}`;
   if (taskKey !== state.taskKey) {
     state.taskKey = taskKey;
     gpu.taskPoints.removeAll();
     gpu.taskLabels.removeAll();
-    for (const t of open) {
+    for (const [index, t] of open.entries()) {
       const proposed = t.status === "PROPOSED";
       const color = proposed ? COLORS.proposed : COLORS.drop;
       gpu.taskPoints.add({ position: cartOf(t.position), pixelSize: 10, color: color.withAlpha(proposed ? 0.15 : 0.6), outlineColor: color, outlineWidth: 2 });
       gpu.taskLabels.add({
         position: cartOf(t.position),
-        text: `${proposed ? "提案 " : ""}#${t.task_id}（${Math.round(t.position.depth_ft)} Ft）`
+        text: `${open.length > 1 ? `${index + 1}番目 ` : ""}${proposed ? "提案 " : ""}#${t.task_id}（${Math.round(t.position.depth_ft)} Ft）`
           + (t.planned_tick != null ? `計画 ${t.planned_tick} s` : "すぐ") + (proposed ? " 了承待ち" : ""),
         font: "11px sans-serif", fillColor: color, pixelOffset: new Cesium.Cartesian2(0, -14),
       });
@@ -678,8 +684,7 @@ function updateLayer(deployment) {
   $("layer-status").textContent = !enabled ? "設標者なし（追加の観測者は即時に投入）"
     : layer ? `設標者 ${fmt(layer.speed_kt, 0)} kt・バンク ${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）・${layer.mode === "TRANSIT" ? `設標 #${layer.task_id} へ移動中（到着 ${fmt(layer.eta_s, 0)} s）` : layer.mode === "HOLD" ? `設標 #${layer.task_id} の地点で計画時刻まで旋回` : "目標推定位置の周囲を旋回待機"}${paused ? "【設標一時停止中】" : ""}　了承待ち ${proposed.length}・設標待ち ${open.length - proposed.length}`
       : "設標者の準備中";
-  const approved = open.filter((t) => t.status === "APPROVED").sort((a, b) => (a.planned_tick ?? -1) - (b.planned_tick ?? -1));
-  const next = approved[0];
+  const next = open.find((t) => t.status === "APPROVED");
   const detail = layer && enabled ? [
     ["状態", { ORBIT: "旋回待機", TRANSIT: "設標へ移動", HOLD: "設標点で時刻待ち" }[layer.mode] || layer.mode],
     ["位置", `${fmt(layer.position.latitude, 4)}, ${fmt(layer.position.longitude, 4)}`],
@@ -692,19 +697,26 @@ function updateLayer(deployment) {
   ] : [];
   setHtml($("layer-detail").querySelector("tbody") || $("layer-detail"),
     detail.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("") || "<tr><td>--</td></tr>");
-  const rows = tasks.slice().reverse().slice(0, 15).map((t) => {
-    const actions = t.status === "PROPOSED"
+  // open drops first in the drop order (設標順, ▲▼ to change it), then the latest closed ones
+  const closed = tasks.filter((t) => !open.includes(t)).reverse();
+  const rows = [...open, ...closed].slice(0, 15).map((t) => {
+    const index = open.indexOf(t);
+    const move = index >= 0 && open.length > 1
+      ? `<button type="button" class="mini ghost" data-up="${t.task_id}" title="設標順を前へ"${index === 0 ? " disabled" : ""}>▲</button>`
+        + `<button type="button" class="mini ghost" data-down="${t.task_id}" title="設標順を後へ"${index === open.length - 1 ? " disabled" : ""}>▼</button>` : "";
+    const actions = move + (t.status === "PROPOSED"
       ? `<button type="button" data-approve="${t.task_id}">了承</button><button type="button" class="ghost" data-reject="${t.task_id}">却下</button>`
       : t.status === "APPROVED"
         ? `<button type="button" class="mini" data-now="${t.task_id}">今すぐ</button>`
           + `<input class="time" type="number" min="0" step="10" placeholder="時刻 s" data-time-input="${t.task_id}" />`
           + `<button type="button" class="mini" data-time="${t.task_id}">時刻</button>`
-          + `<button type="button" class="mini ghost" data-cancel="${t.task_id}">中止</button>` : "";
+          + `<button type="button" class="mini ghost" data-cancel="${t.task_id}">中止</button>` : "");
     const plan = t.planned_tick != null ? `計画 ${t.planned_tick} s` : "すぐ";
     const late = t.status === "DONE" && t.planned_tick != null ? `（${t.done_tick - t.planned_tick >= 0 ? "+" : ""}${t.done_tick - t.planned_tick} s）` : "";
     const when = t.status === "APPROVED" ? `${plan}・あと ${fmt(t.eta_s, 0)} s` : t.status === "DONE" ? `${t.done_tick} s 投入${late}` : plan;
     const src = { forward: "自動", operator: "即時配置", manual: "手動配置" }[t.source] || t.source;
-    return `<tr><td>${t.task_id}<br /><small>${src}</small></td><td>${TASK_STATUS[t.status] || t.status}</td>`
+    const rank = index >= 0 && open.length > 1 ? `・${index + 1}番目` : "";
+    return `<tr><td>${t.task_id}<br /><small>${src}${rank}</small></td><td>${TASK_STATUS[t.status] || t.status}</td>`
       + `<td>${Math.round(t.position.depth_ft)} Ft<br /><small>${when}</small></td><td>${actions}</td></tr>`;
   });
   // keep a drop time the operator is typing: do not rebuild the table under the cursor
@@ -739,6 +751,17 @@ const cancelDrops = (taskIds) => postDrops("cancel", { task_ids: taskIds }, (cha
 const rescheduleDrop = (taskId, plannedTick) => postDrops("reschedule", { task_id: taskId, planned_tick: plannedTick },
   (task) => (task.planned_tick == null ? `設標 #${task.task_id} はすぐに向かいます。` : `設標 #${task.task_id} の投入時刻を ${task.planned_tick} s にしました。`));
 
+// move an open drop one place earlier (-1) or later (+1) in the drop order; the backend plans
+// the drop times again along the new order
+function moveDrop(taskId, offset) {
+  const order = (state.openDropOrder || []).slice();
+  const from = order.indexOf(taskId);
+  const to = from + offset;
+  if (from < 0 || to < 0 || to >= order.length) return;
+  [order[from], order[to]] = [order[to], order[from]];
+  postDrops("reorder", { task_ids: order }, (tasks) => `設標順を変更しました：${tasks.map((t) => `#${t.task_id}`).join(" → ")}（投入時刻を再計算）`);
+}
+
 $("drop-table").addEventListener("click", (event) => {
   const target = (key) => event.target.closest(`[data-${key}]`);
   const id = (el, key) => Number(el.dataset[key]);
@@ -747,6 +770,8 @@ $("drop-table").addEventListener("click", (event) => {
   if ((el = target("reject"))) decideDrops([id(el, "reject")], false);
   if ((el = target("now"))) rescheduleDrop(id(el, "now"), null);
   if ((el = target("cancel"))) cancelDrops([id(el, "cancel")]);
+  if ((el = target("up"))) moveDrop(id(el, "up"), -1);
+  if ((el = target("down"))) moveDrop(id(el, "down"), 1);
   if ((el = target("time"))) {
     const input = $("drop-table").querySelector(`[data-time-input="${el.dataset.time}"]`);
     if (!input || input.value === "") { setMessage("投入時刻（シミュレーション時刻 s）を入力してください。"); return; }

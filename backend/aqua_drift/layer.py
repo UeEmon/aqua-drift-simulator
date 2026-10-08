@@ -399,13 +399,13 @@ def planned_path(state: LayerState, config: LayerConfig, points: list[Position])
 def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[LayerState, LayerUpdate]:
     """Advance the layer from state.tick to feed.tick (1 s steps).
 
-    Tasks are flown in the order of their planned drop time. The layer keeps circling the
+    Tasks are flown in the order of their planned drop time (then the operator's drop order). The layer keeps circling the
     estimated target until it is time to leave (see departure) and flies in on the path that
     arrives at the planned time (see timed_turn; the speed is kept unless no path can make it).
     Arriving early anyway, it comes round again (HOLD) when that ends closer to the planned
     time. Tasks without a planned time are flown at once.
     Drop points drift with the estimated current."""
-    tasks = sorted(feed.tasks, key=lambda t: (t.planned_tick if t.planned_tick is not None else -1, t.task_id))
+    tasks = sorted(feed.tasks, key=lambda t: t.flight_key())
     positions = {t.task_id: t.position for t in tasks}
     completed: dict[int, Position] = {}
     tick = state.tick

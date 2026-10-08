@@ -89,8 +89,15 @@ def test_drop_reschedule_and_cancel_endpoints() -> None:
         moved = client.post("/api/drops/reschedule", json={"task_id": task["task_id"], "planned_tick": None})
         assert moved.status_code == 200 and moved.json()["planned_tick"] is None
         assert client.post("/api/drops/reschedule", json={"task_id": 123456, "planned_tick": 5}).status_code == 404
-        cancelled = client.post("/api/drops/cancel", json={"task_ids": [task["task_id"]]}).json()
-        assert [t["status"] for t in cancelled] == ["CANCELLED"]
+        second = {"position": {"latitude": 35.25, "longitude": 140.2, "depth_ft": 200.0}, "planned_tick": 99999}
+        assert client.post("/api/observers/placements", json=second).status_code == 200
+        later = client.get("/api/snapshot").json()["deployment"]["tasks"][-1]
+        order = client.post("/api/drops/reorder", json={"task_ids": [later["task_id"], task["task_id"]]})
+        assert order.status_code == 200
+        assert [t["task_id"] for t in order.json()][:2] == [later["task_id"], task["task_id"]]
+        assert client.post("/api/drops/reorder", json={"task_ids": [123456]}).status_code == 404
+        cancelled = client.post("/api/drops/cancel", json={"task_ids": [task["task_id"], later["task_id"]]}).json()
+        assert [t["status"] for t in cancelled] == ["CANCELLED", "CANCELLED"]
         config["layer"]["preferred_turn"] = "right"
         config["layer"]["paused"] = True
         saved = client.put("/api/config", json=config).json()

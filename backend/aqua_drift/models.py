@@ -449,13 +449,27 @@ class DropTask(BaseModel):
     position: Position
     status: str = "PROPOSED"
     planned_tick: int | None = None  # optimal / requested drop time (None = as soon as possible)
+    # the planner's optimal (or the operator's) drop time; planned_tick is moved from it only
+    # when the layer cannot be there in the operator's drop order (設標順)
+    requested_tick: int | None = None
+    sequence: int = 0  # drop order among tasks with the same planned time (operator reorder)
     approved_tick: int | None = None
     done_tick: int | None = None
     eta_s: float | None = None  # seconds from now to the expected drop
 
+    def flight_key(self) -> tuple[int, int, int]:
+        """Order the layer flies the drops in: planned time (as soon as possible first), then
+        the operator's drop order."""
+        return (self.planned_tick if self.planned_tick is not None else -1,
+                self.sequence or self.task_id, self.task_id)
+
 
 class DropDecision(BaseModel):
     task_ids: list[int] | None = None  # None = every proposed drop
+
+
+class DropReorder(BaseModel):
+    task_ids: list[int]  # open drops in the new drop order (unlisted open drops follow in their order)
 
 
 class DropReschedule(BaseModel):
