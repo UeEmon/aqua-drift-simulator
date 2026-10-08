@@ -35,7 +35,7 @@ from aqua_drift.models import (
     TargetState,
     TickMessage,
 )
-from aqua_drift.optimal_deployment import availability_from_feed
+from aqua_drift.optimal_deployment import availability_from_feed, sensor_from_feed
 from aqua_drift.state import ObserverRejected, SimulationState
 from aqua_drift.storage import EventStore
 from aqua_drift.wire import PROTOCOL_VERSION, WireEncoder
@@ -210,7 +210,8 @@ async def deploy_now() -> dict[str, object]:
         feed.max_slant_range_yd, feed.last_deploy_tick, feed.depth_step_ft, force=True,
         free_slots=feed.free_slots, source_frequency_hz=feed.source_frequency_hz,
         sound_speed_mps=feed.sound_speed_mps, frequency_sigma_hz=feed.frequency_sigma_hz,
-        layer=availability_from_feed(feed),
+        layer=availability_from_feed(feed), sensor=sensor_from_feed(feed),
+        max_depth_ft=feed.max_target_depth_ft,
     )
     if not positions:
         raise HTTPException(status_code=409, detail=f"no deployment: {reason}")

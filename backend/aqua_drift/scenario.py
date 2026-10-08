@@ -30,7 +30,7 @@ from aqua_drift.models import (
     ScenarioConfig,
     TargetState,
 )
-from aqua_drift.optimal_deployment import LayerAvailability
+from aqua_drift.optimal_deployment import LayerAvailability, SensorModel
 from aqua_drift.physics import (
     LevelNoise,
     advance_observer,
@@ -165,6 +165,13 @@ class ScenarioRun:
             sound_speed_mps=self.config.source.sound_speed_mps,
             frequency_sigma_hz=self.config.estimator.model_frequency_sigma_hz,
             layer=self._layer_availability(),
+            sensor=SensorModel(
+                use_bearing=self.config.estimator.use_bearing and self.config.bearing.enabled,
+                bearing_sigma_deg=self.config.estimator.bearing_sigma_deg,
+                bearing_interval_s=self.config.bearing.interval_s,
+                gate_sigma_yd=self.config.estimator.range_gate_softness_yd,
+            ),
+            max_depth_ft=self.config.estimator.max_target_depth_ft,
         )
         if not positions:
             return

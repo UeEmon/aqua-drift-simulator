@@ -94,6 +94,7 @@ class DopplerParticleFilter:
         self.bearing_sigma = bearing_sigma_rad
         self.move_window_eff: float | None = None
         self.maneuver_cut_tick: int | None = None
+        self.maneuver_detected_tick: int | None = None  # last time a maneuver was detected
         self.depth_fix: tuple[float, float, int] | None = None  # (depth m, sigma m, tick)
         self.rng = np.random.default_rng(seed)
         self.x = np.zeros((self.n, self.STATE_DIM))
@@ -502,6 +503,7 @@ class DopplerParticleFilter:
         if chi2 > self.move_mismatch_chi2:
             # maneuver inside the window: data older than half the window are not used
             self.maneuver_cut_tick = int(now - max(self.move_min_window_s, 0.5 * self.move_window_eff))
+            self.maneuver_detected_tick = int(now)
         accepted_ind = 0.0
         if modes:
             mixture = GaussianMixture(modes)

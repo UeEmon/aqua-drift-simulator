@@ -392,6 +392,7 @@ class TrackingEngine:
             "recompute_window_s": self.settings.smoothing_window_seconds,
             "history_stride_s": self.pf.hist_stride,
             "reinitializations": self.reinitializations,
+            "maneuver_detected_tick": self.pf.maneuver_detected_tick,
         }
         if not self.pf.initialized or self.frame is None:
             estimates = [

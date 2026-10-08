@@ -18,7 +18,7 @@ import math
 
 from aqua_drift.deployment import _offset
 from aqua_drift.models import ForwardDeploymentConfig, Position, TrackEstimate
-from aqua_drift.optimal_deployment import LayerAvailability, plan_optimal_deployment
+from aqua_drift.optimal_deployment import LayerAvailability, SensorModel, plan_optimal_deployment
 from aqua_drift.physics import local_offset_m
 
 YD_TO_M = 0.9144
@@ -48,6 +48,8 @@ def plan_forward_deployment_scheduled(
     sound_speed_mps: float = 1500.0,
     frequency_sigma_hz: float = 0.03,
     layer: LayerAvailability | None = None,
+    sensor: SensorModel | None = None,
+    max_depth_ft: float = 1500.0,
 ) -> tuple[list[Position], str, list[int] | None]:
     """Return (positions to deploy, reason, planned drop ticks). An empty list means no
     deployment now. The planned ticks (optimal strategy) are when the layer should lay each
@@ -64,7 +66,9 @@ def plan_forward_deployment_scheduled(
     r_max = max_slant_range_yd * YD_TO_M
     if estimate.uncertainty.horizontal_major_yd * YD_TO_M > config.max_sigma_fraction * r_max:
         return [], "estimate too uncertain", None
-    if not force and last_deploy_tick is not None and tick - last_deploy_tick < config.cooldown_s:
+    maneuver_tick = (estimate.metadata or {}).get("maneuver_detected_tick")
+    replan = maneuver_tick is not None and (last_deploy_tick is None or maneuver_tick > last_deploy_tick)
+    if not force and not replan and last_deploy_tick is not None and tick - last_deploy_tick < config.cooldown_s:
         return [], "cooldown", None
     speed_kt = estimate.through_water_speed_kt or 0.0
     if speed_kt < config.min_speed_kt or estimate.hdg_deg is None:
@@ -89,7 +93,10 @@ def plan_forward_deployment_scheduled(
             estimate, observers, pending, config, max_slant_range_yd, free_slots,
             source_frequency_hz, sound_speed_mps, frequency_sigma_hz,
             coverage_short=covered < config.min_coverage, force=force, layer=layer,
+            sensor=sensor, max_depth_ft=max_depth_ft,
         )
+        if positions and replan and not force:
+            reason = f"{reason}; replanned after a maneuver at tick {maneuver_tick}"
         if not positions and covered >= config.min_coverage:
             reason = f"covered ({covered} observers near predicted position); {reason}"
         planned = [tick + round(t) for t in report.drop_times_s] if positions and report else None
