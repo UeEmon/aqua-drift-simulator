@@ -44,6 +44,7 @@ node --check web/app.js
 
 | 要求 | 内容 | 主なファイル |
 |---|---|---|
+| 4.18 | 風向風速（海面〜30,000 ft、1,000 ft ごと）。設標者は高度を持って飛び（巡航・投下高度、昇降率）飛行高度の風で流される。観測者は投下後に各高度の風を受けて自由落下し、着水時刻に投入。着水位置と無風の自由落下の予想地点の差から投下高度〜海面の平均風を推定し、次の投下点を風上に修正。「風」タブ。詳細は `docs/wind.md` | `wind.py`、`layer.py`（`release_point`、気団座標の誘導）、`state.py`（`falling`、`_splash`）、`web/app.js`（`updateWind`） |
 | 4.16 | 設標順の入れ替え：「設標者」タブの計画一覧で ▲▼。投入時刻は新しい順で再計算（最適時刻 `requested_tick` か前の設標点から到着できる時刻の遅い方）。API `/api/drops/reorder` | `state.py`（`reorder_tasks`）、`models.py`（`DropTask.flight_key`）、`web/app.js`（`moveDrop`） |
 | 4.15 | 設標者の旋回は左旋回が基準。右旋回は経路が `turn_margin_s`（既定 10 秒）× 速力以上短い場合だけ。「設標者」タブ（状態表、有無・一時停止・了承方式・基準旋回・速力などの設定、計画一覧で了承／却下／今すぐ／時刻変更／中止、手動配置）。API `/api/drops/cancel`・`/api/drops/reschedule` | `backend/aqua_drift/layer.py`（`dubins_turn`、`preferred_side`）、`state.py`、`api.py`、`web/index.html`（`tab-layer`）、`web/app.js`（`updateLayer`） |
 | 4.14 | 最適な投入予定時刻を計算し、設標者が計画時刻に設標（出発待ち、速力選択、HOLD） | `optimal_deployment.py`（`LayerAvailability`、`drop_times`）、`layer.advance` |

@@ -487,6 +487,26 @@ def main() -> int:
                 if planned is not None and approved is not None and planned - approved >= 120 and abs(laid - planned) > 60:
                     fail(f"drop {task_id} laid at {laid}, planned {planned}")
             page.screenshot(path=str(out / "07a-layer-tab.png"))
+            # wind (風): the observer falls freely through the wind profile; once it is in the
+            # water the mean wind from the drop altitude to the sea surface is estimated
+            page.evaluate("() => document.querySelector(\".tab[data-tab='tab-wind']\").click()")
+            rows = page.evaluate("() => document.querySelectorAll('#wind-table tbody tr').length")
+            if rows != 31:
+                fail(f"wind table should have 31 levels (0..30,000 ft), got {rows}")
+            try:
+                page.wait_for_function(
+                    "() => (window.aquaDrift.state.latestSnapshot.deployment.wind_estimates || []).length > 0",
+                    timeout=120_000)
+                estimate = page.evaluate(
+                    "() => window.aquaDrift.state.latestSnapshot.deployment.wind_estimates.slice(-1)[0]")
+                note(f"wind: mean wind {estimate['direction_deg']:.0f} deg {estimate['speed_kt']:.1f} kt "
+                     f"(truth {estimate['true_direction_deg']:.0f} deg {estimate['true_speed_kt']:.1f} kt) "
+                     f"from {estimate['altitude_ft']:.0f} ft, fall {estimate['fall_time_s']} s, miss {estimate['miss_yd']} YD")
+                page.wait_for_function(
+                    "() => document.querySelector('#wind-estimate-table tbody').innerText.includes('kt')", timeout=15_000)
+            except Exception:  # noqa: BLE001
+                fail("no mean wind estimate after the drop")
+            page.screenshot(path=str(out / "07b-wind-tab.png"))
             page.evaluate("""() => { const el = document.getElementById('drop-approval');
                 el.value = 'auto'; el.dispatchEvent(new Event('change')); }""")
             page.evaluate("() => document.querySelector(\".tab[data-tab='tab-display']\").click()")
