@@ -114,6 +114,59 @@ class LloydMirrorConfig(BaseModel):
     random_seed: int = 23
 
 
+WIND_TOP_FT = 30000
+WIND_STEP_FT = 1000
+
+
+class WindLevel(BaseModel):
+    """Wind at one altitude: direction it blows FROM (true, degrees) and speed."""
+
+    altitude_ft: int = Field(ge=0, le=WIND_TOP_FT)
+    direction_deg: float = Field(ge=0, le=360)
+    speed_kt: float = Field(ge=0, le=300)
+
+    @field_validator("altitude_ft")
+    @classmethod
+    def validate_altitude(cls, value: int) -> int:
+        if value % WIND_STEP_FT:
+            raise ValueError(f"altitude_ft must be a multiple of {WIND_STEP_FT} ft")
+        return value
+
+
+def default_wind_levels() -> list[WindLevel]:
+    """Default profile: 10 kt from 250 deg at the sea surface, veering and strengthening with
+    height to 70 kt from 290 deg at 30,000 ft."""
+    count = WIND_TOP_FT // WIND_STEP_FT
+    return [
+        WindLevel(altitude_ft=k * WIND_STEP_FT, direction_deg=round(250.0 + 40.0 * k / count, 1),
+                  speed_kt=10.0 + 2.0 * k)
+        for k in range(count + 1)
+    ]
+
+
+class WindConfig(BaseModel):
+    """Wind truth (風向風速) from the sea surface to 30,000 ft, set every 1,000 ft (linear in
+    between, the top level above it). It acts on the layer (設標者) at its flight altitude and
+    on every observer falling from the drop altitude to the sea surface.
+
+    The observer falls freely: gravity and quadratic air drag on its velocity relative to the
+    air (k = g / terminal_velocity^2), starting with the layer's ground velocity."""
+
+    enabled: bool = True  # False: no wind at any altitude (the observers still fall)
+    levels: list[WindLevel] = Field(default_factory=default_wind_levels)
+    terminal_velocity_fps: float = Field(default=100.0, ge=5, le=1000)
+
+    @field_validator("levels")
+    @classmethod
+    def validate_levels(cls, value: list[WindLevel]) -> list[WindLevel]:
+        if not value:
+            raise ValueError("at least one wind level is required")
+        altitudes = [level.altitude_ft for level in value]
+        if len(set(altitudes)) != len(altitudes):
+            raise ValueError("wind levels must have different altitudes")
+        return sorted(value, key=lambda level: level.altitude_ft)
+
+
 class LayerConfig(BaseModel):
     """設標者 (layer): the craft that lays additional observers. It moves over the sea surface
     at speed_kt +- speed_spread_kt (a new speed for every leg) with bank <= max_bank_deg and,
@@ -133,6 +186,13 @@ class LayerConfig(BaseModel):
     turn_margin_s: float = Field(default=10.0, ge=0, le=600)  # other side only if this much quicker
     paused: bool = False  # operator hold: the layer circles the target and does not leave
     random_seed: int = 31
+    # 3-D flight: the layer cruises (orbit) at cruise_altitude_ft, descends to drop_altitude_ft
+    # on the way to a drop point, and climbs / descends at climb_rate_fpm
+    cruise_altitude_ft: float = Field(default=3000.0, ge=100, le=WIND_TOP_FT)
+    drop_altitude_ft: float = Field(default=1000.0, ge=100, le=WIND_TOP_FT)
+    climb_rate_fpm: float = Field(default=2000.0, gt=0, le=20000)
+    # release the observer upwind by the drift of the estimated mean wind (from the last drop)
+    wind_correction: bool = True
 
 
 class ForwardDeploymentConfig(BaseModel):
@@ -252,6 +312,7 @@ class ScenarioConfig(BaseModel):
     estimator: EstimatorConfig = EstimatorConfig()
     lloyd: LloydMirrorConfig = LloydMirrorConfig()
     layer: LayerConfig = LayerConfig()
+    wind: WindConfig = WindConfig()
 
 
 class EstimatorSettings(BaseModel):
@@ -473,6 +534,14 @@ class DropTask(BaseModel):
     approved_tick: int | None = None
     done_tick: int | None = None
     eta_s: float | None = None  # seconds from now to the expected drop
+    # free fall from the layer (設標者): the drop point (position) is where the observer should
+    # enter the water; the layer releases it at release_position (corrected upwind for the
+    # estimated mean wind). After the release: where and when it entered the water.
+    release_position: Position | None = None
+    release_altitude_ft: float | None = None
+    planned_position: Position | None = None  # the drop point when the observer entered the water
+    splash_tick: int | None = None
+    miss_yd: float | None = None  # entry point - drop point (horizontal)
 
     def flight_key(self) -> tuple[int, int, int]:
         """Order the layer flies the drops in: planned time (as soon as possible first), then
@@ -508,6 +577,27 @@ class LayerState(BaseModel):
     # planned flight path ahead (飛行予定経路): [latitude, longitude] from the current position
     # through the open drop points in order, along the turn-limited guidance path
     planned_path: list[tuple[float, float]] = Field(default_factory=list)
+    # 3-D flight and the wind at the flight altitude
+    altitude_ft: float = 0.0
+    ground_speed_kt: float | None = None
+    track_deg: float | None = None
+    wind_direction_deg: float | None = None  # from
+    wind_speed_kt: float | None = None
+
+
+class DropRelease(BaseModel):
+    """One drop (投下): the observer leaves the layer and falls freely to the sea surface."""
+
+    task_id: int
+    release_tick: int
+    release_position: Position  # depth 0; the layer was at altitude_ft above it
+    altitude_ft: float
+    ground_east_kt: float  # layer ground velocity at the release (the observer's initial velocity)
+    ground_north_kt: float
+    splash_tick: int
+    splash_position: Position  # truth: where the observer enters the water (its hanging depth)
+    fall_time_s: float
+    planned_position: Position  # the drop point when the observer enters the water
 
 
 class LayerUpdate(BaseModel):
@@ -516,7 +606,33 @@ class LayerUpdate(BaseModel):
     state: LayerState
     task_positions: dict[int, Position] = Field(default_factory=dict)  # drifted drop points
     task_eta_s: dict[int, float] = Field(default_factory=dict)
-    completed: dict[int, Position] = Field(default_factory=dict)  # laid: task id -> drop point
+    # laid: task id -> point where the observer enters the water
+    completed: dict[int, Position] = Field(default_factory=dict)
+    releases: dict[int, DropRelease] = Field(default_factory=dict)  # free fall of the laid observers
+    release_positions: dict[int, Position] = Field(default_factory=dict)  # corrected release points
+
+
+class WindEstimate(BaseModel):
+    """Mean wind from the drop altitude to the sea surface (投下高度から海面までの平均風向風速),
+    from where an observer entered the water compared with the predicted entry point of the
+    same free fall without wind. Known after the observer is in the water (splash_tick)."""
+
+    task_id: int
+    tick: int
+    altitude_ft: float
+    fall_time_s: float
+    release_position: Position
+    no_wind_position: Position  # predicted entry point without wind
+    splash_position: Position
+    offset_yd: float  # entry point - no-wind prediction
+    east_kt: float  # mean wind vector (towards)
+    north_kt: float
+    direction_deg: float  # from
+    speed_kt: float
+    miss_yd: float | None = None  # entry point - drop point
+    # truth for comparison: vector mean of the wind profile from the drop altitude to the sea
+    true_direction_deg: float | None = None
+    true_speed_kt: float | None = None
 
 
 class LayerFeed(BaseModel):
@@ -528,6 +644,10 @@ class LayerFeed(BaseModel):
     current_east_kt: float = 0.0  # estimated current (drift of the planned drop points)
     current_north_kt: float = 0.0
     state: LayerState | None = None
+    # wind truth (the layer flies in it and the observers fall through it); None: the observer
+    # is in the water at the drop point at once (no free fall)
+    wind: WindConfig | None = None
+    wind_estimate: WindEstimate | None = None  # latest estimated mean wind (release correction)
 
 
 class DeploymentStatus(BaseModel):
@@ -538,6 +658,8 @@ class DeploymentStatus(BaseModel):
     approval: str = "auto"
     tasks: list[DropTask] = Field(default_factory=list)  # recent drop tasks (all states)
     layer: LayerState | None = None
+    falling: int = 0  # observers released and still falling
+    wind_estimates: list[WindEstimate] = Field(default_factory=list)  # newest last
 
 
 class EstimatorFeed(BaseModel):

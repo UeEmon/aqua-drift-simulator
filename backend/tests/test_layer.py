@@ -115,8 +115,18 @@ async def test_auto_approval_layer_flies_and_lays_the_observer() -> None:
     status = (await sim.snapshot()).deployment
     task = status.tasks[-1]
     assert task.status == "DONE"
-    assert status.pending_placements == 1  # now the observer container is started
+    # released: the observer falls freely to the sea surface before it is in the water
+    assert status.pending_placements == 0 and status.falling == 1
+    assert task.splash_tick > task.done_tick and task.release_altitude_ft > 0
+    for _ in range(60):
+        state = await _layer_steps(sim, 1, rng, state)
+        if (await sim.snapshot()).deployment.pending_placements:
+            break
+    status = (await sim.snapshot()).deployment
+    task = status.tasks[-1]
+    assert status.pending_placements == 1 and status.falling == 0  # now the observer container is started
     assert task.position.depth_ft == 1000.0
+    assert task.miss_yd is not None and len(status.wind_estimates) == 1
     assigned = await sim.assign_position("obs-09")
     assert (assigned.latitude, assigned.longitude) == (task.position.latitude, task.position.longitude)
     assert status.layer.mode == "ORBIT" or status.layer.task_id != task.task_id
