@@ -18,6 +18,7 @@ from aqua_drift.estimation.engine import TrackingEngine
 from aqua_drift.forward_deployment import plan_forward_deployment_scheduled
 from aqua_drift.layer import advance as advance_layer
 from aqua_drift.layer import initial_state as initial_layer_state
+from aqua_drift.layer import ready_pose
 from aqua_drift.models import (
     DopplerBatch,
     DropTask,
@@ -135,16 +136,18 @@ class ScenarioRun:
     def _layer_availability(self) -> LayerAvailability | None:
         if not self.config.layer.enabled:
             return None
-        ready, where = self.tick, (self.layer_state.position if self.layer_state else self.config.target.initial_position)
-        heading = self.layer_state.heading_deg if self.layer_state else None
-        for task in self.tasks:
-            if task.status == "APPROVED":
-                due = task.planned_tick if task.planned_tick is not None else self.tick + int(task.eta_s or 0)
-                if due >= ready:
-                    ready, where, heading = due, task.position, None
         layer = self.config.layer
-        return LayerAvailability(ready_s=float(ready - self.tick), position=where,
-                                 speed_kt=layer.speed_kt, max_bank_deg=layer.max_bank_deg, heading_deg=heading)
+        queue = sorted((t for t in self.tasks if t.status == "APPROVED"), key=lambda t: t.flight_key())
+        ready, where, heading = ready_pose(self.layer_state, layer, queue, self.tick,
+                                           self.config.target.initial_position)
+        state = self.layer_state
+        return LayerAvailability(
+            ready_s=float(ready - self.tick), position=where, speed_kt=layer.speed_kt,
+            max_bank_deg=layer.max_bank_deg, heading_deg=heading,
+            now_position=state.position if state is not None else None,
+            now_heading_deg=state.heading_deg if state is not None else None,
+            queue=[(t.position, None if t.planned_tick is None else float(t.planned_tick - self.tick)) for t in queue],
+        )
 
     def _add_observer(self, position: Position) -> None:
         self.observers.append(
