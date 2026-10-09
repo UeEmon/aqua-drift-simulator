@@ -217,8 +217,9 @@ class LayerConfig(BaseModel):
     orbit_radius_yd: float = Field(default=5000.0, gt=0)  # raised to the turn radius if smaller
     capture_radius_yd: float = Field(default=150.0, gt=0)
     proposal_timeout_s: int = Field(default=600, ge=10, le=7200)  # unanswered proposals expire
-    preferred_turn: str = Field(default="left", pattern="^(left|right)$")  # standard turn direction
-    turn_margin_s: float = Field(default=10.0, ge=0, le=600)  # other side only if this much quicker
+    # standard turn: the sense of the orbit / HOLD and the tie-break; the paths to the drops turn
+    # whichever way is quickest
+    preferred_turn: str = Field(default="left", pattern="^(left|right)$")
     paused: bool = False  # operator hold: the layer circles the target and does not leave
     random_seed: int = 31
     # 3-D flight: the layer cruises (orbit) at cruise_altitude_ft, descends to drop_altitude_ft

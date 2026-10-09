@@ -254,9 +254,9 @@ def test_layer_drops_within_seconds_of_the_planned_time() -> None:
     assert max(abs(e) for e in errors) <= 30
 
 
-def test_timed_leg_takes_up_time_with_a_left_detour_at_constant_speed() -> None:
-    """Time is adjusted with the flight path: an early layer makes a detour turning left (4.15)
-    and keeps its speed."""
+def _timed_detour(east_m: float, early_s: int = 90) -> tuple[int, list[float], set[float]]:
+    """Fly a timed leg to a point 12 km ahead (east_m to the side) planned early_s after the
+    direct arrival. Returns (drop time - planned time, banks, speeds)."""
     from aqua_drift.layer import _arrival_s
     from aqua_drift.models import DropTask, LayerFeed
 
@@ -264,20 +264,39 @@ def test_timed_leg_takes_up_time_with_a_left_detour_at_constant_speed() -> None:
     rng = random.Random(2)
     state = initial_state(config, DATUM, 0, rng).model_copy(
         update={"speed_kt": 190.0, "heading_deg": 0.0, "mode": "TRANSIT", "task_id": 1})
-    point = _offset(state.position, 0.0, 12000.0, 500.0)
-    planned = round(_arrival_s(state, config, point)) + 90  # 90 s early on the direct path
+    point = _offset(state.position, east_m, 12000.0, 500.0)
+    planned = round(_arrival_s(state, config, point)) + early_s
     task = DropTask(task_id=1, created_tick=0, source="forward", position=point, status="APPROVED",
                     planned_tick=planned)
-    banks, speeds = [], []
+    banks, speeds = [], set()
     for tick in range(1, planned + 300):
         state, update = advance(LayerFeed(tick=tick, config=config, tasks=[task], datum=DATUM), state, rng)
         banks.append(state.bank_deg)
-        speeds.append(state.speed_kt)
+        speeds.add(state.speed_kt)
         if 1 in update.completed:
-            break
-    assert abs(tick - planned) <= 5
-    assert set(speeds) == {190.0}
-    assert sum(b < -10.0 for b in banks) > 20  # the detour is a left turn
+            return tick - planned, banks, speeds
+    raise AssertionError("no drop")
+
+
+def test_timed_leg_takes_up_time_with_a_detour_at_constant_speed() -> None:
+    """Time is adjusted with the flight path: an early layer makes a detour and keeps its speed."""
+    error, banks, speeds = _timed_detour(0.0)
+    assert abs(error) <= 5
+    assert speeds == {190.0}
+    assert sum(abs(b) > 10.0 for b in banks) > 20  # the detour is a turn
+
+
+def test_timed_detour_turns_either_way_not_only_left() -> None:
+    """4.23: the detour that takes up the time is chosen among left and right turns, so a point
+    off to one side gives the mirror image of the point off to the other side (the old detour
+    turned left only)."""
+    right_error, right_banks, right_speeds = _timed_detour(3000.0)
+    left_error, left_banks, left_speeds = _timed_detour(-3000.0)
+    assert abs(right_error) <= 5 and abs(left_error) <= 5
+    assert right_speeds == left_speeds == {190.0}
+    for a, b in zip(right_banks, left_banks):
+        assert a == pytest.approx(-b, abs=0.5)
+    assert sum(b > 10.0 for b in left_banks) > 20  # right turns are flown
 
 
 def test_timed_leg_adjusts_the_speed_on_the_way() -> None:
@@ -335,20 +354,35 @@ def test_planner_schedules_drops_before_detection_and_after_the_layer_can_be_the
     assert min(early) <= min(planned)
 
 
-def test_left_turn_is_the_standard_and_right_only_when_clearly_shorter() -> None:
+def test_dubins_turn_takes_the_preferred_side_within_the_margin() -> None:
     from aqua_drift.layer import dubins_turn
 
     r = 4000.0
-    # point dead astern: both sides equal -> left (standard)
+    # point dead astern: both sides equal -> the preferred side (left by default)
     assert dubins_turn(0.0, -20000.0, 0.0, r)[0] == -1
-    # point slightly to the right: right is shorter, but by less than the margin -> still left
-    side_small, _, _ = dubins_turn(300.0, -20000.0, 0.0, r, margin_m=10 * 200 * 0.5144)
-    assert side_small == -1
-    # point well to the right and ahead: right turn is far shorter -> right
+    # no margin: the shorter side, however small the difference
+    assert dubins_turn(300.0, -20000.0, 0.0, r)[0] == 1
+    # a margin keeps the preferred side unless the other is shorter by more
+    assert dubins_turn(300.0, -20000.0, 0.0, r, margin_m=10 * 200 * 0.5144)[0] == -1
     assert dubins_turn(9000.0, 3000.0, 0.0, r, margin_m=10 * 200 * 0.5144)[0] == 1
-    # a right-turn standard mirrors it
     assert dubins_turn(0.0, -20000.0, 0.0, r, prefer=1)[0] == 1
     assert dubins_turn(-9000.0, 3000.0, 0.0, r, prefer=1, margin_m=1000.0)[0] == -1
+
+
+def test_layer_turns_towards_a_drop_on_the_shorter_side() -> None:
+    """4.23: the flight to a drop is not tied to left turns. A point behind and a little to the
+    right is turned to on the right (the old guidance turned left unless right was at least 10 s
+    shorter); dead astern, where both sides are equal, the standard side (left, or right when
+    that is the standard)."""
+    rng = random.Random(4)
+    for turn, east, sign in (("left", 300.0, 1), ("left", -300.0, -1), ("left", 0.0, -1),
+                             ("right", 0.0, 1), ("right", -300.0, -1)):
+        config = LayerConfig(preferred_turn=turn, speed_spread_kt=0.0)
+        state = initial_state(config, DATUM, 0, rng).model_copy(update={"heading_deg": 0.0, "mode": "TRANSIT"})
+        target = _offset(state.position, east, -20000.0, 0.0)
+        for _ in range(5):
+            state, _ = step(state, config, target, 1, DATUM, rng)
+        assert sign * state.bank_deg > 10.0, (turn, east)
 
 
 def test_orbit_is_flown_counter_clockwise_with_left_bank_by_default() -> None:

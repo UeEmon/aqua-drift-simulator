@@ -45,9 +45,10 @@ node --check web/app.js
 | 要求 | 内容 | 主なファイル |
 |---|---|---|
 | UI | 右パネルのタブを作業ごとに再編：推定結果／目標／観測・推定／配置・設標（前程配置の状況と設定・設標計画・設標者・手動配置）／風・潮流（潮流の設定・平均風の推定・風向風速）／表示。設定フォームはタブごとに分け、各タブの「反映」はそのタブの項目だけを送る（`config-form`・`forward-form`・`current-form`） | `web/index.html`、`web/app.js`、`web/styles.css` |
+| 4.23 | 設標に向かう経路は左旋回にこだわらず、左右の旋回を比べて最短を選ぶ（時刻調整の遠回りも左右）。基準旋回は待機旋回・HOLD の向きと同じ長さのときだけ。`turn_margin_s` と画面の「反対旋回を選ぶ差」は廃止 | `backend/aqua_drift/layer.py`（`_guidance`、`_best_path`、`_first_leg_s`）、`docs/layer-route.md` |
 | 4.18 | 風向風速（海面〜30,000 ft、1,000 ft ごと）。設標者は高度を持って飛び（巡航・投下高度、昇降率）飛行高度の風で流される。観測者は投下後に各高度の風を受けて自由落下し、着水時刻に投入。着水位置と無風の自由落下の予想地点の差から投下高度〜海面の平均風を推定し、次の投下点を風上に修正。「風・潮流」タブ。詳細は `docs/wind.md` | `wind.py`、`layer.py`（`release_point`、気団座標の誘導）、`state.py`（`falling`、`_splash`）、`web/app.js`（`updateWind`） |
 | 4.16 | 設標順の入れ替え：「配置・設標」タブの計画一覧で ▲▼。投入時刻は新しい順で再計算（最適時刻 `requested_tick` か前の設標点から到着できる時刻の遅い方）。API `/api/drops/reorder` | `state.py`（`reorder_tasks`）、`models.py`（`DropTask.flight_key`）、`web/app.js`（`moveDrop`） |
-| 4.15 | 設標者の旋回は左旋回が基準。右旋回は経路が `turn_margin_s`（既定 10 秒）× 速力以上短い場合だけ。「配置・設標」タブ（状態表、有無・一時停止・了承方式・基準旋回・速力などの設定、計画一覧で了承／却下／今すぐ／時刻変更／中止、手動配置）。API `/api/drops/cancel`・`/api/drops/reschedule` | `backend/aqua_drift/layer.py`（`dubins_turn`、`preferred_side`）、`state.py`、`api.py`、`web/index.html`（`tab-deploy`）、`web/app.js`（`updateLayer`） |
+| 4.15 | 設標者の旋回は左旋回が基準（設標経路は 4.23 で左右とも最短に変更）。右旋回は経路が `turn_margin_s`（既定 10 秒）× 速力以上短い場合だけ。「配置・設標」タブ（状態表、有無・一時停止・了承方式・基準旋回・速力などの設定、計画一覧で了承／却下／今すぐ／時刻変更／中止、手動配置）。API `/api/drops/cancel`・`/api/drops/reschedule` | `backend/aqua_drift/layer.py`（`dubins_turn`、`preferred_side`）、`state.py`、`api.py`、`web/index.html`（`tab-deploy`）、`web/app.js`（`updateLayer`） |
 | 4.14 | 最適な投入予定時刻を計算し、設標者が計画時刻に設標（出発待ち、速力選択、HOLD） | `optimal_deployment.py`（`LayerAvailability`、`drop_times`）、`layer.advance` |
 | 4.13 | 追加の観測者は設標者（200±50 kt、バンク 15° 以内）が配置。提案→了承（既定は自動）→設標。待機中は推定位置の周囲を旋回 | `layer.py`、`services/layer.py`、`models.py`（`LayerConfig`、`DropTask`） |
 | 4.12 | 観測者の最適自動投入（位置・本数・深度をフィッシャー情報量と探知距離から計算） | `optimal_deployment.py`、`forward_deployment.py`、`services/deployer.py` |
@@ -59,7 +60,7 @@ node --check web/app.js
 * **リポジトリの非公開化**：プロキシが設定変更を拒否したため未実施。ユーザーに手順
   （GitHub の Settings → General → Danger Zone → Change visibility）を案内済み。迂回しないこと。
 * `ruff check e2e` には既存の指摘が残っている（CI の対象は `backend` のみ）。
-* 設標者の計画時刻との差：時間は飛行経路（左旋回の遠回り）で合わせ、速力は経路で合わないときだけ
+* 設標者の計画時刻との差：時間は飛行経路（左右の旋回による遠回り）で合わせ、速力は経路で合わないときだけ
   変える方式にした。間に合う計画の 99%（177/179）が ±5 秒以内、最大 12 秒。速力を変えるのは
   投下点が旋回円の内側に入るなどの 34% の区間（主に減速、中央値約 30 kt）。
 * UI のスモークテスト：`e2e/ui_smoke.py`（CI の `ui-smoke` ジョブ）。バックエンドなしで web/ を配信し、

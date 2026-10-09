@@ -765,7 +765,7 @@ function updateLayer(deployment) {
     ["対地速力・航跡", layer.ground_speed_kt != null ? `${fmt(layer.ground_speed_kt, 0)} kt・${fmt(layer.track_deg, 0)}°` : "--"],
     ["飛行高度の風", layer.wind_speed_kt != null ? `${fmt(layer.wind_direction_deg, 0)}°・${fmt(layer.wind_speed_kt, 1)} kt` : "--"],
     ["バンク", `${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）`],
-    ["基準旋回", `${lay.preferred_turn === "right" ? "右" : "左"}旋回（反対旋回は ${fmt(lay.turn_margin_s ?? 10, 0)} 秒以上早い場合）`],
+    ["基準旋回", `${lay.preferred_turn === "right" ? "右" : "左"}旋回（待機旋回。設標経路は左右とも最短）`],
     ["実施中", layer.task_id != null ? `#${layer.task_id}・到着 ${layer.eta_s != null ? `${clockAt((layer.tick || 0) + layer.eta_s)}（あと ${fmt(layer.eta_s, 0)} s）` : "--"}` : "なし"],
     ["次の設標", next ? `#${next.task_id}・${next.planned_tick != null ? `計画 ${clockAt(next.planned_tick)}（あと ${Math.max(0, next.planned_tick - (layer.tick || 0))} s）` : "すぐ"}` : "なし"],
     ["設標", paused ? "一時停止中" : "実施"],
@@ -885,7 +885,6 @@ $("layer-form").addEventListener("submit", (event) => {
     next.layer.speed_spread_kt = num("layer-spread");
     next.layer.max_bank_deg = num("layer-bank");
     next.layer.orbit_radius_yd = num("layer-orbit");
-    next.layer.turn_margin_s = num("layer-turn-margin");
     next.layer.proposal_timeout_s = num("layer-timeout");
     next.layer.cruise_altitude_ft = num("layer-cruise-alt");
     next.layer.drop_altitude_ft = num("layer-drop-alt");
@@ -2265,7 +2264,7 @@ function populateForms(config) {
     $("layer-paused").checked = Boolean(lay.paused);
     $("layer-turn").value = lay.preferred_turn || "left";
     const layValues = { "layer-speed": lay.speed_kt, "layer-spread": lay.speed_spread_kt, "layer-bank": lay.max_bank_deg,
-      "layer-orbit": lay.orbit_radius_yd, "layer-turn-margin": lay.turn_margin_s ?? 10, "layer-timeout": lay.proposal_timeout_s,
+      "layer-orbit": lay.orbit_radius_yd, "layer-timeout": lay.proposal_timeout_s,
       "layer-cruise-alt": lay.cruise_altitude_ft ?? 3000, "layer-drop-alt": lay.drop_altitude_ft ?? 1000, "layer-climb": lay.climb_rate_fpm ?? 2000 };
     for (const [id, value] of Object.entries(layValues)) $(id).value = value;
     $("layer-wind-correction").checked = lay.wind_correction !== false;

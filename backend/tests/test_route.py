@@ -89,7 +89,7 @@ def _lay(points: list[Position], seed: int = 3) -> tuple[dict[int, int], float, 
     offsets = [local_offset_m(state.position, p) for p in points]
     predicted = [leg.drop_s for leg in route([o[0] for o in offsets], [o[1] for o in offsets],
                                              math.radians(state.heading_deg), state.speed_kt, config.max_bank_deg,
-                                             None, -1, config.turn_margin_s * state.speed_kt * 0.5144444444444445)]
+                                             None, -1)]
     done: dict[int, int] = {}
     turned, worst = 0.0, 0.0
     for tick in range(1, 1500):

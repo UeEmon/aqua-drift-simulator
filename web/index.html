@@ -312,7 +312,7 @@
                 <tbody></tbody>
               </table>
             </div>
-            <p class="note">追加の観測者は設標者が予定点（潮流とともに移動）に到着した時点で投入されます。投入時刻は最適値（目標が探知距離に入る直前、設標者が間に合う範囲）を計算し、設標者はその時刻に投入できるよう出発時刻と速力を選び、早く着いたときは予定点の周囲で待ちます。旋回は左旋回が基準で、経路上右旋回が効率的な場合だけ右に旋回します。「今すぐ」で計画時刻を取り消して直ちに向かい、「時刻」で投入時刻を変更、「中止」で計画を取り消します。</p>
+            <p class="note">追加の観測者は設標者が予定点（潮流とともに移動）に到着した時点で投入されます。投入時刻は最適値（目標が探知距離に入る直前、設標者が間に合う範囲）を計算し、設標者はその時刻に投入できるよう出発時刻と速力を選び、早く着いたときは予定点の周囲で待ちます。設標に向かう経路は左旋回にこだわらず、左右の旋回を比べて最短の経路を選びます（待機旋回は基準旋回の向き）。「今すぐ」で計画時刻を取り消して直ちに向かい、「時刻」で投入時刻を変更、「中止」で計画を取り消します。</p>
           </section>
 
           <section>
@@ -378,7 +378,7 @@
                   <option value="manual">手動（オペレーターが了承）</option>
                 </select>
               </label>
-              <label title="旋回は左旋回を基準とし、経路上もう一方が効率的な場合だけ反対に旋回">旋回の基準
+              <label title="待機旋回・HOLD の向き。設標に向かう経路は左右とも比べて最短の側に旋回し、同じ長さのときだけこの向きを選ぶ">旋回の基準
                 <select id="layer-turn">
                   <option value="left">左旋回（既定）</option>
                   <option value="right">右旋回</option>
@@ -390,7 +390,6 @@
               <label>速力のばらつき ± (kt)<input id="layer-spread" type="number" min="0" max="300" step="1" required /></label>
               <label>最大バンク (度)<input id="layer-bank" type="number" min="1" max="60" step="1" required /></label>
               <label title="旋回半径より小さい場合は旋回半径に合わせる">旋回待機の半径 (YD)<input id="layer-orbit" type="number" min="100" step="100" required /></label>
-              <label title="反対方向の旋回を選ぶのは、この秒数以上早く着く場合だけ">反対旋回を選ぶ差 (秒)<input id="layer-turn-margin" type="number" min="0" max="600" step="1" required /></label>
               <label title="手動了承で応答がない提案はこの時間で失効">提案の有効時間 (秒)<input id="layer-timeout" type="number" min="10" max="7200" step="10" required /></label>
               <label title="旋回待機中の飛行高度">巡航高度 (ft)<input id="layer-cruise-alt" type="number" min="100" max="30000" step="100" required /></label>
               <label title="設標に向かう間にこの高度まで降下（上昇）して投下">投下高度 (ft)<input id="layer-drop-alt" type="number" min="100" max="30000" step="100" required /></label>

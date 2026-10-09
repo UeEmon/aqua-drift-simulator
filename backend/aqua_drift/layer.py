@@ -8,15 +8,16 @@
   next drops instead of a loop after every drop); the last drop is flown to on any heading (turn,
   then straight; when the point is inside both turning circles it flies straight on first and
   comes back). The observer is laid when the layer is within capture_radius_yd of the point.
-* Turns: left turn is the standard (circling counter-clockwise); a right turn is taken only when
-  the route is clearly more efficient that way (shorter by more than turn_margin_s of flight).
+* Turns: on the way to a drop the layer turns whichever way is quickest (left or right: the
+  shortest Dubins path and the best timing detour of both sides); the standard turn
+  (preferred_turn, left by default) only breaks ties and is the sense of the orbit and HOLD.
 * ORBIT: without a task it circles the estimated target position (vector-field
   guidance onto a circle whose radius is at least 1.2 x the turn radius, so the bank limit
   holds on the circle).
 * Scheduling: every drop has a planned time (the optimal drop time from the planner). Time is
   adjusted with the flight path, not the speed: the layer leaves the orbit shortly before the
   direct flight time (along the same turn-then-straight path the guidance flies) and takes up
-  the rest on the way by a detour with left turns, re-planned every second. The speed is
+  the rest on the way by a detour turning either way, re-planned every second. The speed is
   changed only when no path can arrive on time (e.g. the point is inside the turning circle).
 * 3-D flight in the wind (feed.wind): the layer cruises at cruise_altitude_ft, descends to
   drop_altitude_ft on the way to a drop point (climb_rate_fpm) and flies through the air mass:
@@ -293,7 +294,7 @@ def _guidance(east: float, north: float, heading: float, approach: float | None,
     become a whisker too tight: a loop). Close to the point, when the fresh plan is a loop and
     no path is kept, the loose path (see route.path_to) instead."""
     args = (east, north, heading, approach, radius)
-    options = {"prefer": preferred_side(config), "margin_m": config.turn_margin_s * v, "step_m": v * dt,
+    options = {"prefer": preferred_side(config), "step_m": v * dt,
                "segments": True}
     turn, length, _, step_e, step_n, sides, lengths = routelib.path_to(*args, **options)
     path = ([int(x) for x in sides], [float(x) * radius for x in lengths])
@@ -344,7 +345,7 @@ def _arrival_s(state: LayerState, config: LayerConfig, point: Position, approach
     east, north, _ = local_offset_m(state.position, point)
     radius = v * v / (G * math.tan(math.radians(config.max_bank_deg)))
     _, length, _ = routelib.path_to(east, north, math.radians(state.heading_deg), approach, radius,
-                                    preferred_side(config), config.turn_margin_s * v, loose=True)
+                                    preferred_side(config), loose=True)
     if not math.isfinite(float(length)):
         return flight_time_s(state, config, point, state.speed_kt, limit_s=900.0, approach=approach)
     return max(float(length) - config.capture_radius_yd * YD_TO_M, 0.0) / v
@@ -359,16 +360,16 @@ def _dubins_times(east: np.ndarray, north: np.ndarray, heading: np.ndarray, v: f
         east, north, heading, approach = np.broadcast_arrays(east, north, heading, approach)
     approaches = approach
     _, length, _ = routelib.path_to(east, north, heading, approaches, radius, preferred_side(config),
-                                    config.turn_margin_s * v, loose=True)
+                                    loose=True)
     return np.maximum(length - config.capture_radius_yd * YD_TO_M, 0.0) / v
 
 
 def _best_path(state: LayerState, config: LayerConfig, point: Position, left: float,
                speed_kt: float, approach: float | None = None) -> tuple[float | None, float]:
-    """Best path at speed_kt: the guidance path, or 'turn to the preferred side (left: 4.15) at
-    k/TURN_STEPS of the bank limit, or fly straight, for T = 1..HORIZON_S s, then the guidance
-    path'. The arrival closest to the planned time wins (ties, within 0.5 s: the shortest
-    detour, then the gentlest turn). Returns (turn rate rad/s for this second, None = the
+    """Best path at speed_kt: the guidance path, or 'turn left or right at k/TURN_STEPS of the
+    bank limit, or fly straight, for T = 1..HORIZON_S s, then the guidance path'. The arrival
+    closest to the planned time wins (ties, within 0.5 s: the shortest detour, then the
+    gentlest turn, then the standard side). Returns (turn rate rad/s for this second, None = the
     guidance turn; arrival error s)."""
     v = max(speed_kt, 1.0) * KNOT_TO_MPS
     omega = G * math.tan(math.radians(config.max_bank_deg)) / v
@@ -378,7 +379,7 @@ def _best_path(state: LayerState, config: LayerConfig, point: Position, left: fl
         return None, direct
     east, north, _ = local_offset_m(state.position, point)
     h0 = math.radians(state.heading_deg)
-    rates = preferred_side(config) * omega * np.arange(0, TURN_STEPS + 1) / TURN_STEPS
+    rates = omega * np.arange(-TURN_STEPS, TURN_STEPS + 1) / TURN_STEPS  # left (-) and right (+)
     t = np.arange(1, HORIZON_S + 1, dtype=float)
     rate, t = np.meshgrid(rates, t, indexing="ij")
     h = h0 + rate * t
@@ -390,7 +391,8 @@ def _best_path(state: LayerState, config: LayerConfig, point: Position, left: fl
     if best >= abs(direct) - 0.5:
         return None, direct
     close = np.abs(error) <= best + 0.5
-    k, j = min(zip(*np.nonzero(close)), key=lambda kj: (t[kj], abs(rate[kj])))
+    side = preferred_side(config)
+    k, j = min(zip(*np.nonzero(close)), key=lambda kj: (t[kj], abs(rate[kj]), side * rate[kj] < 0))
     return float(rate[k, j]), float(error[k, j])
 
 
@@ -402,7 +404,7 @@ def _first_leg_s(state: LayerState, config: LayerConfig, point: Position, left: 
     omega = G * math.tan(math.radians(config.max_bank_deg)) / v
     east, north, _ = local_offset_m(state.position, point)
     h0 = math.radians(state.heading_deg)
-    rates = preferred_side(config) * omega * np.arange(0, TURN_STEPS + 1) / TURN_STEPS
+    rates = omega * np.arange(-TURN_STEPS, TURN_STEPS + 1) / TURN_STEPS  # left (-) and right (+)
     rate, t = np.meshgrid(rates, np.arange(0, HORIZON_S + 1, dtype=float), indexing="ij")
     h = h0 + rate * t
     safe = np.where(rate == 0.0, 1.0, rate)
@@ -583,10 +585,9 @@ def _route(state: LayerState, config: LayerConfig, points: list[Position],
     """The route from the current state through the points (planned drop times s from now;
     first_s: see route.route)."""
     offsets = [local_offset_m(state.position, p) for p in points]
-    v = max(state.speed_kt, 1.0) * KNOT_TO_MPS
     return routelib.route([o[0] for o in offsets], [o[1] for o in offsets], math.radians(state.heading_deg),
                           state.speed_kt, config.max_bank_deg, planned, preferred_side(config),
-                          config.turn_margin_s * v, capture_m=config.capture_radius_yd * YD_TO_M, first_s=first_s)
+                          capture_m=config.capture_radius_yd * YD_TO_M, first_s=first_s)
 
 
 def ready_pose(state: LayerState | None, config: LayerConfig, tasks: list, tick: int,
