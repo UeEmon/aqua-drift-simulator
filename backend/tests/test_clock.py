@@ -56,3 +56,26 @@ def test_time_scale_round_trip_and_limits() -> None:
         assert client.put("/api/clock", json={"time_scale": -1}).status_code == 422
         assert client.put("/api/clock", json={"time_scale": 101}).status_code == 422
         client.put("/api/clock", json={"time_scale": 1})
+
+
+@pytest.mark.asyncio
+async def test_first_tick_fixes_the_time_of_day_of_tick_zero() -> None:
+    state = SimulationState(ScenarioConfig(), autostart_estimation=False)
+    assert (await state.snapshot()).epoch_s is None
+    await state.set_tick(3, wall_s=1_000_003.0)
+    await state.set_tick(4, wall_s=1_000_009.0)  # later ticks never move it
+    assert (await state.clock_status()).epoch_s == 1_000_000.0
+    assert (await state.snapshot()).epoch_s == 1_000_000.0
+
+
+def test_schedule_follows_the_system_time() -> None:
+    from aqua_drift.services.clock import Schedule
+
+    schedule = Schedule()
+    schedule.anchor(0, 1.0, 500.0)
+    assert schedule.due(10) == 510.0  # tick n due at anchor + n s, however late earlier ticks were
+    schedule.anchor(10, 4.0, 520.0)  # speed change: re-anchored at the current tick and time
+    assert schedule.due(14) == 521.0
+    restarted = Schedule()
+    restarted.anchor(25, 1.0, 525.4, epoch_s=500.0)  # clock restart while still on system time
+    assert restarted.due(26) == 526.0
