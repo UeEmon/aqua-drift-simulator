@@ -172,6 +172,9 @@ class WireEncoder:
         message["lay"] = layer
         for task in data["deployment"].get("tasks", []):  # the replanner's bookkeeping is not shown
             task.pop("basis", None)
+            for key in ("cancel_suggestion", "cancel_suggested_tick"):  # only sent when proposed
+                if task.get(key) is None:
+                    task.pop(key, None)
         for name, key in (
             ("cfg", "config"),
             ("cpa", "cpa"),
