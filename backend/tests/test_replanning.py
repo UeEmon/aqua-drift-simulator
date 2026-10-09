@@ -179,9 +179,10 @@ async def test_state_replaces_atomically_and_refuses_drops_no_longer_revisable()
     state = SimulationState(config)
     state.tick = TICK
     bases = [basis_for(EAST, p) for p in (offset(4000, 1500), offset(9000, -1500))]
-    await state.queue_deployment(DeploymentRequest(
+    record = await state.queue_deployment(DeploymentRequest(
         tick=TICK, positions=[offset(4000, 1500), offset(9000, -1500)], reason="plan",
         planned_ticks=[TICK + 600, TICK + 900], bases=bases))
+    assert record.task_ids == [1, 2]  # the map shows a planned point only while its drop is open
     first = state.tasks[0]
     assert first.basis is not None and first.status == "APPROVED"
     feed_ = await state.deployment_feed()

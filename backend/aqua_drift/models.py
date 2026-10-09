@@ -548,6 +548,9 @@ class DeploymentRecord(BaseModel):
     positions: list[Position]
     reason: str
     source: str = "forward"
+    # with the layer: the drop task of each position (the map shows a planned point only while
+    # its drop is open); empty without the layer (observers are queued at once)
+    task_ids: list[int] = Field(default_factory=list)
 
 
 class PlanBasis(BaseModel):

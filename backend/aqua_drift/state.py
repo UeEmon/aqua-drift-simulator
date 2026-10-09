@@ -253,15 +253,17 @@ class SimulationState:
                 self._replace_tasks(request.replaces)
             planned = request.planned_ticks or [None] * len(request.positions)
             bases = request.bases or [None] * len(request.positions)
+            task_ids = []
             for position, planned_tick, basis in zip(request.positions, planned, bases, strict=False):
                 if self.config.layer.enabled:
                     task = self._new_task(position, source, request.reason)
                     task.planned_tick = task.requested_tick = planned_tick
                     task.basis, task.revision = basis, request.revision
+                    task_ids.append(task.task_id)
                 else:
                     self.placements.append(ObserverPlacement(position=position, source="forward"))
             record = DeploymentRecord(
-                tick=request.tick, positions=request.positions, reason=request.reason
+                tick=request.tick, positions=request.positions, reason=request.reason, task_ids=task_ids
             )
             self.deploy_history.append(record)
             self.last_deploy_tick = request.tick
