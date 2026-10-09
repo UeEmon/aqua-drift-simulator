@@ -288,6 +288,11 @@ class ForwardDeploymentConfig(BaseModel):
     replan_speed_kt: float = Field(default=2.0, ge=0)  # speed change trigger (>= 2 sigma)
     replan_min_improvement: float = Field(default=0.2, ge=0, le=1)  # replace only if the cost drops this much
     replan_max_revisions: int = Field(default=2, ge=0, le=10)  # a drop replaced this often is kept
+    # a kept approved drop (flown to, due soon...) that no longer helps detection is proposed to the
+    # operator for cancellation (the layer keeps flying it until the operator cancels): when the
+    # motion hypotheses that bring the target within R_max (+2 sigma) of it after its drop weigh less
+    # than this (the proposal is withdrawn again above 2.5 x this)
+    cancel_suggest_weight: float = Field(default=0.1, ge=0, le=1)
 
 
 class ObserverDeploymentConfig(BaseModel):
@@ -554,6 +559,13 @@ class DeploymentRecord(BaseModel):
     task_ids: list[int] = Field(default_factory=list)
 
 
+class CancelSuggestions(BaseModel):
+    """The replanner's cancellation proposals: task id -> reason (None withdraws a proposal)."""
+
+    tick: int
+    suggestions: dict[int, str | None]
+
+
 class PlanBasis(BaseModel):
     """The estimate a planned drop was chosen on: the drop point relative to the estimated target
     (water frame, metres east / north) and its estimated heading and through-water speed at tick.
@@ -639,6 +651,10 @@ class DropTask(BaseModel):
     sequence: int = 0  # drop order among tasks with the same planned time (operator reorder)
     basis: PlanBasis | None = None  # the estimate an automatic drop was planned on (replanning)
     revision: int = 0  # how often this drop's plan was replaced (replanning keeps it from the limit on)
+    # proposed to the operator for cancellation: the drop would no longer help detection (the layer
+    # keeps flying it until the operator cancels it)
+    cancel_suggestion: str | None = None
+    cancel_suggested_tick: int | None = None
     approved_tick: int | None = None
     done_tick: int | None = None
     eta_s: float | None = None  # seconds from now to the expected drop

@@ -719,7 +719,7 @@ function updateLayer(deployment) {
   const releaseKey = (p) => (p ? `${p.latitude.toFixed(4)}:${p.longitude.toFixed(4)}` : "");
   // the latest released drops: release point -> entry point (where the observer fell in the wind)
   const released = tasks.filter((t) => t.status === "DONE" && t.release_position).slice(-6);
-  const taskKey = open.map((t) => `${t.task_id}:${t.status}:${t.planned_tick}:${t.sequence}:${t.position.latitude.toFixed(4)}:${t.position.longitude.toFixed(4)}:${releaseKey(t.release_position)}`).join("|")
+  const taskKey = open.map((t) => `${t.task_id}:${t.status}:${t.planned_tick}:${t.sequence}:${t.cancel_suggestion ? 1 : 0}:${t.position.latitude.toFixed(4)}:${t.position.longitude.toFixed(4)}:${releaseKey(t.release_position)}`).join("|")
     + `|${released.map((t) => `${t.task_id}:${t.splash_tick}:${t.miss_yd}`).join(",")}|${exaggeration()}`;
   if (taskKey !== state.taskKey) {
     state.taskKey = taskKey;
@@ -748,7 +748,8 @@ function updateLayer(deployment) {
       gpu.taskLabels.add({
         position: cartOf(t.position),
         text: `${open.length > 1 ? `${index + 1}番目 ` : ""}${proposed ? "提案 " : ""}#${t.task_id}（${Math.round(t.position.depth_ft)} Ft）`
-          + (t.planned_tick != null ? `計画 ${clockAt(t.planned_tick)}` : "すぐ") + (proposed ? " 了承待ち" : ""),
+          + (t.planned_tick != null ? `計画 ${clockAt(t.planned_tick)}` : "すぐ") + (proposed ? " 了承待ち" : "")
+          + (t.cancel_suggestion ? " 中止を提案" : ""),
         font: "11px sans-serif", fillColor: color, pixelOffset: new Cesium.Cartesian2(0, -14),
       });
     }
@@ -757,6 +758,11 @@ function updateLayer(deployment) {
   const proposed = open.filter((t) => t.status === "PROPOSED");
   $("drop-alert").hidden = proposed.length === 0;
   setText("drop-alert-count", proposed.length);
+  // drops the replanner proposes to cancel (no longer help detection); the layer keeps flying them
+  const suggested = open.filter((t) => t.status === "APPROVED" && t.cancel_suggestion);
+  state.cancelSuggested = suggested.map((t) => t.task_id);
+  $("drop-cancel-alert").hidden = suggested.length === 0;
+  setText("drop-cancel-count", suggested.length);
   if (!state.dropApprovalPending && $("drop-approval").value !== (status.approval || "auto")) $("drop-approval").value = status.approval || "auto";
   if (!tabVisible("tab-deploy")) return;
   const lay = state.latestConfig?.layer || {};
@@ -803,7 +809,9 @@ function updateLayer(deployment) {
     const when = t.status === "APPROVED" ? `${plan}・あと ${fmt(t.eta_s, 0)} s` : t.status === "DONE" ? `${clockAt(t.done_tick)} 投下${late}${fall}` : plan;
     const src = { forward: "自動", operator: "即時配置", manual: "手動配置" }[t.source] || t.source;
     const rank = index >= 0 && open.length > 1 ? `・${index + 1}番目` : "";
-    return `<tr><td>${t.task_id}<br /><small>${src}${rank}</small></td><td>${TASK_STATUS[t.status] || t.status}</td>`
+    const suggest = t.status === "APPROVED" && t.cancel_suggestion
+      ? `<br /><small class="cancel-note">中止を提案：${escapeHtml(t.cancel_suggestion)}</small>` : "";
+    return `<tr${suggest ? ' class="cancel-suggested"' : ""}><td>${t.task_id}<br /><small>${src}${rank}</small></td><td>${TASK_STATUS[t.status] || t.status}${suggest}</td>`
       + `<td>${Math.round(t.position.depth_ft)} Ft<br /><small>${when}</small></td><td>${actions}</td></tr>`;
   });
   // keep a drop time the operator is typing: do not rebuild the table under the cursor
@@ -868,6 +876,9 @@ $("drop-table").addEventListener("click", (event) => {
   }
 });
 $("drop-approve-all").addEventListener("click", () => decideDrops(null, true));
+$("drop-cancel-suggested").addEventListener("click", () => {
+  if (state.cancelSuggested?.length) cancelDrops(state.cancelSuggested);
+});
 $("drop-approve-all-tab").addEventListener("click", () => decideDrops(null, true));
 $("drop-cancel-all").addEventListener("click", () => cancelDrops(null));
 $("layer-enabled").addEventListener("change", () => {
@@ -1154,6 +1165,12 @@ $("drop-approval").addEventListener("change", () => {
 });
 
 function deployReason(reason) {
+  // replanner: "replan: <why>; drops [..] replaced, predicted error e -> f YD; <optimal planner reason>"
+  const r = /^replan: (.*?); drops \[([^\]]*)\] replaced, predicted error (\d+) -> (\d+) YD; (.*)$/.exec(reason || "");
+  if (r) {
+    const ids = r[2].split(/,\s*/).map((id) => `#${id}`).join("・");
+    return `再計画（${replanWhy(r[1])}）：設標 ${ids} を差し替え、予測誤差 ${r[3]}→${r[4]} YD／${deployReason(r[5])}`;
+  }
   // optimal planner: "optimal (coverage): 2 observers, depths [..] Ft; predicted error e -> f YD
   // (horizontal a -> b YD, depth c -> d Ft, coverage gaps g -> h %); drop in [..] s; replanned after a maneuver .."
   const m = /^optimal \(([^)]+)\): (\d+) observers, depths \[([^\]]*)\] Ft; predicted error (\d+) -> (\d+) YD \(horizontal (\d+) -> (\d+) YD, depth (\d+) -> (\d+) Ft, coverage gaps (\d+) -> (\d+) %\)(?:; drop in \[([^\]]*)\] s)?/.exec(reason || "");
@@ -1163,6 +1180,19 @@ function deployReason(reason) {
   const replan = /replanned after a maneuver/.test(reason) ? "（機動を検出して再計画）" : "";
   return `最適配置（${why}）${replan}：${m[2]} 本・深度 ${m[3].split(/,\s*/).join("/")} Ft、予測誤差 ${m[4]}→${m[5]} YD`
     + `（水平 ${m[6]}→${m[7]} YD・深度 ${m[8]}→${m[9]} Ft・探知不足 ${m[10]}→${m[11]} %）${times}`;
+}
+
+// why the replanner replaced drops (aqua_drift.replanning.estimate_change)
+function replanWhy(why) {
+  let m = /^maneuver detected at tick (\d+) after drop (\d+) was planned$/.exec(why);
+  if (m) return `設標 #${m[2]} の計画後 ${clockAt(Number(m[1]))} に機動を検出`;
+  m = /^heading (\d+) -> (\d+) deg since drop (\d+) was planned$/.exec(why);
+  if (m) return `設標 #${m[3]} の計画時から推定針路 ${m[1]}°→${m[2]}°`;
+  m = /^speed ([\d.]+) -> ([\d.]+) kt since drop (\d+) was planned$/.exec(why);
+  if (m) return `設標 #${m[3]} の計画時から推定速力 ${m[1]}→${m[2]} kt`;
+  m = /^estimate moved (\d+) YD \(> (\d+)\) since drop (\d+) was planned$/.exec(why);
+  if (m) return `設標 #${m[3]} の計画時から推定位置が ${m[1]} YD ずれた・閾値 ${m[2]} YD`;
+  return why;
 }
 
 $("deploy-now").addEventListener("click", async () => {

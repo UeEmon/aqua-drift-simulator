@@ -10,6 +10,7 @@ from aqua_drift import route as routelib
 from aqua_drift.deployment import default_position
 from aqua_drift.models import (
     BearingReport,
+    CancelSuggestions,
     ClockStatus,
     CpaResult,
     CurrentEstimate,
@@ -412,6 +413,23 @@ class SimulationState:
                 if task.status in self.OPEN_TASK_STATES and (task_ids is None or task.task_id in task_ids):
                     task.status = "CANCELLED"
                     changed.append(task)
+            return changed
+
+    async def set_cancel_suggestions(self, request: CancelSuggestions, generation: int | None = None) -> list[int]:
+        """The replanner proposes (reason) or withdraws (None) cancelling open drops that no longer
+        help detection. Only a proposal: the layer keeps flying the drop until the operator cancels
+        it. Returns the drops whose proposal changed."""
+        async with self.lock:
+            self._check_generation(generation)
+            changed = []
+            for task in self.tasks:
+                if task.task_id not in request.suggestions or task.status not in self.OPEN_TASK_STATES:
+                    continue
+                reason = request.suggestions[task.task_id]
+                if (reason is None) != (task.cancel_suggestion is None):
+                    task.cancel_suggested_tick = None if reason is None else request.tick
+                    changed.append(task.task_id)
+                task.cancel_suggestion = reason
             return changed
 
     async def reschedule_task(self, task_id: int, planned_tick: int | None) -> DropTask | None:

@@ -320,6 +320,10 @@ button.secondary { margin-top: 8px; }
 .sw.layer { background: #e9e4ff; height: 8px; width: 8px; border-radius: 1px; transform: rotate(45deg); }
 #drop-alert { color: #ffd479; }
 #drop-alert[hidden] { display: none; }
+#drop-cancel-alert { color: #ff9b7a; }
+#drop-cancel-alert[hidden] { display: none; }
+tr.cancel-suggested td { background: rgba(255, 155, 122, 0.12); }
+.cancel-note { color: #ff9b7a; }
 button.mini { padding: 2px 8px; margin-left: 4px; font-size: 12px; }
 button.mini.ghost, #drop-table button.ghost { background: transparent; border: 1px solid #5d7894; color: #c7dbef; }
 label.inline { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; font-size: 13px; }
