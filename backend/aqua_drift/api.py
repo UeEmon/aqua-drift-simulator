@@ -5,8 +5,9 @@ import json
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from aqua_drift.forward_deployment import plan_forward_deployment_scheduled
 from aqua_drift.models import (
@@ -36,7 +37,7 @@ from aqua_drift.models import (
     TickMessage,
 )
 from aqua_drift.optimal_deployment import availability_from_feed, sensor_from_feed
-from aqua_drift.state import ObserverRejected, SimulationState
+from aqua_drift.state import ObserverRejected, SimulationState, StaleGeneration
 from aqua_drift.storage import EventStore
 from aqua_drift.wire import PROTOCOL_VERSION, WireEncoder
 
@@ -67,6 +68,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(StaleGeneration)
+async def stale_generation(_: Request, error: StaleGeneration) -> JSONResponse:
+    """A container's post computed for the run before the last reset: dropped. 200 so the
+    container carries on; on its next poll it sees the new generation and starts over."""
+    return JSONResponse({"ignored": str(error)})
 
 
 @app.get("/health")
@@ -162,8 +170,8 @@ async def set_clock(message: TickMessage) -> dict[str, int]:
 
 
 @app.post("/internal/target")
-async def set_target(target: TargetState) -> dict[str, int]:
-    await state.set_target(target)
+async def set_target(target: TargetState, generation: int | None = None) -> dict[str, int]:
+    await state.set_target(target, generation)
     payload = target.model_dump(mode="json")
     await store.append_event("target_state", target.tick, payload, "target")
     await store.save_target_position(target.tick, payload)
@@ -215,10 +223,14 @@ async def deploy_now() -> dict[str, object]:
     )
     if not positions:
         raise HTTPException(status_code=409, detail=f"no deployment: {reason}")
-    record = await state.queue_deployment(
-        DeploymentRequest(tick=feed.tick, positions=positions, reason=reason, planned_ticks=planned),
-        source="operator",
-    )
+    try:
+        record = await state.queue_deployment(
+            DeploymentRequest(tick=feed.tick, positions=positions, reason=reason, planned_ticks=planned),
+            source="operator",
+            generation=feed.generation,
+        )
+    except StaleGeneration as error:
+        raise HTTPException(status_code=409, detail="scenario was reset: try again") from error
     await store.append_event("forward_deployment", feed.tick, record.model_dump(mode="json"))
     return {"deployed": len(positions), "standby": feed.standby_count, "tick": feed.tick}
 
@@ -276,24 +288,24 @@ async def layer_feed() -> LayerFeed:
 
 
 @app.post("/internal/layer")
-async def layer_update(update: LayerUpdate) -> dict[str, list[int]]:
-    done = await state.set_layer_update(update)
+async def layer_update(update: LayerUpdate, generation: int | None = None) -> dict[str, list[int]]:
+    done = await state.set_layer_update(update, generation)
     if done:
         await store.append_event("drop_done", update.state.tick, {"tasks": done})
     return {"done": done}
 
 
 @app.post("/internal/deploy", response_model=DeploymentRecord)
-async def deploy(request: DeploymentRequest) -> DeploymentRecord:
-    record = await state.queue_deployment(request)
+async def deploy(request: DeploymentRequest, generation: int | None = None) -> DeploymentRecord:
+    record = await state.queue_deployment(request, generation=generation)
     await store.append_event("forward_deployment", request.tick, record.model_dump(mode="json"))
     return record
 
 
 @app.post("/internal/observer")
-async def set_observer(observer: ObserverState) -> dict[str, str | None]:
+async def set_observer(observer: ObserverState, generation: int | None = None) -> dict[str, str | None]:
     try:
-        evicted = await state.set_observer(observer)
+        evicted = await state.set_observer(observer, generation)
     except ObserverRejected as error:
         await store.archive_observer(observer.observer_id)
         await store.append_event(
@@ -315,8 +327,8 @@ async def set_observer(observer: ObserverState) -> dict[str, str | None]:
 
 
 @app.post("/internal/doppler")
-async def set_doppler(batch: DopplerBatch) -> dict[str, int]:
-    await state.add_batch(batch)
+async def set_doppler(batch: DopplerBatch, generation: int | None = None) -> dict[str, int]:
+    await state.add_batch(batch, generation)
     await store.append_event("doppler_batch", batch.tick, batch.model_dump(mode="json"))
     return {"tick": batch.tick, "observations": len(batch.observations)}
 
@@ -328,8 +340,10 @@ async def estimator_feed(after_tick: int = -1) -> EstimatorFeed:
 
 
 @app.post("/internal/estimate")
-async def set_estimate(output: EstimatorOutput) -> dict[str, int]:
-    await state.set_estimator_output(output)
+async def set_estimate(
+    output: EstimatorOutput, generation: int | None = None, run_id: int | None = None
+) -> dict[str, int]:
+    await state.set_estimator_output(output, generation, run_id)
     if output.tick % ESTIMATE_EVENT_INTERVAL_S == 0:
         await store.append_event("estimate", output.tick, output.model_dump(mode="json"))
     return {"tick": output.tick}

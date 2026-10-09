@@ -22,7 +22,7 @@
 | 2.2 | 対水速力・針路・深度をパラメータで変更 | ✅ | GIS「目標運動」フォーム / `PUT /api/config` の `target.*` | 同上 |
 | 2.3 | 変化率：速力 kt/秒、深度 Ft/秒 | ✅ | `speed_rate_kt_per_sec`, `depth_rate_ft_per_sec` | 同上 |
 | 2.4 | 針路変化率の単位（未指定） | 🔧 | **度/秒** を採用（`hdg_rate_deg_per_sec`、既定 1.0） | 同上 |
-| 2.6 | **目標の初期配置・初期状態を設定するタブ**（初期緯度経度・深度・HDG・対水速力） | ✅ | GIS「目標設定」タブ → `target.initial_*` ＋ `POST /api/reset`（再スタート、地図ダブルクリックで座標入力） | `test_initial_target_state_is_configurable` |
+| 2.6 | **目標の初期配置・初期状態を設定するタブ**（初期緯度経度・深度・HDG・対水速力） | ✅ | GIS「目標設定」タブ → `target.initial_*` ＋ `POST /api/reset`（再スタート、地図ダブルクリックで座標入力）。再スタートは全て初期化：前回の推定・投下計画・設標者・風推定を破棄し、各コンテナがリセット前に計算した送信（推定結果・目標/観測者位置・ドップラー・展開計画）は世代番号で棄却 | `test_initial_target_state_is_configurable`, `test_reset_clears_everything_of_the_old_run`, `test_posts_computed_before_the_reset_are_rejected` |
 | 2.5 | 推定側の変針・変速への追従 | ✅ | 粒子版 IMM（変針混合）＋ resample-move の窓短縮 | `test_track_recovers_after_maneuver` |
 
 ## 3. 外力・流速場
