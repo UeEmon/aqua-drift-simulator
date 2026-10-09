@@ -1145,6 +1145,12 @@ $("drop-approval").addEventListener("change", () => {
 });
 
 function deployReason(reason) {
+  // replanner: "replan: <why>; drops [..] replaced, predicted error e -> f YD; <optimal planner reason>"
+  const r = /^replan: (.*?); drops \[([^\]]*)\] replaced, predicted error (\d+) -> (\d+) YD; (.*)$/.exec(reason || "");
+  if (r) {
+    const ids = r[2].split(/,\s*/).map((id) => `#${id}`).join("・");
+    return `再計画（${replanWhy(r[1])}）：設標 ${ids} を差し替え、予測誤差 ${r[3]}→${r[4]} YD／${deployReason(r[5])}`;
+  }
   // optimal planner: "optimal (coverage): 2 observers, depths [..] Ft; predicted error e -> f YD
   // (horizontal a -> b YD, depth c -> d Ft, coverage gaps g -> h %); drop in [..] s; replanned after a maneuver .."
   const m = /^optimal \(([^)]+)\): (\d+) observers, depths \[([^\]]*)\] Ft; predicted error (\d+) -> (\d+) YD \(horizontal (\d+) -> (\d+) YD, depth (\d+) -> (\d+) Ft, coverage gaps (\d+) -> (\d+) %\)(?:; drop in \[([^\]]*)\] s)?/.exec(reason || "");
@@ -1154,6 +1160,19 @@ function deployReason(reason) {
   const replan = /replanned after a maneuver/.test(reason) ? "（機動を検出して再計画）" : "";
   return `最適配置（${why}）${replan}：${m[2]} 本・深度 ${m[3].split(/,\s*/).join("/")} Ft、予測誤差 ${m[4]}→${m[5]} YD`
     + `（水平 ${m[6]}→${m[7]} YD・深度 ${m[8]}→${m[9]} Ft・探知不足 ${m[10]}→${m[11]} %）${times}`;
+}
+
+// why the replanner replaced drops (aqua_drift.replanning.estimate_change)
+function replanWhy(why) {
+  let m = /^maneuver detected at tick (\d+) after drop (\d+) was planned$/.exec(why);
+  if (m) return `設標 #${m[2]} の計画後 ${clockAt(Number(m[1]))} に機動を検出`;
+  m = /^heading (\d+) -> (\d+) deg since drop (\d+) was planned$/.exec(why);
+  if (m) return `設標 #${m[3]} の計画時から推定針路 ${m[1]}°→${m[2]}°`;
+  m = /^speed ([\d.]+) -> ([\d.]+) kt since drop (\d+) was planned$/.exec(why);
+  if (m) return `設標 #${m[3]} の計画時から推定速力 ${m[1]}→${m[2]} kt`;
+  m = /^estimate moved (\d+) YD \(> (\d+)\) since drop (\d+) was planned$/.exec(why);
+  if (m) return `設標 #${m[3]} の計画時から推定位置が ${m[1]} YD ずれた・閾値 ${m[2]} YD`;
+  return why;
 }
 
 $("deploy-now").addEventListener("click", async () => {
