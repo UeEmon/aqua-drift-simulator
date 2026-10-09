@@ -7,9 +7,11 @@ time_scale, where the anchor is the system time and tick at the start or the las
 therefore stays on the system time instead of drifting behind it by every slow tick. A tick
 also waits until every container has finished the previous one (target, observers, Doppler
 engine, estimator), so no epoch is skipped and each container still steps in 1 s increments;
-that wait never holds a tick more than max(interval, 1 s). A tick that is late is caught up as
-soon as the containers are done; more than MAX_LAG_S behind (host suspended, overloaded) the
-schedule is re-anchored instead of bursting through the backlog."""
+that wait never holds a tick more than max(interval, 1 s). At real-time speed a late tick is
+caught up as soon as the containers are done (more than MAX_LAG_S behind -- host suspended,
+overloaded -- the schedule is re-anchored instead of bursting through the backlog). At any other
+speed the simulation time is not tied to the system time, so a late tick is never caught up:
+the schedule continues from the late tick and the clock never runs faster than the set speed."""
 from __future__ import annotations
 
 import asyncio
@@ -51,6 +53,20 @@ class Schedule:
         return self.anchor_wall + (tick - self.anchor_tick) / self.scale
 
 
+def next_due(schedule: Schedule, tick: int, scale: float, wall: float, epoch_s: float | None) -> float:
+    """System time at which tick + 1 is due (scale > 0); re-anchors on a speed change and when
+    the clock is later than it may catch up (MAX_LAG_S at 1x, one interval at any other speed)."""
+    if scale != schedule.scale:
+        schedule.anchor(tick, scale, wall, epoch_s)
+    interval = 1.0 / scale
+    due = schedule.due(tick + 1)
+    catch_up = MAX_LAG_S if scale == 1.0 else interval
+    if wall - due > catch_up:
+        schedule.anchor(tick, scale, wall - interval)  # continue from now, no burst
+        due = schedule.due(tick + 1)
+    return due
+
+
 async def run() -> None:
     async with httpx.AsyncClient(trust_env=False) as client:
         await wait_for_api(client)
@@ -67,15 +83,11 @@ async def run() -> None:
                 last = now
                 await asyncio.sleep(PAUSED_POLL_S)
                 continue
-            if status.time_scale != schedule.scale:
-                schedule.anchor(tick, status.time_scale, wall, status.epoch_s)
             interval = 1.0 / status.time_scale
-            due = schedule.due(tick + 1)
+            due = next_due(schedule, tick, status.time_scale, wall, status.epoch_s)
             if wall < due:
                 await asyncio.sleep(min(due - wall, PAUSED_POLL_S))  # re-read the speed meanwhile
                 continue
-            if wall - due > MAX_LAG_S * max(1.0, interval):
-                schedule.anchor(tick, status.time_scale, wall - interval)  # drop the backlog
             if not status.synced and now < last + max(interval, 1.0):
                 await asyncio.sleep(SYNC_POLL_S)
                 continue
