@@ -100,7 +100,13 @@ def _in_polygon(x: float, y: float, polygon: list[list[float]]) -> bool:
     return inside
 
 
-def summarize(results: list[dict]) -> dict:
+def summarize(results: list[dict], max_t: int | None = None) -> dict:
+    """Per (variant, range, scenario); max_t cuts every run at the same time (runs of
+    different lengths compare over the common part)."""
+    if max_t is not None:
+        keys = ("t", "det", "status", "err", "sigma", "inside")
+        results = [{**r, **{k: [v for t, v in zip(r["t"], r[k]) if t <= max_t] for k in keys}}
+                   for r in results]
     table = {}
     for key in sorted({(r["variant"], r["range_yd"], r["scenario"]) for r in results}):
         rows = [r for r in results if (r["variant"], r["range_yd"], r["scenario"]) == key]
@@ -165,6 +171,7 @@ def main() -> None:
     parser.add_argument("--particles", type=int, default=2000)
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--out", default=None, help="per-run series as JSON lines (resumes from it)")
+    parser.add_argument("--max-t", type=int, default=None, help="summarize every run up to this time")
     args = parser.parse_args()
     jobs = [(s, seed, float(r), args.seconds, args.particles, v)
             for v in args.variants.split(",") for r in args.ranges.split(",")
@@ -189,7 +196,7 @@ def main() -> None:
     else:
         for job in todo:
             keep(run_one(*job))
-    print_table(summarize(results))
+    print_table(summarize(results, args.max_t))
 
 
 if __name__ == "__main__":
