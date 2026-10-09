@@ -27,6 +27,22 @@ MIN_DEPTH_FT = 50.0
 MAX_DEPTH_FT = 1500.0
 
 
+def covered_count(estimate: TrackEstimate, positions: list[Position], config: ForwardDeploymentConfig,
+                  r_max_m: float) -> int:
+    """How many of positions lie within coverage_fraction x R_max (horizontal) of the target's
+    predicted position after lead_time_s (water frame)."""
+    heading = math.radians(estimate.hdg_deg or 0.0)
+    lead = (estimate.through_water_speed_kt or 0.0) * KNOT_TO_MPS * config.lead_time_s
+    predicted = (math.sin(heading) * lead, math.cos(heading) * lead)
+    radius = config.coverage_fraction * r_max_m
+    covered = 0
+    for position in positions:
+        east, north, _ = local_offset_m(estimate.current_position, position)
+        if math.hypot(east - predicted[0], north - predicted[1]) <= radius:
+            covered += 1
+    return covered
+
+
 def plan_forward_deployment(*args, **kwargs) -> tuple[list[Position], str]:
     """Return (positions to deploy, reason); see plan_forward_deployment_scheduled."""
     positions, reason, _ = plan_forward_deployment_scheduled(*args, **kwargs)
@@ -76,16 +92,8 @@ def plan_forward_deployment_scheduled(
 
     heading = math.radians(estimate.hdg_deg)
     ux, uy = math.sin(heading), math.cos(heading)
-    speed = speed_kt * KNOT_TO_MPS
     origin = estimate.current_position
-    lead = speed * config.lead_time_s
-    predicted = (ux * lead, uy * lead)  # metres east/north of the estimate (water frame)
-    radius = config.coverage_fraction * r_max
-    covered = 0
-    for position in [*observers, *pending]:
-        east, north, _ = local_offset_m(origin, position)
-        if math.hypot(east - predicted[0], north - predicted[1]) <= radius:
-            covered += 1
+    covered = covered_count(estimate, [*observers, *pending], config, r_max)
     if config.strategy == "optimal":
         if not force and estimate.uncertainty.horizontal_major_yd * YD_TO_M > config.optimal_max_sigma_fraction * r_max:
             return [], "estimate not yet converged enough for optimal placement", None

@@ -37,7 +37,7 @@ from aqua_drift.models import (
     TickMessage,
 )
 from aqua_drift.optimal_deployment import availability_from_feed, sensor_from_feed
-from aqua_drift.state import ObserverRejected, SimulationState, StaleGeneration
+from aqua_drift.state import ObserverRejected, ReplanRejected, SimulationState, StaleGeneration
 from aqua_drift.storage import EventStore
 from aqua_drift.wire import PROTOCOL_VERSION, WireEncoder
 
@@ -297,7 +297,10 @@ async def layer_update(update: LayerUpdate, generation: int | None = None) -> di
 
 @app.post("/internal/deploy", response_model=DeploymentRecord)
 async def deploy(request: DeploymentRequest, generation: int | None = None) -> DeploymentRecord:
-    record = await state.queue_deployment(request, generation=generation)
+    try:
+        record = await state.queue_deployment(request, generation=generation)
+    except ReplanRejected as error:  # the drops changed since the replan was made: try again
+        raise HTTPException(status_code=409, detail=str(error)) from error
     await store.append_event("forward_deployment", request.tick, record.model_dump(mode="json"))
     return record
 

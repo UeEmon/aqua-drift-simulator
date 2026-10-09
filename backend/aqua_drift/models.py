@@ -275,6 +275,18 @@ class ForwardDeploymentConfig(BaseModel):
     risk_quantile: float = Field(default=0.2, gt=0, le=1)  # share of hypotheses in the worst case
     coverage_loss_yd: float = Field(default=300.0, ge=0)  # error equivalent of a step with < min_coverage
     use_detection_gate: bool = True  # value the detection start / end (slant range = R_max)
+    # replanning (aqua_drift.replanning): open automatic drops are replaced when the estimate has
+    # moved away from what they were planned on and a fresh plan is clearly better; drops that are
+    # being flown to, due within replan_freeze_s or revised replan_max_revisions times are kept
+    replan_enabled: bool = True
+    replan_min_interval_s: int = Field(default=180, ge=0, le=3600)  # between replacements (a new maneuver: once at once)
+    replan_freeze_s: int = Field(default=240, ge=0, le=3600)  # drops due this soon are kept
+    replan_shift_sigma: float = Field(default=2.0, ge=0)  # estimate shift trigger, x the 1 sigma major
+    replan_shift_fraction: float = Field(default=0.15, ge=0, le=1)  # ... and at least this x R_max
+    replan_heading_deg: float = Field(default=20.0, ge=0, le=180)  # heading change trigger (>= 2 sigma)
+    replan_speed_kt: float = Field(default=2.0, ge=0)  # speed change trigger (>= 2 sigma)
+    replan_min_improvement: float = Field(default=0.2, ge=0, le=1)  # replace only if the cost drops this much
+    replan_max_revisions: int = Field(default=2, ge=0, le=10)  # a drop replaced this often is kept
 
 
 class ObserverDeploymentConfig(BaseModel):
@@ -538,11 +550,29 @@ class DeploymentRecord(BaseModel):
     source: str = "forward"
 
 
+class PlanBasis(BaseModel):
+    """The estimate a planned drop was chosen on: the drop point relative to the estimated target
+    (water frame, metres east / north) and its estimated heading and through-water speed at tick.
+    Drop point and target drift with the same water, so the replanner can tell how far the
+    estimate has moved since (aqua_drift.replanning)."""
+
+    tick: int
+    east_m: float
+    north_m: float
+    hdg_deg: float
+    speed_kt: float
+
+
 class DeploymentRequest(BaseModel):
     tick: int
     positions: list[Position]
     reason: str
     planned_ticks: list[int] | None = None  # optimal drop time of each position
+    bases: list[PlanBasis] | None = None  # the estimate each position was planned on
+    # replanning: open drop tasks this plan replaces (all or nothing: rejected with 409 when one
+    # of them is no longer revisable) and the revision of the new drops
+    replaces: list[int] = Field(default_factory=list)
+    revision: int = 0
 
 
 class DeploymentFeed(BaseModel):
@@ -581,13 +611,15 @@ class DeploymentFeed(BaseModel):
     bearing_interval_s: float = 15.0
     range_gate_sigma_yd: float = 15.0
     max_target_depth_ft: float = 1500.0
+    replan: ReplanFeed | None = None  # with the layer: what the replanner needs
 
 
 class DropTask(BaseModel):
     """One additional observer to be laid by the layer.
 
     PROPOSED (waiting for the operator) -> APPROVED (the layer flies there) -> DONE (laid: the
-    observer is in the water); or REJECTED / EXPIRED. The drop point is planned in the water
+    observer is in the water); or REJECTED / EXPIRED / CANCELLED / REPLACED (by a new plan after
+    the estimate changed, aqua_drift.replanning). The drop point is planned in the water
     frame, so it drifts with the (estimated) current until the layer reaches it."""
 
     task_id: int
@@ -601,6 +633,8 @@ class DropTask(BaseModel):
     # when the layer cannot be there in the operator's drop order (設標順)
     requested_tick: int | None = None
     sequence: int = 0  # drop order among tasks with the same planned time (operator reorder)
+    basis: PlanBasis | None = None  # the estimate an automatic drop was planned on (replanning)
+    revision: int = 0  # how often this drop's plan was replaced (replanning keeps it from the limit on)
     approved_tick: int | None = None
     done_tick: int | None = None
     eta_s: float | None = None  # seconds from now to the expected drop
@@ -924,3 +958,20 @@ class Snapshot(BaseModel):
     current_estimate: CurrentEstimate | None
     archived_observer_ids: list[str]
     lloyd: LloydDepthEstimate | None = None
+
+
+class ReplanFeed(BaseModel):
+    """What the replanner (aqua_drift.replanning) needs besides the deployment feed: every open
+    drop (in flight order) and the layer, so it can tell which drops are kept and when / where the
+    layer is free with only those."""
+
+    tasks: list[DropTask] = Field(default_factory=list)
+    layer_state: LayerState | None = None
+    layer: LayerConfig
+    datum: Position  # where the layer orbits before it has a state
+    # observers on their way into the water that are not open drops (queued placements, falling)
+    other_pending: list[Position] = Field(default_factory=list)
+    last_replan_tick: int | None = None
+
+
+DeploymentFeed.model_rebuild()

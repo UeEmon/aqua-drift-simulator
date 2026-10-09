@@ -94,6 +94,7 @@ def run_one(scenario: str, seed: int, bearing: bool, seconds: int, particles: in
         "horizontal_yd": horizontal, "depth_ft": depth, "detecting": detecting, "sigma_yd": sigma,
         "drops": sum(n for _, n in run.deployments) if not config.layer.enabled
         else sum(1 for t in run.tasks if t.status == "DONE"),
+        "replans": len(run.replans), "replaced": sum(len(ids) for _, ids in run.replans),
         "plans": len(plan_seconds), "plan_max_s": max(plan_seconds, default=0.0),
         "plan_mean_s": float(np.mean(plan_seconds)) if plan_seconds else 0.0,
         "wall_s": time.time() - started,
@@ -133,19 +134,21 @@ def summarize(results: list[dict], settle_s: int = 600) -> dict:
             "under2_detecting": float(np.mean(lost)) if lost else math.nan,
             "recovery_s": float(np.nanmean(recovery)) if recovery and not all(map(math.isnan, recovery)) else math.nan,
             "drops": float(np.mean([r["drops"] for r in rows])),
+            "replans": float(np.mean([r.get("replans", 0) for r in rows])),
             "plan_max_s": float(max(r["plan_max_s"] for r in rows)),
         }
     return table
 
 
 def print_table(table: dict) -> None:
-    print("| case | runs | horiz RMS YD | horiz p95 YD | depth RMS Ft | <2 detecting | recovery s | drops | plan max s |")
-    print("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+    print("| case | runs | horiz RMS YD | horiz p95 YD | depth RMS Ft | <2 detecting | recovery s | drops | replans "
+          "| plan max s |")
+    print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for name, m in table.items():
         print(
             f"| {name} | {m['runs']} | {m['horizontal_rms_yd']:.0f} | {m['horizontal_p95_yd']:.0f} | "
             f"{m['depth_rms_ft']:.0f} | {100 * m['under2_detecting']:.1f} % | {m['recovery_s']:.0f} | "
-            f"{m['drops']:.1f} | {m['plan_max_s']:.2f} |"
+            f"{m['drops']:.1f} | {m['replans']:.1f} | {m['plan_max_s']:.2f} |"
         )
 
 

@@ -644,7 +644,7 @@ function updateDeployment(deployment) {
 }
 
 // ================================================================== layer (設標者) and drop tasks
-const TASK_STATUS = { PROPOSED: "了承待ち", APPROVED: "設標に向かう", DONE: "投入済み", REJECTED: "却下", EXPIRED: "失効" };
+const TASK_STATUS = { PROPOSED: "了承待ち", APPROVED: "設標に向かう", DONE: "投入済み", REJECTED: "却下", EXPIRED: "失効", CANCELLED: "取消", REPLACED: "再計画で置換" };
 
 function circlePositions(center, radiusM, n = 72) {
   const out = [];
