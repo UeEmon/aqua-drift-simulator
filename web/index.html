@@ -397,7 +397,7 @@
               <label title="旋回待機中の飛行高度">巡航高度 (ft)<input id="layer-cruise-alt" type="number" min="100" max="30000" step="100" required /></label>
               <label title="設標に向かう間にこの高度まで降下（上昇）して投下">投下高度 (ft)<input id="layer-drop-alt" type="number" min="100" max="30000" step="100" required /></label>
               <label>昇降率 (ft/分)<input id="layer-climb" type="number" min="100" max="20000" step="100" required /></label>
-              <label class="check" title="直前の投下から推定した平均風の分だけ風上で投下する"><input id="layer-wind-correction" type="checkbox" />平均風で投下点を修正</label>
+              <label class="check" title="直前の投下から推定した平均風（推定がない間は現在高度の風）の分だけ風上で投下する"><input id="layer-wind-correction" type="checkbox" />平均風で投下点を修正</label>
               <button type="submit" class="span2">設標者の設定を反映</button>
             </form>
           </section>
