@@ -3,9 +3,9 @@ lost_contact.py only. Installed on one ScenarioRun; nothing in the services uses
 
 Variants (letters as in the design note; combine with "+"):
   C2  COASTING (no detection >= LOST_DEBOUNCE_S, not LOST): the forward planner keeps running
-      on the coasted estimate (its own sigma gates still apply)
-  C3  LOST (sigma >= 0.5 R or no detection >= LOST_TIMEOUT_S): open forward tasks the layer is
-      not flying to are dropped and search drops are laid where an R-disc covers the most
+      on the coasted estimate (its own sigma gates still apply); replanning stays frozen
+  C3  LOST (sigma >= 0.5 R or no detection >= LOST_TIMEOUT_S): open forward drops the
+      replanner may revise (aqua_drift.replanning.is_revisable) are replaced and search drops are laid where an R-disc covers the most
       particle mass at the expected drop time (greedy, until SEARCH_PD or SEARCH_MAX_DROPS)
   B2  while not detecting, a larger share of the particles maneuvers (COAST_MANEUVER_FRACTION)
 """
@@ -71,22 +71,25 @@ def install(run, variant: str) -> None:
             def output():
                 out = real_output()
                 for est in out.estimates:
-                    if est.observability_status.startswith("COASTING_"):
-                        est.observability_status = est.observability_status[len("COASTING_"):]
+                    est.observability_status = est.observability_status.removeprefix("COASTING_")
                 return out
 
             engine.output = output
+            forward = run.config.forward
+            replan = forward.replan_enabled
+            forward.replan_enabled = False  # replanning stays frozen while coasting
             try:
                 original_deploy()
             finally:
                 del engine.output
+                forward.replan_enabled = replan
             return
         if now == "LOST" and "C3" in parts:
             last = memo["last_search"]
-            if last is None or run.tick - last >= SEARCH_INTERVAL_S:
-                if not any(t.status == "APPROVED" and t.source == "search" for t in run.tasks):
-                    _search(run)
-                    memo["last_search"] = run.tick
+            searching = any(t.status == "APPROVED" and t.source == "search" for t in run.tasks)
+            if (last is None or run.tick - last >= SEARCH_INTERVAL_S) and not searching:
+                _search(run)
+                memo["last_search"] = run.tick
             return
         original_deploy()
 
@@ -97,11 +100,13 @@ def install(run, variant: str) -> None:
 def _search(run) -> None:
     engine = run.engine
     pf, frame = engine.pf, engine.frame
+    from aqua_drift.replanning import flying_task_id, is_revisable
+
     layer = run.layer_state
-    flying = layer.task_id if layer is not None and layer.mode in ("TRANSIT", "HOLD") else None
-    for task in run.tasks:  # forward tasks planned on the lost track are dropped
-        if task.status == "APPROVED" and task.task_id != flying:
-            task.status = "REJECTED"
+    flying = flying_task_id(layer)
+    for task in run.tasks:  # forward drops planned on the lost track: same freeze rule as replanning
+        if task.status == "APPROVED" and is_revisable(task, run.tick, run.config.forward, flying):
+            task.status = "REPLACED"
     free = run.config.observer_limit - len(run.observers) - sum(t.status == "APPROVED" for t in run.tasks)
     count = min(SEARCH_MAX_DROPS, free)
     if count <= 0:
