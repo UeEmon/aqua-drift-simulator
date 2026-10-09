@@ -11,18 +11,21 @@
     <main id="app">
       <section id="viewer-panel" aria-label="3D GIS">
         <div id="cesiumContainer"></div>
-        <div id="legend">
-          <span><i class="sw truth"></i>真値</span>
-          <span><i class="sw online"></i>推定（過去航跡非更新）</span>
-          <span><i class="sw smoothed"></i>推定（過去航跡更新）</span>
-          <span><i class="sw region"></i>推定存在圏</span>
-          <span><i class="sw observer"></i>観測者（探知中は緑）</span>
-          <span><i class="sw bearing"></i>方位観測（探知中は実線・失探知は破線）</span>
-          <span><i class="sw drop"></i>前程配置の投入点</span>
-          <span><i class="sw layer"></i>設標者・設標予定点</span>
-          <span><i class="sw flight-wind"></i>飛行高度の風</span>
-          <span><i class="sw drop-wind"></i>投下修正の風</span>
-          <span><i class="sw current-force"></i>外力（潮流）</span>
+        <div id="left-huds">
+          <div id="legend">
+            <span><i class="sw truth"></i>真値</span>
+            <span><i class="sw online"></i>推定（過去航跡非更新）</span>
+            <span><i class="sw smoothed"></i>推定（過去航跡更新）</span>
+            <span><i class="sw region"></i>推定存在圏</span>
+            <span><i class="sw observer"></i>観測者（探知中は緑）</span>
+            <span><i class="sw bearing"></i>方位観測（探知中は実線・失探知は破線）</span>
+            <span><i class="sw drop"></i>前程配置の投入点</span>
+            <span><i class="sw layer"></i>設標者・設標予定点</span>
+            <span><i class="sw flight-wind"></i>飛行高度の風</span>
+            <span><i class="sw drop-wind"></i>投下修正の風</span>
+            <span><i class="sw current-force"></i>外力（潮流）</span>
+          </div>
+          <pre id="camera-hud" aria-label="視点カメラ情報"></pre>
         </div>
         <div id="view-toolbar" role="toolbar" aria-label="視点">
           <div class="vt-row">
@@ -67,7 +70,6 @@
           </div>
         </div>
         <div id="right-huds">
-          <pre id="camera-hud" aria-label="視点カメラ情報"></pre>
           <div id="force-info" class="map-panel" aria-label="風・外力" hidden><table><tbody></tbody></table></div>
         </div>
         <pre id="perf-hud" hidden></pre>

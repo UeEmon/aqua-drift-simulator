@@ -44,14 +44,25 @@ body { overflow: hidden; }
 
 #connection-status { color: #7fe7b5; }
 
-#legend {
+/* top-left column: legend, then the camera readout under it */
+#left-huds {
   position: absolute;
   top: 12px;
   left: 12px;
   display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: calc(100% - 410px); /* clear of the view toolbar at the top right */
+  min-width: min(380px, calc(100% - 24px));
+  pointer-events: none;
+  z-index: 2;
+}
+#legend {
+  display: flex;
   flex-wrap: wrap;
   gap: 6px 14px;
-  max-width: calc(100% - 140px);
+  pointer-events: auto;
   padding: 8px 12px;
   background: rgba(5, 18, 32, 0.82);
   border: 1px solid rgba(107, 181, 255, 0.25);
@@ -275,7 +286,7 @@ button.secondary { margin-top: 8px; }
 }
 #view-toolbar select { max-width: 100%; }
 
-/* right column above the status strip: camera readout on top of the 風・外力 panel */
+/* right column above the status strip: the 風・外力 panel */
 #right-huds {
   position: absolute;
   right: 12px;
@@ -302,7 +313,7 @@ button.secondary { margin-top: 8px; }
 }
 #camera-hud:empty { display: none; }
 @media (max-width: 760px) {
-  #right-huds { right: auto; left: 8px; bottom: auto; top: 96px; align-items: flex-start; }
+  #left-huds { left: 8px; max-width: calc(100% - 110px); min-width: 0; }
   #camera-hud { font-size: 10.5px; }
 }
 
@@ -322,7 +333,7 @@ table.kv td:first-child { color: #9cc0e2; }
 #wind-table td { padding: 2px 4px; }
 .tab { flex: 1 1 auto; white-space: nowrap; } /* narrow panel: wrap to a second row instead of overlapping */
 
-/* map panels: layer (設標者) state at the bottom left, winds and external force below the camera readout */
+/* map panels: layer (設標者) state at the bottom left, winds and external force at the bottom right */
 .map-panel {
   max-width: min(400px, calc(100vw - 24px));
   padding: 6px 10px;
