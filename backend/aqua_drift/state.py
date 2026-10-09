@@ -5,6 +5,7 @@ import math
 from collections import OrderedDict, deque
 
 from aqua_drift import layer as layerlib
+from aqua_drift import replanning
 from aqua_drift import route as routelib
 from aqua_drift.deployment import default_position
 from aqua_drift.models import (
@@ -34,6 +35,7 @@ from aqua_drift.models import (
     ObserverState,
     OrchestratorFeed,
     Position,
+    ReplanFeed,
     ScenarioConfig,
     SimState,
     Snapshot,
@@ -55,6 +57,10 @@ class ObserverRejected(RuntimeError):
 
 class StaleGeneration(RuntimeError):
     """Raised for a post computed for a run that a runtime reset has since replaced."""
+
+
+class ReplanRejected(RuntimeError):
+    """Raised when a replan names a drop that may no longer be replaced (laid, flown to or due)."""
 
 
 class SimulationState:
@@ -86,6 +92,7 @@ class SimulationState:
         self.standby: dict[str, int] = {}  # observer_id -> tick of last assignment poll
         self.deploy_history: deque[DeploymentRecord] = deque(maxlen=20)
         self.last_deploy_tick: int | None = None
+        self.last_replan_tick: int | None = None
         self.bearings: dict[str, BearingReport] = {}
         self.tasks: list[DropTask] = []  # additional observers laid by the layer (設標者)
         self.task_counter = 0
@@ -237,22 +244,43 @@ class SimulationState:
     ) -> DeploymentRecord:
         """A deployment plan. With the layer enabled every point becomes a drop task that is
         proposed to the operator (approved at once in automatic approval mode); the observer is
-        in the water when the layer reaches the point. Without the layer: queued at once."""
+        in the water when the layer reaches the point. Without the layer: queued at once.
+        A replan (request.replaces) replaces those open drops, all or nothing: ReplanRejected
+        when one of them may no longer be replaced (see aqua_drift.replanning)."""
         async with self.lock:
             self._check_generation(generation)
+            if request.replaces:
+                self._replace_tasks(request.replaces)
             planned = request.planned_ticks or [None] * len(request.positions)
-            for position, planned_tick in zip(request.positions, planned, strict=False):
+            bases = request.bases or [None] * len(request.positions)
+            task_ids = []
+            for position, planned_tick, basis in zip(request.positions, planned, bases, strict=False):
                 if self.config.layer.enabled:
                     task = self._new_task(position, source, request.reason)
                     task.planned_tick = task.requested_tick = planned_tick
+                    task.basis, task.revision = basis, request.revision
+                    task_ids.append(task.task_id)
                 else:
                     self.placements.append(ObserverPlacement(position=position, source="forward"))
             record = DeploymentRecord(
-                tick=request.tick, positions=request.positions, reason=request.reason
+                tick=request.tick, positions=request.positions, reason=request.reason, task_ids=task_ids
             )
             self.deploy_history.append(record)
             self.last_deploy_tick = request.tick
+            if request.replaces:
+                self.last_replan_tick = request.tick
             return record
+
+    def _replace_tasks(self, task_ids: list[int]) -> None:
+        flying = replanning.flying_task_id(self.layer_state if self.config.layer.enabled else None)
+        by_id = {t.task_id: t for t in self.tasks}
+        refused = [i for i in task_ids if i not in by_id
+                   or not replanning.is_revisable(by_id[i], self.tick, self.config.forward, flying,
+                                                  self.config.layer.approval == "auto")]
+        if refused:
+            raise ReplanRejected(f"drops {refused} may no longer be replaced")
+        for task_id in task_ids:
+            by_id[task_id].status = "REPLACED"
 
     async def deployment_feed(self) -> DeploymentFeed:
         async with self.lock:
@@ -282,8 +310,20 @@ class SimulationState:
                 bearing_interval_s=self.config.bearing.interval_s,
                 range_gate_sigma_yd=self.config.estimator.range_gate_softness_yd,
                 max_target_depth_ft=self.config.estimator.max_target_depth_ft,
+                replan=self._replan_feed(),
                 **self._layer_availability(),
             )
+
+    def _replan_feed(self) -> ReplanFeed | None:
+        if not self.config.layer.enabled:
+            return None
+        return ReplanFeed(
+            tasks=[t for t in self.tasks if t.status in self.OPEN_TASK_STATES],
+            other_pending=[p.position for p in self.placements]
+            + [drop.splash_position for drop, _ in self.falling],
+            layer_state=self.layer_state, layer=self.config.layer,
+            datum=self.config.target.initial_position, last_replan_tick=self.last_replan_tick,
+        )
 
     def _layer_availability(self) -> dict:
         """When / where the layer is free for a new drop: after its open tasks."""
@@ -668,6 +708,7 @@ class SimulationState:
             self.placements.clear()
             self.deploy_history.clear()
             self.last_deploy_tick = None
+            self.last_replan_tick = None
             self.tasks = []
             self.layer_state = None
             self.falling = []

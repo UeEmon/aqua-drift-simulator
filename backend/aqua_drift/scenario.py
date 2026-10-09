@@ -27,7 +27,9 @@ from aqua_drift.models import (
     LayerFeed,
     LayerState,
     ObserverState,
+    PlanBasis,
     Position,
+    ReplanFeed,
     ScenarioConfig,
     TargetState,
 )
@@ -41,6 +43,7 @@ from aqua_drift.physics import (
     initial_target,
     local_offset_m,
 )
+from aqua_drift.replanning import basis_for, plan_replacement
 
 YD_TO_M = 0.9144
 
@@ -62,6 +65,8 @@ class ScenarioRun:
     deploy_check_s: int = 10
     deployments: list[tuple[int, int]] = field(default_factory=list)  # (tick, count)
     last_deploy_tick: int | None = None
+    last_replan_tick: int | None = None
+    replans: list[tuple[int, list[int]]] = field(default_factory=list)  # (tick, replaced drops)
     tasks: list[DropTask] = field(default_factory=list)  # drops flown by the layer (設標者)
     layer_state: LayerState | None = None
     layer_rng: random.Random | None = None
@@ -160,37 +165,60 @@ class ScenarioRun:
     def _forward_deploy(self) -> None:
         output = self.engine.output()
         estimate = next((e for e in output.estimates if e.mode.value == "ONLINE"), None)
+        sensor = SensorModel(
+            source_frequency_hz=self.config.source.source_frequency_hz + self.config.source.shared_recognition_bias_hz,
+            sound_speed_mps=self.config.source.sound_speed_mps,
+            frequency_sigma_hz=self.config.estimator.model_frequency_sigma_hz,
+            use_bearing=self.config.estimator.use_bearing and self.config.bearing.enabled,
+            bearing_sigma_deg=self.config.estimator.bearing_sigma_deg,
+            bearing_interval_s=self.config.bearing.interval_s,
+            gate_sigma_yd=self.config.estimator.range_gate_softness_yd,
+        )
+        open_tasks = [t for t in self.tasks if t.status == "APPROVED"]
+        free_slots = max(self.config.observer_limit - len(self.observers) - len(open_tasks), 0)
+        if self.config.layer.enabled:  # first: do the open drops still match the estimate?
+            replan = ReplanFeed(tasks=open_tasks, layer_state=self.layer_state, layer=self.config.layer,
+                                datum=self.config.target.initial_position, last_replan_tick=self.last_replan_tick)
+            decision, _ = plan_replacement(
+                self.tick, estimate, [o.position for o in self.observers], [], replan, self.config.forward,
+                self.config.max_slant_range_yd, free_slots, sensor, self.config.estimator.max_target_depth_ft,
+            )
+            if decision is not None:
+                for task in open_tasks:
+                    if task.task_id in decision.replaces:
+                        task.status = "REPLACED"
+                self._queue(decision.positions, decision.planned_ticks, decision.bases, decision.revision)
+                self.replans.append((self.tick, decision.replaces))
+                self.last_replan_tick = self.tick
+                return
         positions, _, planned = plan_forward_deployment_scheduled(
             self.tick,
             estimate,
             [o.position for o in self.observers],
-            [t.position for t in self.tasks if t.status == "APPROVED"],
+            [t.position for t in open_tasks],
             self.config.forward,
             self.config.max_slant_range_yd,
             self.last_deploy_tick,
             self.config.deployment.depth_step_ft,
-            free_slots=max(self.config.observer_limit - len(self.observers)
-                           - sum(1 for t in self.tasks if t.status == "APPROVED"), 0),
-            source_frequency_hz=self.config.source.source_frequency_hz + self.config.source.shared_recognition_bias_hz,
-            sound_speed_mps=self.config.source.sound_speed_mps,
-            frequency_sigma_hz=self.config.estimator.model_frequency_sigma_hz,
+            free_slots=free_slots,
+            source_frequency_hz=sensor.source_frequency_hz,
+            sound_speed_mps=sensor.sound_speed_mps,
+            frequency_sigma_hz=sensor.frequency_sigma_hz,
             layer=self._layer_availability(),
-            sensor=SensorModel(
-                use_bearing=self.config.estimator.use_bearing and self.config.bearing.enabled,
-                bearing_sigma_deg=self.config.estimator.bearing_sigma_deg,
-                bearing_interval_s=self.config.bearing.interval_s,
-                gate_sigma_yd=self.config.estimator.range_gate_softness_yd,
-            ),
+            sensor=sensor,
             max_depth_ft=self.config.estimator.max_target_depth_ft,
         )
-        if not positions:
-            return
+        if positions:
+            self._queue(positions, planned, [basis_for(estimate, p) for p in positions], 0)
+
+    def _queue(self, positions: list[Position], planned: list[int] | None, bases: list[PlanBasis],
+               revision: int) -> None:
         for index, position in enumerate(positions):
             if self.config.layer.enabled:  # laid when the layer gets there (automatic approval)
                 self.tasks.append(DropTask(
                     task_id=len(self.tasks) + 1, created_tick=self.tick, source="forward",
                     position=position, status="APPROVED", approved_tick=self.tick,
-                    planned_tick=planned[index] if planned else None,
+                    planned_tick=planned[index] if planned else None, basis=bases[index], revision=revision,
                 ))
             else:
                 self._add_observer(position)

@@ -10,6 +10,7 @@ import httpx
 from aqua_drift.forward_deployment import plan_forward_deployment_scheduled
 from aqua_drift.models import DeploymentFeed, DeploymentRequest
 from aqua_drift.optimal_deployment import availability_from_feed, sensor_from_feed
+from aqua_drift.replanning import basis_for, plan_replacement
 from aqua_drift.services.common import API_URL, post, wait_for_api
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s deployer %(message)s")
@@ -20,12 +21,36 @@ CHECK_INTERVAL_S = 5.0
 async def run() -> None:
     async with httpx.AsyncClient(trust_env=False) as client:
         await wait_for_api(client)
-        last_reason = ""
+        last_reason = last_replan = ""
         while True:
             response = await client.get(f"{API_URL}/internal/deployment-feed", timeout=10)
             response.raise_for_status()
             feed = DeploymentFeed.model_validate(response.json())
             estimate = next((e for e in feed.estimates if e.mode.value == "ONLINE"), None)
+            if feed.replan is not None:
+                # first: do the open drops still match the estimate? (replaced all or nothing)
+                decision, why = plan_replacement(
+                    feed.tick, estimate, feed.observer_positions, feed.replan.other_pending, feed.replan,
+                    feed.config, feed.max_slant_range_yd, feed.free_slots, sensor_from_feed(feed),
+                    feed.max_target_depth_ft,
+                )
+                if decision is not None:
+                    request = DeploymentRequest(
+                        tick=feed.tick, positions=decision.positions, reason=decision.reason,
+                        planned_ticks=decision.planned_ticks, bases=decision.bases,
+                        replaces=decision.replaces, revision=decision.revision,
+                    )
+                    result = await post(client, "/internal/deploy", request.model_dump(mode="json"), feed.generation)
+                    if result.status_code == 409:  # a drop was laid or flown to meanwhile
+                        log.info("tick=%s replan refused (%s); next cycle", feed.tick, result.text)
+                    else:
+                        result.raise_for_status()
+                        log.info("tick=%s %s", feed.tick, decision.reason)
+                    await asyncio.sleep(CHECK_INTERVAL_S)
+                    continue
+                if why != last_replan:
+                    log.info("tick=%s no replan: %s", feed.tick, why)
+                last_replan = why
             positions, reason, planned = plan_forward_deployment_scheduled(
                 feed.tick,
                 estimate,
@@ -44,7 +69,10 @@ async def run() -> None:
                 max_depth_ft=feed.max_target_depth_ft,
             )
             if positions:
-                request = DeploymentRequest(tick=feed.tick, positions=positions, reason=reason, planned_ticks=planned)
+                request = DeploymentRequest(
+                    tick=feed.tick, positions=positions, reason=reason, planned_ticks=planned,
+                    bases=[basis_for(estimate, p) for p in positions],
+                )
                 result = await post(client, "/internal/deploy", request.model_dump(mode="json"), feed.generation)
                 result.raise_for_status()
                 log.info("tick=%s deployed %d observers (%s); the orchestrator starts their containers",
