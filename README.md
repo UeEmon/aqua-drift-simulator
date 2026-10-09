@@ -1,139 +1,126 @@
 # AQUA-DRIFT Simulator
 
+**日本語** | [English](README.en.md)
+
 潮流による外力を受ける潜没目標を、漂流する観測者（1〜100）の**ドップラー観測と方位観測**から
 3次元で航跡処理する合成データ・シミュレーターです。Docker 上で目標・観測者・音源演算・推定器を
-独立コンテナとして動かし、CesiumJS（オープンソース GIS）で表示します。
+独立コンテナとして動かし、PostgreSQL/PostGIS に記録し、CesiumJS（オープンソース GIS）で表示します。
 
-Synthetic 3-D simulator for Doppler + bearing tracking of a submerged target under tidal current,
-built on Docker, PostgreSQL/PostGIS and CesiumJS.
+## 算出する内容
 
-## What it computes
+ドップラー周波数、水平方位（σ 15°、15 秒ごと）、共通の最大斜距離での探知／非探知、および
+漂流する各観測者の正確な時刻・位置・深度から、次を算出します。
 
-From Doppler frequency, horizontal bearing (σ 15°, every 15 s), detection/non-detection at the
-common maximum slant range, and the exact time/position/depth of each drifting observer:
+- 現在の位置と深度、HDG と COG
+- 対水速力、対地速力、観測者に対する相対速力
+- 過去航跡の 2 種類：**更新しない**航跡（ONLINE）と、設定した再計算ウィンドウ内で**更新する**航跡（SMOOTHED）
+- 不確かさ（1σ）と、ユーザーが設定した確率（%）での**推定存在範囲**
+  （楕円・楕円体ではなく最高密度領域。分かれた領域は別々に表示）
+- 観測者ごとの最接近時刻、斜距離、相対速力と、音源周波数誤差・速力誤差に起因するそれらの誤差
+- 共通の音源周波数認識バイアスと線形の潮流場
 
-- current position and depth, HDG and COG
-- through-water, over-ground and observer-relative speed
-- past track in two variants: **not updated** (ONLINE) and **updated** within a configurable
-  recomputation window (SMOOTHED)
-- uncertainty (1σ) and the **estimated presence region** at a user-set probability (%)
-  (highest-density region, not an ellipse/ellipsoid; split regions are shown separately)
-- per-observer closest-approach time, slant range and relative speed with error from the
-  source-frequency error and the speed error
-- the common source-frequency recognition bias and the linear current field
-
-Documentation:
+## ドキュメント
 
 - [docs/system-requirements.md](docs/system-requirements.md) – **動作環境の要件**（サーバー・ブラウザ・GPU・ストレージ・ネットワーク）
-- [docs/requirements.md](docs/requirements.md) – requirements and item-by-item traceability
-- [docs/estimation-methods.md](docs/estimation-methods.md) – Kalman filter explained, alternatives, chosen method
-- [docs/observation-mode-comparison.md](docs/observation-mode-comparison.md) – position / range-bearing / bearing-only / Doppler / combinations
-- [docs/optimal-deployment.md](docs/optimal-deployment.md) – automatic observer deployment: positions, number and depths chosen by the Doppler-tracking (Fisher) information within the detection range
-- [docs/depth-from-doppler.md](docs/depth-from-doppler.md) – how to obtain the target depth from Doppler (overflight, vertical baseline, depth-rate prior, Lloyd's mirror), CRLB and particle-filter check; the optional **Lloyd's mirror depth** (direct + surface-reflected path interference of the received level, switch in the 推定と真値 tab, off by default because of its processing load)
+- [docs/requirements.md](docs/requirements.md) – 要求事項と項目ごとのトレーサビリティ
+- [docs/estimation-methods.md](docs/estimation-methods.md) – カルマンフィルタの解説、代替手法、採用した手法
+- [docs/observation-mode-comparison.md](docs/observation-mode-comparison.md) – 位置／距離・方位／方位のみ／ドップラー／それらの組み合わせの比較
+- [docs/optimal-deployment.md](docs/optimal-deployment.md) – 観測者の自動配置：探知距離内のドップラー航跡処理（Fisher）情報量から位置・数・深度を決める方法
+- [docs/depth-from-doppler.md](docs/depth-from-doppler.md) – ドップラーから目標深度を求める方法（直上通過、垂直基線、深度変化率の事前分布、ロイドミラー）、CRLB とパーティクルフィルタでの確認。オプションの**ロイドミラー深度**（受信レベルの直接波と海面反射波の干渉。処理負荷のため既定はオフで、推定と真値タブで切り替え）
 - [docs/doppler-information.md](docs/doppler-information.md) – 複数の音源周波数・帯域幅・安定度、伝搬遅延、変針・変速の到達時間差と、ドップラーから推定に使えるその他の要素
-- [docs/architecture.md](docs/architecture.md) and [docs/uml/](docs/uml/) – PlantUML design
+- [docs/wind.md](docs/wind.md) – 高度別の風向風速と、投下後の観測者の自由落下
+- [docs/layer-route.md](docs/layer-route.md) – 設標者の投下予定点への飛行経路
+- [docs/architecture.md](docs/architecture.md) と [docs/uml/](docs/uml/) – PlantUML による設計
 
-## GIS panel
+## GIS パネル
 
-- **Estimation bar**: start / stop the estimator (a start begins a new run from the current time)
-- **推定と真値**: estimate vs truth side by side (value, truth, error, 1σ), error-over-time charts,
-  relative speed / range / bearing per observer, CPA (estimate vs truth), current field
-- **目標設定**: target initial position, depth, HDG and speed → restart; live maneuver commands
-- **観測・推定条件**: max slant range, bearing σ / interval, bearing use on/off, frequency bias,
-  current field, probability %, recompute window, particles
-- **表示・観測者**: layer toggles (truth, both tracks, presence region, bearing lines, error line)
-  and observer placement
+- **推定バー**：推定器の開始／停止（開始すると現在時刻から新しい推定を始める）
+- **推定と真値**：推定値と真値の並列表示（値・真値・誤差・1σ）、誤差の時間推移グラフ、
+  観測者ごとの相対速力・距離・方位、CPA（推定と真値）、潮流場
+- **目標設定**：目標の初期位置・深度・HDG・速力 → 再スタート、運動中の変針・変速指令
+- **観測・推定条件**：最大斜距離、方位の σ と間隔、方位使用の有無、周波数バイアス、
+  潮流場、確率 %、再計算ウィンドウ、パーティクル数
+- **表示・観測者**：レイヤーの表示切替（真値、2 種類の航跡、存在範囲、方位線、誤差線）と観測者の配置
 
-- **View toolbar (map, top right)**: oblique / top-down (vertical) / horizontal side view
-  (direction selectable), orthographic top view, **centre on truth (default centre target)**,
-  centre on estimate, **follow** on/off (default **on, following the truth**) with the follow target truth / estimate
-  (the target is kept at the view centre every frame; altitude, depression and heading are kept), FPS overlay
-- **Clock**: times are shown as clock time (HH:MM:SS, browser local time) = system time of tick 0 +
-  tick. The clock container schedules each tick from the system time, so at 1x the simulation
-  time stays on the system time; drop times are entered as HH:MM:SS
-- **設標者 panel (map, bottom left)**: the layer's state (mode, position, altitude, speed,
-  heading, ground speed and track, bank, arrival time, next drop)
-- **風・外力 panel (map, bottom right, below the camera readout)**: the wind at the layer's flight
-  altitude, the mean wind used to correct the release points and the external force (current)
-  fitted from the observers' drift; the same three are drawn as arrows on the map (toggles in
-  表示・観測者)
-- **Camera readout (map, bottom right)**: camera latitude / longitude, altitude above the sea
-  surface in ft, depression angle, heading and the view-centre coordinates. The camera starts at
-  10000 ft without a fly-in or automatic zoom
+- **ビューツールバー（地図右上）**：斜め視点／真上（鉛直）／真横（方向を選択可）、正射投影の上面図、
+  **真値を中心に（既定の中心対象）**、推定値を中心に、**追従**のオン／オフ（既定は**オンで真値に追従**）と
+  追従対象（真値／推定値）の切替（毎フレーム目標を画面中央に保ち、高度・俯角・方位は維持）、FPS 表示
+- **時計**：時刻は時計時刻（HH:MM:SS、ブラウザのローカル時刻）＝ tick 0 のシステム時刻 + tick で表示します。
+  clock コンテナがシステム時刻から各 tick を刻むため、1 倍速ではシミュレーション時刻がシステム時刻と一致します。
+  投下時刻は HH:MM:SS で入力します
+- **設標者パネル（地図左下）**：設標者の状態（モード、位置、高度、速力、針路、対地速力と航跡、バンク角、
+  到着時刻、次の投下）
+- **風・外力パネル（地図右下、カメラ情報の下）**：設標者の飛行高度の風、投下点の補正に使う平均風、
+  観測者の漂流から推定した外力（潮流）。同じ 3 つを地図上に矢印で表示します（表示・観測者で切替）
+- **カメラ情報（地図右下）**：カメラの緯度・経度、海面からの高度（ft）、俯角、方位、画面中心の座標。
+  カメラは 10000 ft から始まり、フライインや自動ズームはしません
 
-By default four observers surround the target's initial position; the remaining observer
-containers wait in standby. The `deployer` service places them **ahead (前程) of the estimated
-target** (estimate only, never the truth). The default **optimal** planner chooses the positions,
-the number of observers and their depths from the Doppler-tracking (Fisher) information over
-the next 30 min, taking the detection range into account (see docs/optimal-deployment.md); the
-表示・観測者 tab shows each plan (count, depths, predicted error) and has a "deploy now" button.
-Additional observers are laid by the **layer (設標者)**: the planned drop points are proposed to the
-operator (approval **automatic** by default, or **manual** with 了承/却下 in the status strip and the
-設標者 tab); the layer then flies there over the sea surface at 200±50 kt with bank ≤ 15°
-(drop points drift with the estimated current) and the observer is in the water when it arrives.
-Without a task the layer circles the estimated target position. Each drop has an **optimal drop
-time** (just before the predicted target comes within detection range, and not before the layer
-can be there); the layer leaves when it must, picks its speed to arrive on time, holds over the
-point if early and lays the observer at the planned time. The layer turns **left** as the standard
-(orbit and holds counter-clockwise) and takes a right turn only when that route is clearly shorter
-(by the configurable margin, 10 s by default). The **設標者 tab** controls it: live state (mode,
-speed, heading, bank and turn direction, current / next drop), pause, approval mode, standard turn
-side, speed / bank / orbit settings, and the drop list (approve / reject, drop now, set a drop
-time, cancel) plus manual placement.
+既定では 4 機の観測者が目標の初期位置を囲み、残りの観測者コンテナは待機します。`deployer` サービスは
+観測者を**推定目標の前程**に配置します（推定値のみを使い、真値は使いません）。既定の **optimal**
+計画は、探知距離を考慮した今後 30 分間のドップラー航跡処理（Fisher）情報量から、配置位置・観測者数・
+深度を決めます（docs/optimal-deployment.md 参照）。表示・観測者タブには各計画（数、深度、予測誤差）が表示され、
+「今すぐ配置」ボタンがあります。
 
-The background map (Natural Earth II) is **off by default** to prioritise rendering; switch it
-on with 「背景地図」 in the view toolbar when needed.
+追加の観測者は**設標者**が投下します。投下予定点はオペレーターに提案され（承認は既定で**自動**。
+**手動**の場合はステータス欄と設標者タブで了承／却下）、設標者は海面上を 200±50 kt、バンク角 15° 以下で
+そこへ飛行し（投下点は推定した潮流で流されます）、到着時に観測者が着水します。任務がないときは
+推定目標位置の周りを旋回します。各投下には**最適投下時刻**があり（予測目標が探知距離に入る直前で、
+かつ設標者が到着できる時刻以降）、設標者は必要な時刻に出発し、間に合う速力を選び、早く着いたら
+その点の上で待機し、予定時刻に観測者を投下します。設標者の標準は**左旋回**（周回・待機は反時計回り）で、
+右旋回の方が明らかに短い場合（設定可能な余裕、既定 10 秒）にだけ右旋回します。**設標者タブ**では、
+状態表示（モード、速力、針路、バンク角と旋回方向、現在／次の投下）、一時停止、承認モード、標準旋回方向、
+速力・バンク角・周回の設定、投下リスト（了承／却下、今すぐ投下、投下時刻の設定、取消）と手動配置を操作できます。
 
-Rendering uses GPU-batched Cesium primitives, on-demand rendering and 4x MSAA. The GIS stream
-(WebSocket protocol v2) sends a full update once and compact deltas afterwards; a Web Worker
-decodes it and converts coordinates off the rendering thread; tracks are drawn in chunks so
-only changed chunks reach the GPU; quality adapts to the frame time; markers glide between
-the 1 Hz updates ("なめらか", switched off automatically on very slow GPUs). The 「性能」 toggle
-shows frame rate, update time, received bytes, quality level and the GPU in use. A hardware
-GPU with WebGL2 is recommended; the GIS also runs on software WebGL (used in CI).
+背景地図（Natural Earth II）は描画を優先するため**既定でオフ**です。必要なときはビューツールバーの
+「背景地図」でオンにしてください。
 
-## System requirements (summary)
+描画には GPU バッチ処理の Cesium プリミティブ、オンデマンド描画、4x MSAA を使います。GIS ストリーム
+（WebSocket プロトコル v2）は最初に全体を 1 回送り、その後は差分だけを送ります。Web Worker が
+描画スレッドの外でデコードと座標変換を行い、航跡はチャンク単位で描くため変更されたチャンクだけが GPU に
+送られます。描画品質はフレーム時間に応じて調整され、マーカーは 1 Hz の更新の間を滑らかに移動します
+（「なめらか」、非常に遅い GPU では自動的にオフ）。「性能」トグルでフレームレート、更新時間、受信バイト数、
+品質レベル、使用中の GPU を表示します。WebGL2 対応のハードウェア GPU を推奨しますが、ソフトウェア WebGL
+（CI で使用）でも動作します。
 
-| | Minimum (default, 12 observer containers) | Recommended |
+## 動作環境（概要）
+
+| | 最小（既定、観測者コンテナ 12） | 推奨 |
 |---|---|---|
-| Server | Docker Engine 24+ / Compose v2.20+, x86-64, 4 cores, 3 GB RAM for Docker, 10 GB free | 4–8 cores, 4–8 GB, 20 GB SSD |
-| Browser | Chrome / Edge 98+, Firefox 94+, Safari 15.4+, WebGL 2, hardware acceleration on, 1280 px wide | Latest Chrome / Edge, recent GPU, 1600 px+ |
+| サーバー | Docker Engine 24+ / Compose v2.20+、x86-64、4 コア、Docker 用 RAM 3 GB、空き 10 GB | 4〜8 コア、4〜8 GB、SSD 20 GB |
+| ブラウザ | Chrome / Edge 98+、Firefox 94+、Safari 15.4+、WebGL 2、ハードウェアアクセラレーション有効、幅 1280 px | 最新の Chrome / Edge、最近の GPU、1600 px 以上 |
 
-Internet is needed only for the first build; the system runs offline. There is no
-authentication — keep it on a trusted network or set `WEB_BIND=127.0.0.1`. Details, measured
-figures and storage growth: [docs/system-requirements.md](docs/system-requirements.md).
+インターネット接続は初回ビルド時のみ必要で、その後はオフラインで動作します。認証はないため、
+信頼できるネットワーク内で使うか、`WEB_BIND=127.0.0.1` を設定してください。詳細、実測値、
+ストレージの増加量は [docs/system-requirements.md](docs/system-requirements.md) を参照してください。
 
-## Start with Docker
+## Docker で起動
 
 ```bash
 cp .env.example .env
 docker compose up --build
 ```
 
-Observers are numbered obs-01 .. obs-99. The `orchestrator` service starts an observer
-container only when an observer is needed (the initial four around the target, each forward
-or manual placement) and the container is removed when the observer ends, so memory is used
-only for observers in service; a freed number is reused (history kept as `obs-03#1`). It needs
-the Docker socket; without it, use the static mode
-`docker compose --profile static-observers up --build --scale observer=12`.
-Stop with `docker compose down --remove-orphans`.
+観測者には obs-01 .. obs-99 の番号が付きます。`orchestrator` サービスは観測者が必要になったとき
+（目標を囲む初期 4 機、前程配置や手動配置のたび）にだけ観測者コンテナを起動し、観測者の終了時に
+コンテナを削除するため、メモリは稼働中の観測者分しか使いません。空いた番号は再利用されます
+（履歴は `obs-03#1` のように残ります）。orchestrator には Docker ソケットが必要です。使えない場合は
+静的モード `docker compose --profile static-observers up --build --scale observer=12` を使ってください。
+停止は `docker compose down --remove-orphans` です。
 
-Open <http://localhost:8090>. API health: <http://localhost:8091/health>.
+ブラウザで <http://localhost:8090> を開きます。API のヘルスチェック：<http://localhost:8091/health>
 
-To add an observer at a specific point, double-click the map (or enter coordinates) and press
-「配置を予約」: the orchestrator starts a container for it automatically (1–99 observers).
-When all 99 numbers are in use, the oldest observer is removed to free a number; its history
-stays in the database. Each observer observes for at most three hours.
+特定の地点に観測者を追加するには、地図をダブルクリック（または座標を入力）して「配置を予約」を押します。
+orchestrator が自動でコンテナを起動します（観測者は 1〜99）。99 番まですべて使用中のときは、最も古い
+観測者を削除して番号を空けます（その履歴はデータベースに残ります）。各観測者の観測時間は最大 3 時間です。
 
-## Configuration (GIS panel or `PUT /api/config`)
+## 設定（GIS パネルまたは `PUT /api/config`）
 
-- Target: HDG (deg) and HDG rate (deg/s), through-water speed (kt) and rate (kt/s),
-  depth (Ft) and rate (Ft/s)
-- Common maximum slant range (YD), presence probability (%), past-track recomputation window (s)
-- Observer limit, source frequency, common frequency-recognition bias (Hz)
-- Truth current field (base vector and gradient), estimator settings (particles, bias prior …)
+- 目標：HDG（度）と HDG 変化率（度/秒）、対水速力（kt）と変化率（kt/秒）、深度（Ft）と変化率（Ft/秒）
+- 共通の最大斜距離（YD）、存在確率（%）、過去航跡の再計算ウィンドウ（秒）
+- 観測者数の上限、音源周波数、共通の周波数認識バイアス（Hz）
+- 真値の潮流場（基準ベクトルと勾配）、推定器の設定（パーティクル数、バイアスの事前分布 など）
 
-## Offline runs and analysis
+## オフライン実行と解析
 
 ```bash
 cd backend
@@ -143,10 +130,9 @@ python -m aqua_drift.analysis.compare_modes --observers 4 --runs 20        # obs
 ruff check . && pytest
 ```
 
-CI also starts the full stack with Docker and checks the GIS in headless Chromium
-(`e2e/ui_check.py`); screenshots are uploaded as the `gis-e2e` artifact.
+CI では Docker でスタック全体を起動し、ヘッドレス Chromium で GIS を確認します（`e2e/ui_check.py`）。
+スクリーンショットは `gis-e2e` アーティファクトとしてアップロードされます。
 
-## Display conventions
+## 表示の単位
 
-YD for distance, Ft for depth, kt for speed, degrees true for HDG/COG. A depth exaggeration factor
-(default ×10) is applied in the 3-D view only.
+距離は YD、深度は Ft、速力は kt、HDG/COG は真方位の度です。深度の誇張倍率（既定 ×10）は 3D 表示にだけ適用されます。
