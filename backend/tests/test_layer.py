@@ -10,6 +10,7 @@ from aqua_drift.layer import (
     orbit_radius_m,
     planned_path,
     step,
+    timed_turn,
     turn_radius_m,
 )
 from aqua_drift.models import (
@@ -441,3 +442,18 @@ async def test_reorder_of_drops_as_soon_as_possible() -> None:
     # a new drop goes after the reordered ones
     await sim.queue_deployment(DeploymentRequest(tick=0, positions=[a], reason="plan"))
     assert (await sim.layer_feed()).tasks[-1].task_id > first.task_id
+
+
+def test_timed_leg_flies_on_along_the_path_that_arrives_on_time() -> None:
+    """The path being flown arrives on time while a fresh plan from here is late (close to the
+    point a fresh plan can be a loop): the speed is kept. A new speed, a new turn radius, would
+    drop the path being flown and cost the loop."""
+    config = LayerConfig(speed_spread_kt=50.0)
+    state = initial_state(config, DATUM, 0, random.Random(1)).model_copy(
+        update={"mode": "TRANSIT", "task_id": 1, "heading_deg": 0.0, "speed_kt": 150.0})
+    point = _offset(state.position, 1000.0, 2000.0, 300.0)
+    v = 150.0 * 0.5144444444444445
+    _, speed = timed_turn(state, config, point, 20.0)
+    assert speed != 150.0  # the fresh plan alone is late: the speed would change
+    flown = 20.0 * v + config.capture_radius_yd * 0.9144
+    assert timed_turn(state, config, point, 20.0, flown_m=flown) == (None, 150.0)

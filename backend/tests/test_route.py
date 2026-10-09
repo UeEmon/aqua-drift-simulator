@@ -129,3 +129,29 @@ def test_schedule_routes_new_drops_on_after_the_queued_ones() -> None:
     assert order == [0] and abs(times[0] - legs[1].drop_s) < 1e-6
     # lined up at the queued drop for the new one: about a straight 2 km after it
     assert times[0] - legs[0].drop_s < (2000.0 + 0.2 * turn_radius_m(speed, bank)) / (speed * 0.5144444444444445)
+
+
+def test_route_crosses_a_line_of_close_drops_straight_along_it() -> None:
+    """Drops 450 m apart on a line whose bearing is off the 10 degree grid (43 deg): the line is
+    flown straight through (the bearing to the next drop is an approach heading), not a loop
+    at every drop (a 3 degree offset cannot be taken up within 450 m at a ~4 km turn radius)."""
+    speed, bank = 200.0, 15.0
+    v = speed * 0.5144444444444445
+    bearing = math.radians(43.0)
+    east = [8000.0 * math.sin(bearing) + 450.0 * k * math.sin(bearing) for k in range(6)]
+    north = [8000.0 * math.cos(bearing) + 450.0 * k * math.cos(bearing) for k in range(6)]
+    legs = route(east, north, bearing, speed, bank)
+    assert all(abs(leg.approach - bearing) < 1e-9 for leg in legs[:-1])
+    assert legs[-1].arrive_s - legs[0].arrive_s < 5 * 450.0 / v + 1.0
+
+
+def test_layer_lays_a_line_of_close_drops_in_one_pass() -> None:
+    """Four drops 450 m apart on a line at 43 deg ahead of the layer: one pass, no loop."""
+    bearing = math.radians(43.0)
+    points = [_offset(DATUM, (6000.0 + 450.0 * k) * math.sin(bearing) - 3000.0,
+                      (6000.0 + 450.0 * k) * math.cos(bearing) + 6000.0, 300.0) for k in range(4)]
+    done, _, predicted = _lay(points)
+    assert set(done) == {1, 2, 3, 4}
+    assert done[4] - done[1] < 3 * 450.0 / (200.0 * 0.5144444444444445) + 10
+    for task_id, time in zip((1, 2, 3, 4), predicted, strict=True):
+        assert abs(done[task_id] - time) <= 10.0
