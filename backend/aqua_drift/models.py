@@ -389,6 +389,9 @@ class EstimatorSettings(BaseModel):
 
 class TickMessage(BaseModel):
     tick: int = Field(ge=0)
+    # system time (UTC epoch seconds) the clock scheduled this tick for; fixes the time of day of
+    # tick 0 (Snapshot.epoch_s) so every tick has a clock time, not just an elapsed count
+    wall_s: float | None = None
 
 
 MAX_TIME_SCALE = 100.0
@@ -406,6 +409,7 @@ class ClockStatus(BaseModel):
     tick: int
     time_scale: float
     synced: bool
+    epoch_s: float | None = None
 
 
 class TargetState(BaseModel):
@@ -545,6 +549,7 @@ class DeploymentFeed(BaseModel):
     """What the deployer may see: estimates and observer positions only (no truth)."""
 
     tick: int
+    generation: int = 0
     config: ForwardDeploymentConfig
     max_slant_range_yd: float
     depth_step_ft: float
@@ -906,6 +911,7 @@ class Snapshot(BaseModel):
     tick: int
     generation: int = 0
     time_scale: float = 1.0
+    epoch_s: float | None = None  # system time (UTC epoch s) of tick 0: tick t is at epoch_s + t
     deployment: DeploymentStatus = DeploymentStatus()
     estimation: EstimationControl = EstimationControl()
     bearings: list[BearingReport] = Field(default_factory=list)

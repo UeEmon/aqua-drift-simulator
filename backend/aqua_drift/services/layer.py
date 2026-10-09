@@ -37,8 +37,8 @@ async def run() -> None:
                 state = None
                 await asyncio.sleep(1.0)
                 continue
-            if rng is None:
-                rng = random.Random(feed.config.random_seed)
+            if rng is None or generation != feed.generation:
+                rng = random.Random(feed.config.random_seed)  # runtime reset: new run
             if generation != feed.generation or state is None:
                 generation = feed.generation
                 state = feed.state if feed.state is not None and feed.state.tick <= feed.tick else None
@@ -51,7 +51,7 @@ async def run() -> None:
             state, update = advance(feed, state, rng)
             for task_id in update.completed:
                 log.info("tick=%s laid the observer of drop task %s", state.tick, task_id)
-            result = await post(client, "/internal/layer", update.model_dump(mode="json"))
+            result = await post(client, "/internal/layer", update.model_dump(mode="json"), generation)
             result.raise_for_status()
             await asyncio.sleep(0.2)
 

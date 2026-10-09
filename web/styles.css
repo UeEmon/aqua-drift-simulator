@@ -275,10 +275,20 @@ button.secondary { margin-top: 8px; }
 }
 #view-toolbar select { max-width: 100%; }
 
-#camera-hud {
+/* right column above the status strip: camera readout on top of the 風・外力 panel */
+#right-huds {
   position: absolute;
   right: 12px;
   bottom: 60px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: calc(100% - 24px);
+  pointer-events: none;
+  z-index: 2;
+}
+#camera-hud {
   margin: 0;
   padding: 7px 10px;
   color: #d7eaff;
@@ -292,7 +302,8 @@ button.secondary { margin-top: 8px; }
 }
 #camera-hud:empty { display: none; }
 @media (max-width: 760px) {
-  #camera-hud { font-size: 10.5px; right: auto; left: 8px; bottom: auto; top: 96px; }
+  #right-huds { right: auto; left: 8px; bottom: auto; top: 96px; align-items: flex-start; }
+  #camera-hud { font-size: 10.5px; }
 }
 
 .sw.layer { background: #e9e4ff; height: 8px; width: 8px; border-radius: 1px; transform: rotate(45deg); }
@@ -310,3 +321,31 @@ table.kv td:first-child { color: #9cc0e2; }
 #wind-table input { width: 100%; min-width: 0; padding: 2px 4px; font-size: 12px; box-sizing: border-box; }
 #wind-table td { padding: 2px 4px; }
 .tab { min-width: 0; white-space: nowrap; }
+
+/* map panels: layer (設標者) state at the bottom left, winds and external force below the camera readout */
+.map-panel {
+  max-width: min(400px, calc(100vw - 24px));
+  padding: 6px 10px;
+  color: #d7eaff;
+  background: rgba(3, 10, 18, 0.84);
+  border: 1px solid rgba(107, 181, 255, 0.28);
+  border-radius: 6px;
+  font-size: 12px;
+  pointer-events: none;
+}
+#layer-info { position: absolute; left: 12px; bottom: 60px; z-index: 2; }
+.map-panel[hidden] { display: none; }
+.map-panel table { width: auto; table-layout: auto; border-collapse: collapse; font-size: inherit; }
+.map-panel th, .map-panel td { position: static; padding: 1px 8px 1px 0; text-align: left; vertical-align: top;
+  font-weight: normal; background: none; border: 0; }
+.map-panel th { color: #9cc0e2; white-space: nowrap; }
+.map-panel tr.head th { color: #e9e4ff; font-weight: 600; padding-top: 0; border-bottom: 1px solid rgba(107, 181, 255, 0.28); }
+.map-panel tr.note td { color: #8faecb; font-size: 11px; padding-top: 3px; }
+#perf-hud:not([hidden]) ~ #layer-info { bottom: 200px; }
+.sw.flight-wind { background: #a0e7ff; }
+.sw.drop-wind { background: #d59bff; }
+.sw.current-force { background: #3d8bff; }
+@media (max-width: 760px) {
+  .map-panel { font-size: 11px; }
+  #layer-info { bottom: 110px; }
+}

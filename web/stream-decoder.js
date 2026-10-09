@@ -158,6 +158,7 @@
         tick: message.t,
         generation: message.gen,
         time_scale: message.clk,
+        epoch_s: message.ep ?? null,
         estimation: message.ctl,
         config: st.config,
         target,

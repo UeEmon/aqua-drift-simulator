@@ -122,6 +122,7 @@ class WireEncoder:
             "t": data["tick"],
             "gen": data["generation"],
             "clk": data["time_scale"],
+            "ep": data["epoch_s"],
             "ctl": data["estimation"],
             "target": data["target"],
             "obs": [

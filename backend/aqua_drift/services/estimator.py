@@ -49,7 +49,9 @@ async def run() -> None:
                 engine.process(batch)
                 last_tick = batch.tick
             output = engine.output()
-            posted = await post(client, "/internal/estimate", output.model_dump(mode="json"))
+            posted = await post(
+                client, "/internal/estimate", output.model_dump(mode="json"), feed.generation, run_id=control.run_id
+            )
             posted.raise_for_status()
             if last_tick % 60 == 0:
                 log.info(
