@@ -166,6 +166,9 @@ class WireEncoder:
         # the layer (設標者) moves every second: its state travels in every message, apart from
         # the deployment status (tasks, history), which is sent only when it changed
         layer = data["deployment"].pop("layer", None)
+        if layer is not None:  # the guidance' own path bookkeeping is not shown
+            for key in ("approach_key", "path_sides", "path_lengths_m"):
+                layer.pop(key, None)
         message["lay"] = layer
         for name, key in (
             ("cfg", "config"),

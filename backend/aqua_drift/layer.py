@@ -519,7 +519,31 @@ def planned_path(state: LayerState, config: LayerConfig, points: list[Position],
         if len(path) >= PATH_MAX_POINTS:
             break
         probe = probe.model_copy(update={"position": _shift(point, -we * total, -wn * total), "task_id": -1 - k})
-    return path
+    return _thin(path)
+
+
+PATH_THIN_M = 10.0  # a path point within this of the line through its neighbours is left out
+
+
+def _thin(path: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """The path without the points of its straight parts (each within PATH_THIN_M of the line
+    from the last point kept to the next one): the same line, sent every second in fewer points."""
+    if len(path) < 3:
+        return path
+    lat0 = math.radians(path[0][0])
+
+    def xy(p: tuple[float, float]) -> tuple[float, float]:
+        return p[1] * 111320.0 * math.cos(lat0), p[0] * 110540.0
+
+    kept = [path[0]]
+    for k in range(1, len(path) - 1):
+        (ax, ay), (bx, by), (cx, cy) = xy(kept[-1]), xy(path[k]), xy(path[k + 1])
+        span = math.hypot(cx - ax, cy - ay)
+        off = abs((cx - ax) * (by - ay) - (cy - ay) * (bx - ax)) / span if span > 0 else math.hypot(bx - ax, by - ay)
+        if off > PATH_THIN_M:
+            kept.append(path[k])
+    kept.append(path[-1])
+    return kept
 
 
 def _climb(state: LayerState, config: LayerConfig, wanted_ft: float, dt: float = 1.0) -> LayerState:
