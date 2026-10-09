@@ -226,7 +226,8 @@ class LayerConfig(BaseModel):
     cruise_altitude_ft: float = Field(default=3000.0, ge=100, le=WIND_TOP_FT)
     drop_altitude_ft: float = Field(default=1000.0, ge=100, le=WIND_TOP_FT)
     climb_rate_fpm: float = Field(default=2000.0, gt=0, le=20000)
-    # release the observer upwind by the drift of the estimated mean wind (from the last drop)
+    # release the observer upwind by the drift of the estimated mean wind (from the last drop;
+    # before the first estimate: the wind at the layer's current altitude)
     wind_correction: bool = True
 
 
@@ -699,6 +700,12 @@ class LayerState(BaseModel):
     track_deg: float | None = None
     wind_direction_deg: float | None = None  # from
     wind_speed_kt: float | None = None
+    # wind the release points are corrected with (投下修正の風) and where it comes from:
+    # "estimate" (mean wind from the last drop) | "flight_altitude" (no estimate yet: the wind at
+    # the current altitude) | "none" (correction off or no wind)
+    correction_source: str = "none"
+    correction_wind_direction_deg: float | None = None  # from
+    correction_wind_speed_kt: float | None = None
 
 
 class DropRelease(BaseModel):

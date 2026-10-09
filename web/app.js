@@ -773,6 +773,7 @@ function updateLayer(deployment) {
     ["速力・針路", `${fmt(layer.speed_kt, 0)} kt・${fmt(layer.heading_deg, 0)}°`],
     ["対地速力・航跡", layer.ground_speed_kt != null ? `${fmt(layer.ground_speed_kt, 0)} kt・${fmt(layer.track_deg, 0)}°` : "--"],
     ["飛行高度の風", layer.wind_speed_kt != null ? `${fmt(layer.wind_direction_deg, 0)}°・${fmt(layer.wind_speed_kt, 1)} kt` : "--"],
+    ["投下修正の風", correctionWind(layer, (status.wind_estimates || []).slice(-1)[0], lay.wind_correction !== false).text],
     ["バンク", `${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）`],
     ["基準旋回", `${lay.preferred_turn === "right" ? "右" : "左"}旋回（反対旋回は ${fmt(lay.turn_margin_s ?? 10, 0)} 秒以上早い場合）`],
     ["実施中", layer.task_id != null ? `#${layer.task_id}・到着 ${layer.eta_s != null ? `${clockAt((layer.tick || 0) + layer.eta_s)}（あと ${fmt(layer.eta_s, 0)} s）` : "--"}` : "なし"],
@@ -917,6 +918,25 @@ const WIND_ARROW_S = 60; // wind arrows: distance the air moves in 1 min
 const CURRENT_ARROW_S = 1200; // current arrows: distance the water moves in 20 min
 const turnName = (bank) => (Math.abs(bank) < 0.5 ? "直進" : bank < 0 ? "左旋回" : "右旋回");
 const dirSpeedText = (dirFrom, speed, digits = 1) => `${pad3(dirFrom)}°・${fmt(speed, digits)} kt`;
+// the wind the release points are corrected with (投下修正の風) and where it comes from
+// (LayerState.correction_source): the mean wind estimated from the last drop, else the wind at
+// the layer's current altitude, else none (correction off or no wind)
+const CORRECTION_SOURCE_NAMES = { estimate: "推定風", flight_altitude: "現在高度の風", none: "なし" };
+function correctionWind(layer, windEstimate, correction) {
+  const source = layer?.correction_source || "none";
+  const name = CORRECTION_SOURCE_NAMES[source] || source;
+  if (source === "none" || layer?.correction_wind_speed_kt == null) {
+    return { source: "none", name: CORRECTION_SOURCE_NAMES.none, arrow: null,
+      text: `【なし】${correction ? "" : "修正オフ・"}無風で投下点を計算` };
+  }
+  const dir = layer.correction_wind_direction_deg, speed = layer.correction_wind_speed_kt;
+  const rad = (dir + 180) * Math.PI / 180;
+  const detail = source === "estimate" && windEstimate
+    ? `#${windEstimate.task_id}・${fmt(windEstimate.altitude_ft, 0)} ft〜海面・${clockAt(windEstimate.tick)}`
+    : `推定なし・${fmt(layer.altitude_ft, 0)} ft`;
+  return { source, name, arrow: { east: speed * Math.sin(rad), north: speed * Math.cos(rad) },
+    short: `【${name}】${dirSpeedText(dir, speed)}`, text: `【${name}】${dirSpeedText(dir, speed)}（${detail}）` };
+}
 function pad3(deg) {
   return deg == null || !Number.isFinite(Number(deg)) ? "---" : String(Math.round(((Number(deg) % 360) + 360) % 360) % 360).padStart(3, "0");
 }
@@ -993,8 +1013,9 @@ function updateForces(snapshot, estimate) {
       ? { east: layer.wind_speed_kt * Math.sin(flightRad), north: layer.wind_speed_kt * Math.cos(flightRad) } : null;
     setArrow("flightWind", COLORS.flightWind, fw ? where : null, fw?.east || 0, fw?.north || 0, WIND_ARROW_S,
       fw ? `飛行高度の風 ${dirSpeedText(layer.wind_direction_deg, layer.wind_speed_kt)}` : "");
-    setArrow("dropWind", COLORS.dropWind, windEstimate ? where : null, windEstimate?.east_kt || 0, windEstimate?.north_kt || 0, WIND_ARROW_S,
-      windEstimate ? `投下修正の風 ${dirSpeedText(windEstimate.direction_deg, windEstimate.speed_kt)}${correction ? "" : "（修正オフ）"}` : "");
+    const dw = layerOn ? correctionWind(layer, windEstimate, correction) : null;
+    setArrow("dropWind", COLORS.dropWind, dw?.arrow ? where : null, dw?.arrow?.east || 0, dw?.arrow?.north || 0, WIND_ARROW_S,
+      dw?.arrow ? `投下修正の風 ${dw.short}` : "");
     const refPos = current?.reference_position;
     const atRef = current ? currentAt(current, refPos) : null;
     setArrow("currentRef", COLORS.current, current ? refPos : null, atRef?.east || 0, atRef?.north || 0, CURRENT_ARROW_S,
@@ -1044,9 +1065,7 @@ function updateForces(snapshot, estimate) {
     rows.push(`<tr class="head"><th colspan="2">風・外力</th></tr>`);
     row(`<i class="sw flight-wind"></i>飛行高度の風`, layerOn && layer.wind_speed_kt != null
       ? `${dirSpeedText(layer.wind_direction_deg, layer.wind_speed_kt)}（${fmt(layer.altitude_ft, 0)} ft）` : "--");
-    row(`<i class="sw drop-wind"></i>投下修正の風`, windEstimate
-      ? `${dirSpeedText(windEstimate.direction_deg, windEstimate.speed_kt)}（#${windEstimate.task_id}・${fmt(windEstimate.altitude_ft, 0)} ft〜海面・${clockAt(windEstimate.tick)}）${correction ? "" : " 修正オフ"}`
-      : "推定なし（無風で投下点を計算）");
+    row(`<i class="sw drop-wind"></i>投下修正の風`, layerOn ? correctionWind(layer, windEstimate, correction).text : "--");
     const base = current ? currentAt(current, current.reference_position) : null;
     row(`<i class="sw current-force"></i>外力（潮流）`, base
       ? `流向 ${dirSpeedText(towards(base.east, base.north), Math.hypot(base.east, base.north), 2)}（観測者 ${current.observer_count}・${fmt(current.window_seconds / 60, 0)} 分、残差 ${fmt(current.residual_kt, 2)} kt）`
@@ -1111,11 +1130,12 @@ function updateWind(deployment) {
   const latest = estimates[0];
   const falling = deployment?.falling || 0;
   const correction = state.latestConfig?.layer?.wind_correction !== false;
+  const applied = deployment?.layer ? correctionWind(deployment.layer, latest, correction) : null;
   $("wind-status").textContent = (latest
     ? `最新の推定（#${latest.task_id}、${fmt(latest.altitude_ft, 0)} ft〜海面）：${fmt(latest.direction_deg, 0)}°・${fmt(latest.speed_kt, 1)} kt`
       + `（真値 ${fmt(latest.true_direction_deg, 0)}°・${fmt(latest.true_speed_kt, 1)} kt）`
-      + `　次の投下点を${correction ? "この平均風で修正" : "修正しない設定"}`
-    : "まだ着水した観測者がありません（最初の投下は無風の自由落下で投下点を計算）")
+    : "まだ着水した観測者がありません（推定風がない間は現在高度の風で投下点を修正）")
+    + `　投下修正の風 ${applied ? applied.text : "--"}`
     + (falling ? `　落下中 ${falling}` : "");
   const rows = estimates.map((w) => `<tr><td>${w.task_id}<br /><small>${clockAt(w.tick)}</small></td>`
     + `<td>${fmt(w.altitude_ft, 0)} ft<br /><small>落下 ${fmt(w.fall_time_s, 1)} s</small></td>`

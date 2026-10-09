@@ -15,6 +15,7 @@ from aqua_drift.models import (
     Position,
     ScenarioConfig,
     WindConfig,
+    WindEstimate,
     WindLevel,
 )
 from aqua_drift.physics import local_offset_m
@@ -128,20 +129,54 @@ def test_layer_flies_in_three_dimensions_in_the_wind_at_its_altitude() -> None:
 
 def test_release_point_is_corrected_with_the_estimated_mean_wind() -> None:
     config = LayerConfig(cruise_altitude_ft=10000.0, drop_altitude_ft=10000.0)
-    # first drop: no estimate yet, released for the no-wind free fall -> carried off by the wind
-    drop, miss = _single_drop(config, None)
+    # correction off: released for the no-wind free fall -> carried off by the wind
+    off = config.model_copy(update={"wind_correction": False})
+    drop, miss = _single_drop(off, None)
     assert drop.altitude_ft == pytest.approx(10000.0) and 80.0 < drop.fall_time_s < 130.0
     profile = windlib.WindProfile(WindConfig())
     estimate = windlib.wind_estimate(drop, profile)
     assert miss > 700.0 and estimate.offset_yd * 0.9144 == pytest.approx(miss, rel=0.15)
     assert abs(estimate.direction_deg - estimate.true_direction_deg) < 3.0
     assert estimate.speed_kt == pytest.approx(estimate.true_speed_kt, rel=0.1)
+    # first drop (no estimate yet): corrected with the wind at the current altitude, closer than
+    # uncorrected but not as close as with the mean wind (the wind at 10,000 ft is stronger
+    # than its mean down to the sea surface)
+    _, first = _single_drop(config, None)
     # next drop: released upwind by the drift of the estimated mean wind
     _, corrected = _single_drop(config, estimate)
     assert corrected < 0.3 * miss
-    # correction off: as without an estimate
-    _, uncorrected = _single_drop(config.model_copy(update={"wind_correction": False}), estimate)
+    assert corrected < first < 0.7 * miss
+    # correction off: as without any correction
+    _, uncorrected = _single_drop(off, estimate)
     assert uncorrected > 0.8 * miss
+
+
+@pytest.mark.parametrize(("correction", "estimated", "source"), [
+    (True, True, "estimate"), (True, False, "flight_altitude"), (False, True, "none"), (False, False, "none")])
+def test_layer_reports_the_correction_wind_and_its_source(correction: bool, estimated: bool,
+                                                          source: str) -> None:
+    config = LayerConfig(cruise_altitude_ft=10000.0, drop_altitude_ft=10000.0, wind_correction=correction)
+    rng = random.Random(4)
+    state = initial_state(config, DATUM, 0, rng)
+    estimate = WindEstimate(
+        task_id=1, tick=0, altitude_ft=10000.0, fall_time_s=100.0, release_position=DATUM,
+        no_wind_position=DATUM, splash_position=DATUM, offset_yd=0.0, east_kt=15.0, north_kt=-5.0,
+        direction_deg=0.0, speed_kt=0.0) if estimated else None
+    feed = LayerFeed(tick=1, config=config, tasks=[], datum=DATUM, wind=WindConfig(), wind_estimate=estimate)
+    state, _ = advance(feed, state, rng)
+    assert state.correction_source == source
+    if source == "estimate":  # the estimated mean wind (from the last drop)
+        direction, speed = windlib.wind_from(15.0, -5.0)
+    elif source == "flight_altitude":  # no estimate: the wind at the layer's current altitude
+        direction, speed = state.wind_direction_deg, state.wind_speed_kt
+    if source == "none":
+        assert state.correction_wind_direction_deg is None and state.correction_wind_speed_kt is None
+    else:
+        assert state.correction_wind_direction_deg == pytest.approx(direction)
+        assert state.correction_wind_speed_kt == pytest.approx(speed)
+    # without wind the release is not corrected
+    still, _ = advance(feed.model_copy(update={"tick": 2, "wind": None}), state, rng)
+    assert still.correction_source == "none"
 
 
 @pytest.mark.asyncio
@@ -171,9 +206,11 @@ async def test_observer_enters_the_water_after_the_fall_and_the_next_drop_is_cor
     first, second = status.wind_estimates
     tasks = {t.task_id: t for t in status.tasks}
     assert tasks[first.task_id].miss_yd == first.miss_yd and tasks[first.task_id].splash_tick == first.tick
-    # the first drop is carried off by the wind; the second is released for the estimated mean wind
-    assert first.miss_yd > 700.0
-    assert second.miss_yd < 0.4 * first.miss_yd
+    # the first drop is corrected with the wind at the flight altitude (stronger than its mean down
+    # to the sea surface: over-corrected); the second with the estimated mean wind
+    # (offset_yd: the drift by the wind, what an uncorrected drop would miss by)
+    assert first.offset_yd > 900.0 and 300.0 < first.miss_yd < 0.7 * first.offset_yd
+    assert second.miss_yd < 0.5 * second.offset_yd
     assert tasks[second.task_id].done_tick >= first.tick  # released after the first was in the water
     # the layer is handed the latest estimate for the next release
     assert (await sim.layer_feed()).wind_estimate == second
