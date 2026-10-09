@@ -79,3 +79,26 @@ def test_schedule_follows_the_system_time() -> None:
     restarted = Schedule()
     restarted.anchor(25, 1.0, 525.4, epoch_s=500.0)  # clock restart while still on system time
     assert restarted.due(26) == 526.0
+
+
+def test_late_ticks_are_caught_up_only_at_real_time_speed() -> None:
+    from aqua_drift.services.clock import MAX_LAG_S, Schedule, next_due
+
+    schedule = Schedule()
+    assert next_due(schedule, 0, 1.0, 100.0, None) == 101.0
+    # 1x, 5 s late (slow containers): tick 11 stays due at 111 -> caught up to the system time
+    assert next_due(schedule, 10, 1.0, 116.0, None) == 111.0
+    # 1x, more than MAX_LAG_S late (host suspended): continue from now instead of a burst
+    late = 111.0 + MAX_LAG_S + 5
+    assert next_due(schedule, 10, 1.0, late, None) == late
+    # 10x: the simulation time is not the system time, so a late tick is never caught up and
+    # the clock never runs faster than the set speed
+    fast = Schedule()
+    assert next_due(fast, 0, 10.0, 200.0, None) == 200.1
+    assert next_due(fast, 1, 10.0, 200.2, None) == 200.2  # on time within one interval
+    assert next_due(fast, 2, 10.0, 205.0, None) == 205.0  # 5 s stall: no backlog of 48 ticks
+    assert abs(next_due(fast, 3, 10.0, 205.0, None) - 205.1) < 1e-9
+    # 0.5x the same
+    slow = Schedule()
+    assert next_due(slow, 0, 0.5, 300.0, None) == 302.0
+    assert next_due(slow, 1, 0.5, 310.0, None) == 310.0
