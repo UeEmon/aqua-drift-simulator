@@ -18,7 +18,7 @@ import json
 import math
 import os
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 
@@ -183,9 +183,9 @@ def main() -> None:
                 handle.write(json.dumps(result) + "\n")
 
     if args.jobs > 1 and todo:
-        with ProcessPoolExecutor(args.jobs) as pool:
-            for result in pool.map(run_one, *zip(*todo)):
-                keep(result)
+        with ProcessPoolExecutor(args.jobs) as pool:  # each run is saved as soon as it ends
+            for future in as_completed([pool.submit(run_one, *job) for job in todo]):
+                keep(future.result())
     else:
         for job in todo:
             keep(run_one(*job))
