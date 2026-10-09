@@ -609,19 +609,28 @@ function clearBearings() {
 // ================================================================== forward deployment
 function updateDeployment(deployment) {
   const status = deployment || { history: [], standby_count: 0, pending_placements: 0 };
-  const key = `${status.history.length}-${status.last_deploy_tick}-${checked("show-drops")}-${exaggeration()}`;
+  // a planned point is shown until its observer is in the water: with the layer while its drop
+  // task is open (proposed / approved; laid, replaced, cancelled... -> hidden), without the layer
+  // (no task ids) only the latest plan while its observers are still being started
+  const openIds = new Set((status.tasks || []).filter((t) => t.status === "PROPOSED" || t.status === "APPROVED").map((t) => t.task_id));
+  const latest = status.history[status.history.length - 1];
+  const planned = (record) => (record.task_ids?.length
+    ? record.positions.filter((_, k) => openIds.has(record.task_ids[k]))
+    : record === latest && status.pending_placements > 0 ? record.positions : []);
+  const key = `${status.history.length}-${status.last_deploy_tick}-${[...openIds].join(",")}-${status.pending_placements}-${checked("show-drops")}-${exaggeration()}`;
   if (key !== state.dropKey) {
     state.dropKey = key;
     gpu.drops.removeAll();
     gpu.dropLabels.removeAll();
     if (checked("show-drops")) {
       for (const record of status.history) {
-        for (const position of record.positions) {
+        const positions = planned(record);
+        for (const position of positions) {
           gpu.drops.add({ position: cartOf(position), pixelSize: 9, color: COLORS.drop.withAlpha(0.25), outlineColor: COLORS.drop, outlineWidth: 2 });
         }
-        if (record.positions.length) {
+        if (positions.length) {
           gpu.dropLabels.add({
-            position: cartOf(record.positions[0]),
+            position: cartOf(positions[0]),
             text: `前程 ${clockAt(record.tick)}`,
             font: "11px sans-serif",
             fillColor: COLORS.drop,
@@ -644,7 +653,7 @@ function updateDeployment(deployment) {
 }
 
 // ================================================================== layer (設標者) and drop tasks
-const TASK_STATUS = { PROPOSED: "了承待ち", APPROVED: "設標に向かう", DONE: "投入済み", REJECTED: "却下", EXPIRED: "失効" };
+const TASK_STATUS = { PROPOSED: "了承待ち", APPROVED: "設標に向かう", DONE: "投入済み", REJECTED: "却下", EXPIRED: "失効", CANCELLED: "取消", REPLACED: "再計画で置換" };
 
 function circlePositions(center, radiusM, n = 72) {
   const out = [];

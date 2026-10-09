@@ -170,6 +170,8 @@ class WireEncoder:
             for key in ("approach_key", "path_sides", "path_lengths_m"):
                 layer.pop(key, None)
         message["lay"] = layer
+        for task in data["deployment"].get("tasks", []):  # the replanner's bookkeeping is not shown
+            task.pop("basis", None)
         for name, key in (
             ("cfg", "config"),
             ("cpa", "cpa"),
