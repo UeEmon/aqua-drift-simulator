@@ -164,7 +164,7 @@ button.secondary { width: 100%; color: #d7eaff; background: #203b54; }
 button.danger { color: #fff; background: #c2453d; }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 
-.tabs { display: flex; gap: 2px; border-bottom: 1px solid #2c4963; margin-bottom: 4px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid #2c4963; margin-bottom: 4px; }
 .tab {
   flex: 1;
   padding: 8px 4px;
@@ -320,7 +320,7 @@ table.kv td:first-child { color: #9cc0e2; }
 #drop-table input.time { width: 70px; padding: 2px 4px; font-size: 12px; }
 #wind-table input { width: 100%; min-width: 0; padding: 2px 4px; font-size: 12px; box-sizing: border-box; }
 #wind-table td { padding: 2px 4px; }
-.tab { min-width: 0; white-space: nowrap; }
+.tab { flex: 1 1 auto; white-space: nowrap; } /* narrow panel: wrap to a second row instead of overlapping */
 
 /* map panels: layer (設標者) state at the bottom left, winds and external force below the camera readout */
 .map-panel {

@@ -631,7 +631,7 @@ function updateDeployment(deployment) {
       }
     }
   }
-  if (!tabVisible("tab-display")) return;
+  if (!tabVisible("tab-deploy")) return;
   const enabled = state.latestConfig?.forward?.enabled;
   const starting = status.pending_placements > 0 ? "（観測者コンテナを起動中）" : "";
   setHtml($("deploy-status"), `自動前程配置 <b>${enabled ? "有効" : "無効"}</b>　投入待ち ${status.pending_placements}${starting}　` +
@@ -749,7 +749,7 @@ function updateLayer(deployment) {
   $("drop-alert").hidden = proposed.length === 0;
   setText("drop-alert-count", proposed.length);
   if (!state.dropApprovalPending && $("drop-approval").value !== (status.approval || "auto")) $("drop-approval").value = status.approval || "auto";
-  if (!tabVisible("tab-layer")) return;
+  if (!tabVisible("tab-deploy")) return;
   const lay = state.latestConfig?.layer || {};
   const enabled = lay.enabled !== false;
   const paused = Boolean(lay.paused);
@@ -1097,7 +1097,7 @@ $("wind-apply").addEventListener("click", () => {
 });
 
 function updateWind(deployment) {
-  if (!tabVisible("tab-wind")) return;
+  if (!tabVisible("tab-environment")) return;
   const estimates = (deployment?.wind_estimates || []).slice().reverse();
   const latest = estimates[0];
   const falling = deployment?.falling || 0;
@@ -2354,16 +2354,26 @@ $("config-form").addEventListener("submit", (event) => {
     next.bearing.enabled = checked("bearing-enabled");
     next.bearing.sigma_deg = num("bearing-sigma");
     next.bearing.interval_s = num("bearing-interval");
-    next.current_field.base_velocity.east_kt = num("cur-e");
-    next.current_field.base_velocity.north_kt = num("cur-n");
-    next.current_field.gradient_per_nm[0][0] = num("g00");
-    next.current_field.gradient_per_nm[1][1] = num("g11");
     next.estimator.use_bearing = checked("use-bearing");
     next.estimator.bearing_sigma_deg = num("est-bearing-sigma");
     next.estimator.assumed_bias_sigma_hz = num("bias-sigma");
     next.presence_probability_pct = num("probability");
     next.smoothing_window_seconds = num("smoothing-window");
     next.estimator.particle_count = num("particles");
+    next.lloyd.level_noise_db = num("lloyd-noise");
+    next.lloyd.noise_correlation_s = num("lloyd-corr");
+    next.lloyd.wave_height_rms_m = num("lloyd-wave");
+    next.lloyd.path_difference_error_pct = num("lloyd-path-error");
+    next.estimator.lloyd_model_error_pct = num("est-lloyd-model-error");
+    next.estimator.lloyd_fit_interval_s = num("est-lloyd-interval");
+  })
+    .then(() => setMessage("観測・推定条件を反映しました。"))
+    .catch((error) => setMessage(`設定エラー: ${error.message}`));
+});
+
+$("forward-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  putConfig((next) => {
     next.forward.enabled = checked("fwd-enabled");
     next.forward.lead_time_s = num("fwd-lead");
     next.forward.min_coverage = num("fwd-min");
@@ -2381,14 +2391,20 @@ $("config-form").addEventListener("submit", (event) => {
     next.forward.min_relative_gain = num("fwd-min-gain") / 100;
     next.forward.maneuver_weight = num("fwd-maneuver") / 100;
     next.forward.use_detection_gate = $("fwd-gate").checked;
-    next.lloyd.level_noise_db = num("lloyd-noise");
-    next.lloyd.noise_correlation_s = num("lloyd-corr");
-    next.lloyd.wave_height_rms_m = num("lloyd-wave");
-    next.lloyd.path_difference_error_pct = num("lloyd-path-error");
-    next.estimator.lloyd_model_error_pct = num("est-lloyd-model-error");
-    next.estimator.lloyd_fit_interval_s = num("est-lloyd-interval");
   })
-    .then(() => setMessage("観測・推定条件を反映しました。"))
+    .then(() => setMessage("前程配置の設定を反映しました。"))
+    .catch((error) => setMessage(`設定エラー: ${error.message}`));
+});
+
+$("current-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  putConfig((next) => {
+    next.current_field.base_velocity.east_kt = num("cur-e");
+    next.current_field.base_velocity.north_kt = num("cur-n");
+    next.current_field.gradient_per_nm[0][0] = num("g00");
+    next.current_field.gradient_per_nm[1][1] = num("g11");
+  })
+    .then(() => setMessage("潮流を反映しました。"))
     .catch((error) => setMessage(`設定エラー: ${error.message}`));
 });
 

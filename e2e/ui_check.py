@@ -418,7 +418,7 @@ def main() -> int:
             if ids[:4] != ["obs-01", "obs-02", "obs-03", "obs-04"]:
                 fail(f"initial observers should be obs-01..obs-04, got {ids}")
             # the layer (設標者) has its own control tab; left turn is the standard
-            page.evaluate("() => document.querySelector(\".tab[data-tab='tab-layer']\").click()")
+            page.evaluate("() => document.querySelector(\".tab[data-tab='tab-deploy']\").click()")
             if page.evaluate("() => document.getElementById('layer-turn').value") != "left":
                 fail("layer standard turn should be left")
             try:
@@ -489,7 +489,7 @@ def main() -> int:
             page.screenshot(path=str(out / "07a-layer-tab.png"))
             # wind (風): the observer falls freely through the wind profile; once it is in the
             # water the mean wind from the drop altitude to the sea surface is estimated
-            page.evaluate("() => document.querySelector(\".tab[data-tab='tab-wind']\").click()")
+            page.evaluate("() => document.querySelector(\".tab[data-tab='tab-environment']\").click()")
             rows = page.evaluate("() => document.querySelectorAll('#wind-table tbody tr').length")
             if rows != 31:
                 fail(f"wind table should have 31 levels (0..30,000 ft), got {rows}")
@@ -509,7 +509,7 @@ def main() -> int:
             page.screenshot(path=str(out / "07b-wind-tab.png"))
             page.evaluate("""() => { const el = document.getElementById('drop-approval');
                 el.value = 'auto'; el.dispatchEvent(new Event('change')); }""")
-            page.evaluate("() => document.querySelector(\".tab[data-tab='tab-display']\").click()")
+            page.evaluate("() => document.querySelector(\".tab[data-tab='tab-deploy']\").click()")
             page.wait_for_timeout(1500)
             snap = page.evaluate("() => window.aquaDrift.state.latestSnapshot")
             ids = sorted(r["state"]["observer_id"] for r in snap["observers"])
