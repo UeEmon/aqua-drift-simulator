@@ -127,12 +127,12 @@ const gpu = {
   points: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
   labels: scene.primitives.add(new Cesium.LabelCollection()),
   regionLabels: scene.primitives.add(new Cesium.LabelCollection()),
-  drops: scene.primitives.add(new Cesium.BillboardCollection()), // planned drop points (△)
+  drops: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
   voxelPoints: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
   dropLabels: scene.primitives.add(new Cesium.LabelCollection()),
   layerLines: scene.primitives.add(new Cesium.PolylineCollection()),
   taskPoints: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
-  taskMarks: scene.primitives.add(new Cesium.BillboardCollection()), // open drop tasks' points (△)
+  taskMarks: scene.primitives.add(new Cesium.BillboardCollection()), // release points (投下点, △)
   taskLabels: scene.primitives.add(new Cesium.LabelCollection()),
   releaseLines: scene.primitives.add(new Cesium.PolylineCollection()), // release point -> drop / entry point
   vectors: scene.primitives.add(new Cesium.PolylineCollection()), // wind and external-force arrows
@@ -142,7 +142,7 @@ const gpu = {
   voxels: { current: null, pending: null },
 };
 
-// triangle (△) marker image for planned drop points (投下予定地点): outlined, lightly filled
+// triangle (△) marker image for the release points (投下点, where the layer drops): outlined, lightly filled
 const triangleImages = new Map();
 function triangleImage(color, fillAlpha, size = 16, lineWidth = 2) {
   const key = `${color.toCssColorString()}|${fillAlpha}|${size}|${lineWidth}`;
@@ -907,11 +907,8 @@ function updateDeployment(deployment) {
     if (checked("show-drops")) {
       for (const record of status.history) {
         const positions = planned(record);
-        // with the layer the open drop tasks draw these points (△, yellow while awaiting approval)
-        if (!record.task_ids?.length) {
-          for (const position of positions) {
-            gpu.drops.add({ position: cartOf(position), image: triangleImage(COLORS.drop, 0.25, 15) });
-          }
+        for (const position of positions) {
+          gpu.drops.add({ position: cartOf(position), pixelSize: 9, color: COLORS.drop.withAlpha(0.25), outlineColor: COLORS.drop, outlineWidth: 2 });
         }
         if (positions.length) {
           gpu.dropLabels.add({
@@ -1031,7 +1028,7 @@ function updateLayer(deployment) {
     const surface = (p) => Cesium.Cartesian3.fromDegrees(p.longitude, p.latitude, 0);
     for (const t of open.filter((x) => x.release_position)) {
       // corrected release point (投下点) and its predicted fall to the drop point
-      gpu.taskPoints.add({ position: surface(t.release_position), pixelSize: 6, color: COLORS.layer, outlineColor: COLORS.drop, outlineWidth: 1 });
+      gpu.taskMarks.add({ position: surface(t.release_position), image: triangleImage(COLORS.layer, 0.35, 14) });
       gpu.releaseLines.add({ width: 1, material: dashMaterial(COLORS.drop.withAlpha(0.8), 6), positions: [surface(t.release_position), surface(t.position)] });
     }
     for (const t of released) {
@@ -1042,9 +1039,10 @@ function updateLayer(deployment) {
     for (const [index, t] of open.entries()) {
       const proposed = t.status === "PROPOSED";
       const color = proposed ? COLORS.proposed : t.cancel_suggestion ? COLORS.cancel : COLORS.drop;
-      gpu.taskMarks.add({ position: cartOf(t.position), image: triangleImage(color, proposed ? 0.15 : 0.6) });
+      gpu.taskPoints.add({ position: cartOf(t.position), pixelSize: 10, color: color.withAlpha(proposed ? 0.15 : 0.6), outlineColor: color, outlineWidth: 2 });
+      // the label goes with the release point (投下点, △) once it is computed, else the drop point
       gpu.taskLabels.add({
-        position: cartOf(t.position),
+        position: t.release_position ? surface(t.release_position) : cartOf(t.position),
         text: `${open.length > 1 ? `${index + 1}番目 ` : ""}${proposed ? "提案 " : ""}#${t.task_id}（${Math.round(t.position.depth_ft)} Ft）`
           + (t.planned_tick != null ? `計画 ${clockAt(t.planned_tick)}` : "すぐ") + (proposed ? " 了承待ち" : "")
           + (t.cancel_suggestion ? " 中止を提案" : ""),
@@ -2691,6 +2689,7 @@ function populateForms(config) {
     $("fwd-min-gain").value = Math.round((f.min_relative_gain || 0) * 100);
     $("fwd-maneuver").value = Math.round((f.maneuver_weight ?? 0.4) * 100);
     $("fwd-gate").checked = f.use_detection_gate ?? true;
+    $("fwd-line").checked = f.line_laying ?? true;
   }
   $("use-bearing").checked = config.estimator.use_bearing;
   $("propagation-delay").checked = config.source.propagation_delay;
@@ -2827,6 +2826,7 @@ $("forward-form").addEventListener("submit", (event) => {
     next.forward.min_relative_gain = num("fwd-min-gain") / 100;
     next.forward.maneuver_weight = num("fwd-maneuver") / 100;
     next.forward.use_detection_gate = $("fwd-gate").checked;
+    next.forward.line_laying = $("fwd-line").checked;
   })
     .then(() => setMessage("前程配置の設定を反映しました。"))
     .catch((error) => setMessage(`設定エラー: ${error.message}`));
