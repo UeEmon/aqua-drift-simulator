@@ -264,6 +264,9 @@ class ForwardDeploymentConfig(BaseModel):
     depth_weight: float = Field(default=1.0, ge=0, le=10)  # depth error weight in the criterion
     optimal_max_sigma_fraction: float = Field(default=0.15, gt=0)  # placement needs a converged track
     schedule_drops: bool = True  # plan the optimal drop time (else: as soon as possible)
+    # detection range shorter than the layer's turn radius: the observers of one plan on one line
+    # along the track, laid in one straight pass (aqua_drift.optimal_deployment)
+    line_laying: bool = True
     drop_lead_s: int = Field(default=60, ge=0, le=1800)  # in the water this long before detection starts
     # maneuver-robust planning (optimal strategy): weighted course / speed / depth change
     # hypotheses, process noise in the information recursion, risk (CVaR) and coverage terms

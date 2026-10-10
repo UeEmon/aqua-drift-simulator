@@ -164,11 +164,10 @@ def plan_cost_yd(estimate: TrackEstimate, observers: list[Position], pending: li
                  config: ForwardDeploymentConfig, max_slant_range_yd: float, sensor: SensorModel,
                  max_depth_ft: float) -> float | None:
     """optimal_deployment's cost (predicted error, YD) of a field without adding to it."""
-    probe = config.model_copy(update={"max_per_drop": 1, "trigger_gain": 1.0})
     _, _, report = plan_optimal_deployment(
-        estimate, observers, pending, probe, max_slant_range_yd, 1,
+        estimate, observers, pending, config, max_slant_range_yd, 1,
         sensor.source_frequency_hz, sensor.sound_speed_mps, sensor.frequency_sigma_hz,
-        sensor=sensor, max_depth_ft=max_depth_ft,
+        sensor=sensor, max_depth_ft=max_depth_ft, cost_only=True,
     )
     return None if report is None else report.cost_before_yd
 
