@@ -115,7 +115,7 @@ class ScenarioRun:
         engine = self.engine
         datum = self.config.target.initial_position
         if engine.pf.initialized and engine.frame is not None:  # estimate only (no truth)
-            datum = engine.frame.to_geo(*engine.pf.mean_state()[0:3])
+            datum = engine.frame.to_geo(*engine.representative_state()[0:3])
         base = engine.current_fit.base
         approved = [t for t in self.tasks if t.status == "APPROVED"]
         feed = LayerFeed(

@@ -86,6 +86,7 @@
 | 6.1 | 一定距離以内のみ観測（斜距離基準） | ✅ | `doppler_observation`：3次元斜距離 ≤ R_max で探知 | `test_out_of_range_is_explicit_non_detection` |
 | 6.2 | 上限斜距離は変数、全観測者で共通 | ✅ | `max_slant_range_yd`（GIS / API） | `test_health_and_configuration_round_trip` |
 | 6.3 | 範囲内は欠測なし | ✅ | 範囲内は毎秒必ず観測。範囲外は明示的な非探知を送信し、推定器はこれを情報として使用 | — |
+| 6.4 | 失探知（全観測者が非探知）時の対応 | ✅ | `TrackingEngine._update_contact`：非探知 10 秒以上で `COASTING_*`、1σ 長軸 ≥ 0.5 R_max または非探知 900 秒以上で `LOST`（保持）、再探知後は探知が 60 秒続き 1σ < 0.15 R_max になるまで `REACQUIRED`。コースト中は機動粒子の割合を 10 %→30 % に上げ、出力位置（設標者の旋回中心）は雲の最も濃い部分。LOST・REACQUIRED の間は前程配備・再計画を行わない。探索敷設は保留（`/mnt/project-files/designs/lost-contact-response.md` §5） | `test_lost_contact.py` |
 
 ## 7. 音源・ドップラー・最近接
 
