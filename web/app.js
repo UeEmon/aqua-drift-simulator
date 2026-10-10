@@ -114,6 +114,7 @@ const COLORS = {
   drop: Cesium.Color.fromCssColorString("#ff9f43"),
   layer: Cesium.Color.fromCssColorString("#e9e4ff"),
   proposed: Cesium.Color.fromCssColorString("#ffd479"),
+  cancel: Cesium.Color.fromCssColorString("#ff6b5e"), // drops the replanner proposes to cancel
   error: Cesium.Color.WHITE,
   flightWind: Cesium.Color.fromCssColorString("#a0e7ff"), // wind at the layer's flight altitude
   dropWind: Cesium.Color.fromCssColorString("#d59bff"), // mean wind used to correct the release points
@@ -160,7 +161,10 @@ const state = {
   generation: null,
   history: [],
   trueCpa: new Map(),
+  cancelKept: new Set(), // cancel proposals the operator chose to keep flying (継続)
 };
+// a cancel proposal is identified by its task and when it was made, so a later re-proposal shows again
+const cancelKey = (t) => `${t.task_id}:${t.cancel_suggested_tick ?? ""}`;
 
 // ================================================================== helpers
 function exaggeration() {
@@ -743,7 +747,7 @@ function updateLayer(deployment) {
     }
     for (const [index, t] of open.entries()) {
       const proposed = t.status === "PROPOSED";
-      const color = proposed ? COLORS.proposed : COLORS.drop;
+      const color = proposed ? COLORS.proposed : t.cancel_suggestion ? COLORS.cancel : COLORS.drop;
       gpu.taskPoints.add({ position: cartOf(t.position), pixelSize: 10, color: color.withAlpha(proposed ? 0.15 : 0.6), outlineColor: color, outlineWidth: 2 });
       gpu.taskLabels.add({
         position: cartOf(t.position),
@@ -759,10 +763,23 @@ function updateLayer(deployment) {
   $("drop-alert").hidden = proposed.length === 0;
   setText("drop-alert-count", proposed.length);
   // drops the replanner proposes to cancel (no longer help detection); the layer keeps flying them
-  const suggested = open.filter((t) => t.status === "APPROVED" && t.cancel_suggestion);
+  // shown on the map until cancelled or the operator chooses to keep it (継続)
+  const suggested = open.filter((t) => t.status === "APPROVED" && t.cancel_suggestion
+    && !state.cancelKept.has(cancelKey(t)));
   state.cancelSuggested = suggested.map((t) => t.task_id);
   $("drop-cancel-alert").hidden = suggested.length === 0;
   setText("drop-cancel-count", suggested.length);
+  const alertKey = suggested.map((t) => `${cancelKey(t)}:${t.planned_tick}:${t.cancel_suggestion}`).join("|");
+  if (alertKey !== state.cancelAlertKey) {
+    state.cancelAlertKey = alertKey;
+    state.cancelTasks = new Map(suggested.map((t) => [t.task_id, t]));
+    setHtml($("drop-cancel-list"), suggested.map((t) => `<li><span class="what">#${t.task_id}・`
+      + `${t.planned_tick != null ? `計画 ${clockAt(t.planned_tick)}` : "すぐ"}・${Math.round(t.position.depth_ft)} Ft</span>`
+      + `<span class="why">${escapeHtml(t.cancel_suggestion)}</span>`
+      + `<button type="button" class="mini" data-cancel-one="${t.task_id}">中止</button>`
+      + `<button type="button" class="mini ghost" data-cancel-keep="${t.task_id}" title="中止せずに設標を続ける（この提案を閉じる）">継続</button>`
+      + `<button type="button" class="mini ghost" data-cancel-focus="${t.task_id}">地図で表示</button></li>`).join(""));
+  }
   if (!state.dropApprovalPending && $("drop-approval").value !== (status.approval || "auto")) $("drop-approval").value = status.approval || "auto";
   if (!tabVisible("tab-deploy")) return;
   const lay = state.latestConfig?.layer || {};
@@ -878,6 +895,26 @@ $("drop-table").addEventListener("click", (event) => {
 $("drop-approve-all").addEventListener("click", () => decideDrops(null, true));
 $("drop-cancel-suggested").addEventListener("click", () => {
   if (state.cancelSuggested?.length) cancelDrops(state.cancelSuggested);
+});
+$("drop-cancel-list").addEventListener("click", (event) => {
+  const el = event.target.closest("[data-cancel-one], [data-cancel-keep], [data-cancel-focus]");
+  if (!el) return;
+  const id = Number(el.dataset.cancelOne ?? el.dataset.cancelKeep ?? el.dataset.cancelFocus);
+  const task = state.cancelTasks?.get(id);
+  if (el.dataset.cancelOne != null) cancelDrops([id]);
+  else if (el.dataset.cancelKeep != null && task) {
+    state.cancelKept.add(cancelKey(task));
+    state.cancelSuggested = state.cancelSuggested.filter((x) => x !== id);
+    el.closest("li")?.remove();
+    $("drop-cancel-alert").hidden = state.cancelSuggested.length === 0;
+    setText("drop-cancel-count", state.cancelSuggested.length);
+    setMessage(`設標 #${id} は中止せずに続けます。`);
+  } else if (task) {
+    viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+    viewer.camera.flyToBoundingSphere(new Cesium.BoundingSphere(cartOf(task.position), 2000), flightOptions({
+      offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-60), 9000), duration: 1.0,
+    }));
+  }
 });
 $("drop-approve-all-tab").addEventListener("click", () => decideDrops(null, true));
 $("drop-cancel-all").addEventListener("click", () => cancelDrops(null));
@@ -2641,4 +2678,4 @@ const stream = (() => {
   return { setExaggeration: (value) => guard(() => handleUpdate({ snapshot: null, tracks: decoder.setExaggeration(value) }, 0, 0)) };
 })();
 
-window.aquaDrift = { viewer, state, applyView, centerOn, cameraInfo, renderFaults, quality, telemetry, gpu, baseMap, setBaseMap, tracks, anim }; // diagnostics / E2E
+window.aquaDrift = { viewer, state, applyView, centerOn, cameraInfo, renderFaults, quality, telemetry, gpu, baseMap, setBaseMap, tracks, anim, updateLayer }; // diagnostics / E2E
