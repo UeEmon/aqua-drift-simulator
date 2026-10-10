@@ -56,6 +56,14 @@ position-uncertainty margin) comes within the detection range -- and never befor
 be there. A later drop keeps the observer's 3 h observing time and its slot for when they are
 useful.
 
+Line laying (detection range shorter than the layer's turn radius, `line_laying`): the layer cannot
+fly between observers a few hundred metres apart without a loop each, so a plan is one line along
+the track: candidates only on lines parallel to the track (up to 0.5 R_max to either side), the
+first pick fixes the line, the line is filled up to max_per_drop while each observer still helps
+(LINE_MIN_GAIN), the information counts from when the layer can be on the track for as long as one
+line can hold the target, and the whole line is due as soon as the layer can be there, laid in
+one pass along it. This also keeps the plan cheap (a few lines instead of a wide grid).
+
 Trigger: deploy when the predicted position after lead_time_s is not covered by enough
 observers, or when the predicted error exceeds target_error_yd and the best new observer would
 improve it by at least trigger_gain (the existing field will not track the target well ahead).
@@ -83,6 +91,11 @@ DEPTH_RATE = 2.0 * FT_TO_M
 MIN_DEPTH_M = 50.0 * FT_TO_M
 MIRROR_DOPPLER_SIGMA_HZ = 0.1  # model-error floor for the mirror discrimination (one per step)
 MIN_SEPARATION = 0.3  # x R_max between new observers
+LINE_ACROSS = 0.5  # line laying: candidate lines along the track up to this x R_max to either side
+# line laying: one pass (a loop of the layer, ~4 min) is the scarce resource, so the line is
+# filled up to max_per_drop while each observer still helps this much
+LINE_MIN_GAIN = 0.02
+CHUNK = 256  # candidates evaluated at once (bounds the memory of a plan)
 
 
 def _erfc(x: np.ndarray) -> np.ndarray:
@@ -344,6 +357,10 @@ class LayerAvailability:
     now_heading_deg: float | None = None
     queue: list[tuple[Position, float | None]] = field(default_factory=list)
 
+    def turn_radius_m(self) -> float:
+        v = self.speed_kt * KNOT_TO_MPS
+        return v * v / (9.80665 * math.tan(math.radians(self.max_bank_deg)))
+
     def earliest_s(self, origin: Position, points: np.ndarray) -> np.ndarray:
         """Earliest drop time (s from now) at each point (water-frame metres from origin):
         free time + straight flight + the turn towards the point at the bank limit (a full
@@ -411,8 +428,10 @@ def plan_optimal_deployment(
     layer: LayerAvailability | None = None,
     sensor: SensorModel | None = None,
     max_depth_ft: float = 1500.0,
+    cost_only: bool = False,
 ) -> tuple[list[Position], str, PlanReport | None]:
-    """Plan positions, number and depths (and, in report.drop_times_s, the optimal drop times)."""
+    """Plan positions, number and depths (and, in report.drop_times_s, the optimal drop times).
+    cost_only: only the cost of the field as it is (report.cost_before_yd), no candidates."""
     sensor = sensor or SensorModel()
     sensor.source_frequency_hz = source_frequency_hz
     sensor.sound_speed_mps = sound_speed_mps
@@ -442,23 +461,6 @@ def plan_optimal_deployment(
     pos = np.array([h.pos[::every] for h in hyps])  # (H,K,3)
     vel = np.array([h.vel[::every] for h in hyps])
 
-    # candidate grid in the track frame, wide enough for the turn hypotheses, x depths
-    ux, uy = math.sin(heading), math.cos(heading)
-    travel = speed * horizon
-    along = np.arange(0.25 * r_max, max(travel, 0.5 * r_max) + 1e-9, 0.25 * r_max)
-    half = max(0.75 * r_max, 0.6 * travel) if config.maneuver_weight > 0 else 0.75 * r_max
-    across = np.arange(-half, half + 1e-9, 0.25 * r_max)
-    depths = np.array(sorted(set(config.depth_options_ft))) * FT_TO_M
-    spots = np.array([[ux * a + uy * x, uy * a - ux * x] for a in along for x in across])
-    fine = np.concatenate([h.pos[:, 0:2] for h in hyps])
-    near = np.array([np.min(np.linalg.norm(fine - s, axis=1)) for s in spots]) <= r_max
-    spots = spots[near]
-    grid = np.array([[s[0], s[1], z] for s in spots for z in depths]).reshape(-1, 3)
-    if not len(grid):
-        return [], "optimal: no candidate within detection range of the predicted track", None
-
-    # an observer only measures once it is in the water: from the layer's earliest arrival
-    earliest = layer.earliest_s(origin, grid) if layer is not None else np.zeros(len(grid))
     F, Q = _process(config)
     prior = _prior(estimate)
     if len(existing):
@@ -467,12 +469,6 @@ def plan_optimal_deployment(
     else:
         base_meas = np.zeros((len(hyps), len(steps), 7, 7))
         base_count = np.zeros((len(hyps), len(steps)))
-    cand_meas, cand_det = _measurement_info(grid, pos, vel, steps, earliest, sensor, r_max)
-    useful = cand_det.any(axis=(0, 2))
-    grid, earliest = grid[useful], earliest[useful]
-    cand_meas, cand_det = cand_meas[:, useful], cand_det[:, useful]
-    if not len(grid):
-        return [], "optimal: the layer cannot lay an observer before the target passes", None
     loss_m2 = (config.coverage_loss_yd * YD_TO_M) ** 2
 
     def evaluate_cost(meas: np.ndarray, count: np.ndarray) -> tuple[np.ndarray, ...]:
@@ -485,6 +481,66 @@ def plan_optimal_deployment(
                 np.tensordot(weights, loss, axes=(0, 0)))
 
     central = 0  # the "track" hypothesis
+
+    def field_mirror() -> float:
+        if len(existing) < 2:
+            return 0.0
+        return float(_mirror_cost(existing[None], np.zeros((1, len(existing))), pos[central], vel[central],
+                                  steps, evaluate, sensor, r_max)[0])
+
+    if cost_only:  # the cost of the field as it is (no candidates)
+        cost, h0, d0, loss0 = (float(x) for x in evaluate_cost(base_meas, base_count))
+        cost += field_mirror()
+        return [], "optimal: cost of the field", PlanReport(
+            count=0, depths_ft=[], cost_before_yd=math.sqrt(cost) / YD_TO_M, cost_after_yd=math.sqrt(cost) / YD_TO_M,
+            first_gain=0.0, candidates=0, horizontal_before_yd=math.sqrt(h0) / YD_TO_M,
+            horizontal_after_yd=math.sqrt(h0) / YD_TO_M, depth_before_ft=math.sqrt(d0) / FT_TO_M,
+            depth_after_ft=math.sqrt(d0) / FT_TO_M, coverage_loss_before=loss0, coverage_loss_after=loss0,
+            hypotheses=len(hyps))
+
+    # candidate grid in the track frame, wide enough for the turn hypotheses, x depths. Line laying
+    # (detection range shorter than the layer's turn radius): only on lines along the track, so the
+    # observers of one plan can be laid in one straight pass
+    ux, uy = math.sin(heading), math.cos(heading)
+    travel = speed * horizon
+    lines = (layer is not None and config.line_laying and speed > 0
+             and r_max < layer.turn_radius_m())
+    along = np.arange(0.25 * r_max, max(travel, 0.5 * r_max) + 1e-9, 0.25 * r_max)
+    if lines:
+        across = np.arange(-LINE_ACROSS, LINE_ACROSS + 1e-9, 0.25) * r_max
+    else:
+        half = max(0.75 * r_max, 0.6 * travel) if config.maneuver_weight > 0 else 0.75 * r_max
+        across = np.arange(-half, half + 1e-9, 0.25 * r_max)
+    depths = np.array(sorted(set(config.depth_options_ft))) * FT_TO_M
+    spots = np.array([[ux * a + uy * x, uy * a - ux * x, i] for a in along for i, x in enumerate(across)])
+    fine = np.concatenate([h.pos[:, 0:2] for h in hyps])
+    near = np.array([np.min(np.linalg.norm(fine - s[0:2], axis=1)) for s in spots]) <= r_max
+    spots = spots[near]
+    grid = np.array([[s[0], s[1], z] for s in spots for z in depths]).reshape(-1, 3)
+    lane = np.array([s[2] for s in spots for _ in depths], dtype=int)
+    if not len(grid):
+        return [], "optimal: no candidate within detection range of the predicted track", None
+
+    # an observer only measures once it is in the water: from the layer's earliest arrival
+    earliest = layer.earliest_s(origin, grid) if layer is not None else np.zeros(len(grid))
+    if lines:
+        # the information counts from when the layer can be on the track (not only after the lead
+        # time: a short-range field must be laid close ahead, where the estimate is still good) and
+        # for as long as one line of `limit` observers can hold the target (the next plan lays the
+        # next line), so the line is laid contiguous and not spread over the whole horizon
+        t0 = min(max(float(np.min(earliest)), 0.0), float(steps[-1]))
+        evaluate = (steps >= t0) & (steps <= t0 + max((limit + 1) * r_max / speed, STEP_S))
+    parts = [_measurement_info(grid[part], pos, vel, steps, earliest[part], sensor, r_max)
+             for part in np.array_split(np.arange(len(grid)), math.ceil(len(grid) / CHUNK))]
+    cand_meas = np.concatenate([p[0] for p in parts], axis=1)
+    cand_det = np.concatenate([p[1] for p in parts], axis=1)
+    del parts
+    useful = cand_det.any(axis=(0, 2))
+    grid, earliest, lane = grid[useful], earliest[useful], lane[useful]
+    cand_meas, cand_det = cand_meas[:, useful], cand_det[:, useful]
+    if not len(grid):
+        return [], "optimal: the layer cannot lay an observer before the target passes", None
+
     detecting_existing = existing  # _mirror_cost keeps the observers that detect the track
 
     def mirror(chosen_idx: list[int], extra: np.ndarray | None) -> np.ndarray:
@@ -503,7 +559,7 @@ def plan_optimal_deployment(
 
     current_meas, current_count = base_meas, base_count
     cost_before, h0, d0, loss0 = (float(x) for x in evaluate_cost(base_meas, base_count))
-    mirror_now = float(mirror([], None)[0])
+    mirror_now = field_mirror()
     cost_before += mirror_now
     cost_now = cost_before
     h1, d1, loss1 = h0, d0, loss0
@@ -519,8 +575,9 @@ def plan_optimal_deployment(
         idx = np.flatnonzero(available)
         if not len(idx):
             break
-        trial, th, td, tl = evaluate_cost(
-            current_meas[:, None] + cand_meas[:, idx], current_count[:, None] + cand_det[:, idx])
+        trial, th, td, tl = (np.concatenate(part) for part in zip(*(
+            evaluate_cost(current_meas[:, None] + cand_meas[:, part], current_count[:, None] + cand_det[:, part])
+            for part in np.array_split(idx, math.ceil(len(idx) / CHUNK))), strict=True))
         trial = trial + mirror(chosen, idx)
         pick = int(np.argmin(trial))
         best = int(idx[pick])
@@ -529,7 +586,7 @@ def plan_optimal_deployment(
             first_gain = gain
             if not (force or coverage_short) and gain < config.trigger_gain:
                 break
-        elif gain < config.min_relative_gain:
+        elif gain < (LINE_MIN_GAIN if lines else config.min_relative_gain):
             break
         chosen.append(best)
         current_meas = current_meas + cand_meas[:, best]
@@ -538,6 +595,8 @@ def plan_optimal_deployment(
         h1, d1, loss1 = float(th[pick]), float(td[pick]), float(tl[pick])
         # new observers keep apart (no stacking at one spot)
         available &= np.linalg.norm(grid[:, 0:2] - grid[best, 0:2], axis=1) >= MIN_SEPARATION * r_max
+        if lines:  # one line per plan: laid in one straight pass
+            available &= lane == lane[best]
 
     report = PlanReport(
         horizontal_before_yd=math.sqrt(h0) / YD_TO_M, horizontal_after_yd=math.sqrt(h1) / YD_TO_M,
@@ -563,7 +622,12 @@ def plan_optimal_deployment(
             f"optimal: best new observer would improve the predicted error by only "
             f"{first_gain * 100:.0f} % (< {config.trigger_gain * 100:.0f} %)"
         ), report
-    if config.schedule_drops:
+    if lines:
+        # the whole line as soon as the layer can be there, in one pass: the observers drift with the
+        # target's water, so an early one waits where it is, and the layer is free sooner for the next
+        # line (at a short range a pass, not the observers, limits how far ahead the field reaches)
+        times = np.full(len(chosen), float(np.min(earliest[chosen])))
+    elif config.schedule_drops:
         times = drop_times(
             grid[chosen], earliest[chosen], [h.pos for h in hyps], r_max, float(config.drop_lead_s),
             estimate.uncertainty.horizontal_major_yd * YD_TO_M, speed,
@@ -580,6 +644,10 @@ def plan_optimal_deployment(
         heading = layer.now_heading_deg if queued else layer.heading_deg
         start_e, start_n, _ = local_offset_m(origin, start)
         prefix = None
+        line_orders = None
+        if lines:  # along the line, either way (no loop between its observers)
+            ahead = sorted(range(len(chosen)), key=lambda k: ux * grid[chosen[k], 0] + uy * grid[chosen[k], 1])
+            line_orders = [ahead, ahead[::-1]]
         if queued:
             offsets = [local_offset_m(start, p) for p, _ in layer.queue]
             prefix = ([o[0] for o in offsets], [o[1] for o in offsets], [s for _, s in layer.queue])
@@ -587,6 +655,7 @@ def plan_optimal_deployment(
             [float(grid[i, 0]) - start_e for i in chosen], [float(grid[i, 1]) - start_n for i in chosen],
             None if heading is None else math.radians(heading), layer.speed_kt,
             layer.max_bank_deg, [float(t) for t in times], start_s=0.0 if queued else layer.ready_s, prefix=prefix,
+            orders=line_orders,
         )
         chosen = [chosen[k] for k in order]
         report.depths_ft = [report.depths_ft[k] for k in order]

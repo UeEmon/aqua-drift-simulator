@@ -2314,6 +2314,7 @@ function populateForms(config) {
     $("fwd-min-gain").value = Math.round((f.min_relative_gain || 0) * 100);
     $("fwd-maneuver").value = Math.round((f.maneuver_weight ?? 0.4) * 100);
     $("fwd-gate").checked = f.use_detection_gate ?? true;
+    $("fwd-line").checked = f.line_laying ?? true;
   }
   $("use-bearing").checked = config.estimator.use_bearing;
   $("propagation-delay").checked = config.source.propagation_delay;
@@ -2450,6 +2451,7 @@ $("forward-form").addEventListener("submit", (event) => {
     next.forward.min_relative_gain = num("fwd-min-gain") / 100;
     next.forward.maneuver_weight = num("fwd-maneuver") / 100;
     next.forward.use_detection_gate = $("fwd-gate").checked;
+    next.forward.line_laying = $("fwd-line").checked;
   })
     .then(() => setMessage("前程配置の設定を反映しました。"))
     .catch((error) => setMessage(`設定エラー: ${error.message}`));

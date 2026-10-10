@@ -319,19 +319,22 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
 
 def schedule(east: list[float], north: list[float], heading: float | None, speed_kt: float, bank_deg: float,
              wanted_s: list[float], start_s: float = 0.0,
-             prefix: tuple[list[float], list[float], list[float | None]] | None = None) -> tuple[list[int], list[float]]:
+             prefix: tuple[list[float], list[float], list[float | None]] | None = None,
+             orders: list[list[int]] | None = None) -> tuple[list[int], list[float]]:
     """Order and drop times for the drops of one plan: wanted_s are the optimal drop times
     (s from now; the layer is free at start_s at the origin on `heading`, None: unknown).
 
     Every order is tried (up to ORDER_LIMIT drops, else by wanted time): the one with the least
     total delay after the wanted times, then the earliest end. A drop is at its wanted time, or
     when the layer can be there after the previous drop (route along the order), whichever is
-    later. Returns (order: indices into the inputs, drop times in that order)."""
+    later. `orders`: only these orders (e.g. along a line, either way). Returns (order: indices into
+    the inputs, drop times in that order)."""
     n = len(east)
     if n == 0:
         return [], []
     by_time = sorted(range(n), key=lambda i: wanted_s[i])
-    orders = itertools.permutations(range(n)) if n <= ORDER_LIMIT else [by_time]
+    if orders is None:
+        orders = itertools.permutations(range(n)) if n <= ORDER_LIMIT else [by_time]
     best = None
     for order in orders:
         # unknown heading: the layer is assumed to be on its way towards the first point

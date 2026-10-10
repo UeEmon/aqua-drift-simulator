@@ -360,6 +360,7 @@
               <label title="最適方式：追加1本でこの割合以上改善しなければ追加しない">追加の最小改善 (%)<input id="fwd-min-gain" type="number" min="0" max="100" step="1" required /></label>
               <label title="最適方式：変針・変速・深度変化の仮説の重み（0 で推定航跡の直進のみ）">機動の重み (%)<input id="fwd-maneuver" type="number" min="0" max="90" step="5" required /></label>
               <label class="check" title="最適方式：探知の開始・終了（斜距離＝上限斜距離）の距離情報も評価する"><input id="fwd-gate" type="checkbox" />探知境界を評価</label>
+              <label class="check" title="最適方式：探知距離が設標者の旋回半径より短いとき、1 回の計画を航跡に沿った 1 本の線にし、1 回の直線飛行で敷く"><input id="fwd-line" type="checkbox" />短距離は直線敷設</label>
               <label>先行時間 (秒)<input id="fwd-lead" type="number" min="30" max="7200" step="30" required /></label>
               <label>最小カバー観測者数<input id="fwd-min" type="number" min="1" max="10" step="1" required /></label>
               <label>前方距離 (YD)<input id="fwd-ahead" type="number" min="100" step="100" required /></label>
