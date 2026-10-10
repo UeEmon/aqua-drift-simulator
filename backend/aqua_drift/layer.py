@@ -399,12 +399,14 @@ def _intercept_s(east: float, north: float, drift_e: float, drift_n: float, v: f
     return (b + math.sqrt(max(b * b - 4.0 * a * c, 0.0))) / (-2.0 * a)
 
 
-def _lead(origin: Position, point: Position, drift_e: float, drift_n: float, v: float) -> Position:
-    """Where a point moving at (drift_e, drift_n) m/s is met (air-mass frame interception)."""
+def _lead(origin: Position, point: Position, drift_e: float, drift_n: float, v: float,
+          flight_s: float | None = None) -> Position:
+    """Where a point moving at (drift_e, drift_n) m/s is met (air-mass frame interception):
+    flying straight at v, or after flight_s s (on the way: the time left along the path)."""
     if not drift_e and not drift_n:
         return point
     east, north, _ = local_offset_m(origin, point)
-    t = _intercept_s(east, north, drift_e, drift_n, v)
+    t = _intercept_s(east, north, drift_e, drift_n, v) if flight_s is None else flight_s
     return _shift(point, drift_e * t, drift_n * t)
 
 
@@ -669,8 +671,12 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
                                        state.approach_deg if state.task_id == task.task_id else None)
             point = air(aim)
             if profile is not None:  # in the air mass a ground point moves with current - wind
+                # on the way: met at the arrival along the path flown (the straight-line time
+                # would move the point as the path bends, and the path would never close on it)
+                on_way = (state.task_id == task.task_id and state.mode == "TRANSIT" and state.eta_s is not None
+                          and math.isfinite(state.eta_s))
                 point = _lead(state.position, point, current[0] - wind[0], current[1] - wind[1],
-                              max(state.speed_kt, 1.0) * KNOT_TO_MPS)
+                              max(state.speed_kt, 1.0) * KNOT_TO_MPS, max(state.eta_s - 1.0, 0.0) if on_way else None)
             timed = task.planned_tick is not None
             left = task.planned_tick - tick if timed else 0
             committed = state.task_id == task.task_id and state.mode == "TRANSIT"

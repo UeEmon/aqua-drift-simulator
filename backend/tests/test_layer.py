@@ -479,3 +479,25 @@ async def test_reorder_of_drops_as_soon_as_possible() -> None:
     await sim.queue_deployment(DeploymentRequest(tick=0, positions=[a], reason="plan"))
     assert (await sim.layer_feed()).tasks[-1].task_id > first.task_id
 
+
+
+@pytest.mark.asyncio
+async def test_layer_reaches_a_drop_point_drifting_in_the_wind() -> None:
+    """In the wind a drop point moves in the air mass; the layer meets it where it will be when
+    it arrives along the path flown. Led by the straight-line time instead, the point moved as
+    the path bent, the path end missed it and the guidance turned another loop again and again
+    (an operator placement between timed drops was never laid; e2e reuse_check)."""
+    sim = SimulationState(ScenarioConfig())
+    rng = random.Random(3)
+    points = [_offset(DATUM, 6000.0 * math.cos(a), 6000.0 * math.sin(a), 300.0) for a in (0.3, 1.5, 2.8, 4.4)]
+    state = await _layer_steps(sim, 5, rng)
+    await sim.queue_deployment(DeploymentRequest(tick=sim.tick, positions=points, reason="plan",
+                                                 planned_ticks=[259, 502, 521, 773]))
+    state = await _layer_steps(sim, 550, rng, state)
+    await sim.queue_placement(ObserverPlacement(position=points[3]))
+    for _ in range(400):
+        state = await _layer_steps(sim, 1, rng, state)
+        manual = [t for t in (await sim.snapshot()).deployment.tasks if t.source == "manual"]
+        if manual[0].status == "DONE":
+            break
+    assert manual[0].status == "DONE"
