@@ -774,8 +774,9 @@ function updateLayer(deployment) {
       const proposed = t.status === "PROPOSED";
       const color = proposed ? COLORS.proposed : t.cancel_suggestion ? COLORS.cancel : COLORS.drop;
       gpu.taskPoints.add({ position: cartOf(t.position), pixelSize: 10, color: color.withAlpha(proposed ? 0.15 : 0.6), outlineColor: color, outlineWidth: 2 });
+      // the label goes with the release point (投下点, △) once it is computed, else the drop point
       gpu.taskLabels.add({
-        position: cartOf(t.position),
+        position: t.release_position ? surface(t.release_position) : cartOf(t.position),
         text: `${open.length > 1 ? `${index + 1}番目 ` : ""}${proposed ? "提案 " : ""}#${t.task_id}（${Math.round(t.position.depth_ft)} Ft）`
           + (t.planned_tick != null ? `計画 ${clockAt(t.planned_tick)}` : "すぐ") + (proposed ? " 了承待ち" : "")
           + (t.cancel_suggestion ? " 中止を提案" : ""),
