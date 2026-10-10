@@ -194,6 +194,11 @@ class SimulationState:
                 position = placement.position
                 if placement.source == "manual":
                     self.explicit_ids.add(observer_id)
+                if placement.task_id is not None:
+                    task = next((t for t in self.tasks if t.task_id == placement.task_id), None)
+                    if task is not None:
+                        task.observer_id = observer_id
+                        task.observer_session = session
             elif self.assignment_counter < self.config.deployment.initial_count:
                 position = default_position(self.config, self.assignment_counter)
                 self.assignment_counter += 1
@@ -526,7 +531,9 @@ class SimulationState:
                 drop = update.releases.get(task_id)
                 if drop is None:  # no free fall: in the water at the drop point at once
                     task.position = position
-                    self.placements.append(ObserverPlacement(position=position, source=source))
+                    self.placements.append(
+                        ObserverPlacement(position=position, source=source, task_id=task_id)
+                    )
                 else:  # released: falls through the wind and is in the water at splash_tick
                     task.release_position = drop.release_position
                     task.release_altitude_ft = drop.altitude_ft
@@ -549,7 +556,9 @@ class SimulationState:
         by_id = {t.task_id: t for t in self.tasks}
         profile = WindProfile(self.config.wind)
         for drop, source in due:
-            self.placements.append(ObserverPlacement(position=drop.splash_position, source=source))
+            self.placements.append(
+                ObserverPlacement(position=drop.splash_position, source=source, task_id=drop.task_id)
+            )
             estimate = wind_estimate(drop, profile)
             self.wind_estimates.append(estimate)
             task = by_id.get(drop.task_id)
