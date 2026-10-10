@@ -7,7 +7,9 @@
   point and on through the following ones quickest (aqua_drift.route.route: lined up for the
   next drops instead of a loop after every drop); the last drop is flown to on any heading (turn,
   then straight; when the point is inside both turning circles it flies straight on first and
-  comes back). The observer is laid when the layer is within capture_radius_yd of the point.
+  comes back). The observer is laid when the layer is within capture_radius_yd of the point,
+  together with the other open drops at that point (within capture_radius_yd of it), up to
+  max_per_release observers in one release, so the layer does not pass over the point again.
 * Turns: left turn is the standard (circling counter-clockwise); a right turn is taken only when
   the route is clearly more efficient that way (shorter by more than turn_margin_s of flight).
 * ORBIT: without a task it circles the estimated target position (vector-field
@@ -706,13 +708,15 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
             # radius early)
             arrived = _passes(before, over_ground(state.position), aim, config.capture_radius_yd * YD_TO_M)
         if arrived and task is not None:  # dropped when it gets there, early or late
-            if profile is None:
-                completed[task.task_id] = positions[task.task_id]
-            else:
-                drop = _release(task.task_id, tick, before, over_ground(state.position), aim,
-                                state.altitude_ft, positions[task.task_id], profile, current)
-                releases[task.task_id] = drop
-                completed[task.task_id] = drop.splash_position
+            # with the open drops at the same point (one release, no second pass over it)
+            for released in release_group(task, open_tasks, positions, config):
+                if profile is None:
+                    completed[released.task_id] = positions[released.task_id]
+                else:
+                    drop = _release(released.task_id, tick, before, over_ground(state.position), aim,
+                                    state.altitude_ft, positions[released.task_id], profile, current)
+                    releases[released.task_id] = drop
+                    completed[released.task_id] = drop.splash_position
     state = state.model_copy(update={"position": over_ground(state.position)})
     state.tick = max(state.tick, feed.tick)
     open_ids = [t.task_id for t in tasks if t.task_id not in completed]
@@ -767,6 +771,24 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
         releases=releases,
         release_positions=release_positions,
     )
+
+
+def release_group(task, open_tasks: list, positions: dict[int, Position], config: LayerConfig) -> list:
+    """The drops released together with task (first): the open drops whose points lie within the
+    capture radius of its point, in flight order, up to max_per_release observers in all. They
+    are released at the same instant and fall alike, each to its own depth."""
+    radius = config.capture_radius_yd * YD_TO_M
+    point = positions[task.task_id]
+    group = [task]
+    for other in open_tasks:
+        if len(group) >= config.max_per_release:
+            break
+        if other.task_id == task.task_id:
+            continue
+        east, north, _ = local_offset_m(point, positions[other.task_id])
+        if math.hypot(east, north) <= radius:
+            group.append(other)
+    return group
 
 
 def _passes(before: Position, after: Position, point: Position, radius_m: float) -> bool:

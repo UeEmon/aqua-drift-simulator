@@ -46,7 +46,11 @@ the turn hypotheses), x the observer depth options, kept only where some hypothe
 within detection range. Greedy selection: add the candidate that lowers the cost most; stop
 when the predicted error reaches target_error_yd, when the next one would improve the cost by
 less than min_relative_gain, or at max_per_drop / the free observer slots. New observers keep
-0.3 R_max apart.
+0.3 R_max apart, except at one drop point: with the layer, a point already chosen may take other
+depths up to the observers one drop can release (LayerConfig.max_per_release), laid together in
+one pass. The greedy selection stacks only when another depth there helps most, so a drop
+releases several observers only when the plan needs them at that point, instead of the layer
+coming back to it.
 
 Drop time: an observer measures only once it is in the water, so each candidate's information
 counts from the earliest time the layer (設標者) can be there (its free time, flight distance and
@@ -351,6 +355,7 @@ class LayerAvailability:
     speed_kt: float
     max_bank_deg: float
     heading_deg: float | None = None  # its heading then (None: unknown -> an average half turn)
+    max_per_release: int = 1  # observers one drop can release at once (stacked at one point)
     # where it is now and its open drops in flight order (planned drop time s from now, None:
     # at once): a new plan is routed on after them
     now_position: Position | None = None
@@ -518,6 +523,7 @@ def plan_optimal_deployment(
     spots = spots[near]
     grid = np.array([[s[0], s[1], z] for s in spots for z in depths]).reshape(-1, 3)
     lane = np.array([s[2] for s in spots for _ in depths], dtype=int)
+    spot = np.repeat(np.arange(len(spots)), len(depths))  # the drop point of each candidate
     if not len(grid):
         return [], "optimal: no candidate within detection range of the predicted track", None
 
@@ -536,7 +542,7 @@ def plan_optimal_deployment(
     cand_det = np.concatenate([p[1] for p in parts], axis=1)
     del parts
     useful = cand_det.any(axis=(0, 2))
-    grid, earliest, lane = grid[useful], earliest[useful], lane[useful]
+    grid, earliest, lane, spot = grid[useful], earliest[useful], lane[useful], spot[useful]
     cand_meas, cand_det = cand_meas[:, useful], cand_det[:, useful]
     if not len(grid):
         return [], "optimal: the layer cannot lay an observer before the target passes", None
@@ -567,6 +573,7 @@ def plan_optimal_deployment(
     available = np.ones(len(grid), dtype=bool)
     first_gain = 0.0
     target = (config.target_error_yd * YD_TO_M) ** 2
+    stack = max(layer.max_per_release, 1) if layer is not None else 1  # observers per drop point
     for _ in range(limit):
         if chosen and cost_now <= target:
             break
@@ -593,8 +600,13 @@ def plan_optimal_deployment(
         current_count = current_count + cand_det[:, best]
         cost_now = float(trial[pick])
         h1, d1, loss1 = float(th[pick]), float(td[pick]), float(tl[pick])
-        # new observers keep apart (no stacking at one spot)
-        available &= np.linalg.norm(grid[:, 0:2] - grid[best, 0:2], axis=1) >= MIN_SEPARATION * r_max
+        # new observers keep apart, except other depths at this drop point while one drop can
+        # still release them there
+        same = spot == spot[best]
+        stacked = sum(1 for i in chosen if spot[i] == spot[best])
+        far = np.linalg.norm(grid[:, 0:2] - grid[best, 0:2], axis=1) >= MIN_SEPARATION * r_max
+        available &= far | (same & (stacked < stack))
+        available[best] = False
         if lines:  # one line per plan: laid in one straight pass
             available &= lane == lane[best]
 
@@ -634,6 +646,12 @@ def plan_optimal_deployment(
         )
     else:
         times = earliest[chosen]
+    # observers stacked at one drop point are released together (one pass): at the earliest of
+    # their times; the drop points are routed, each with its observers
+    groups = [[k for k, i in enumerate(chosen) if spot[i] == p] for p in dict.fromkeys(int(spot[i]) for i in chosen)]
+    heads = [chosen[g[0]] for g in groups]
+    group_times = [min(float(times[k]) for k in g) for g in groups]
+    order = list(range(len(groups)))
     if layer is not None:
         # the layer lays them one after the other: the order with the least delay and the times
         # it can keep along its route (each drop crossed lined up for the next one)
@@ -646,24 +664,29 @@ def plan_optimal_deployment(
         prefix = None
         line_orders = None
         if lines:  # along the line, either way (no loop between its observers)
-            ahead = sorted(range(len(chosen)), key=lambda k: ux * grid[chosen[k], 0] + uy * grid[chosen[k], 1])
+            ahead = sorted(range(len(heads)), key=lambda k: ux * grid[heads[k], 0] + uy * grid[heads[k], 1])
             line_orders = [ahead, ahead[::-1]]
         if queued:
             offsets = [local_offset_m(start, p) for p, _ in layer.queue]
             prefix = ([o[0] for o in offsets], [o[1] for o in offsets], [s for _, s in layer.queue])
-        order, times = routelib.schedule(
-            [float(grid[i, 0]) - start_e for i in chosen], [float(grid[i, 1]) - start_n for i in chosen],
+        order, group_times = routelib.schedule(
+            [float(grid[i, 0]) - start_e for i in heads], [float(grid[i, 1]) - start_n for i in heads],
             None if heading is None else math.radians(heading), layer.speed_kt,
-            layer.max_bank_deg, [float(t) for t in times], start_s=0.0 if queued else layer.ready_s, prefix=prefix,
+            layer.max_bank_deg, group_times, start_s=0.0 if queued else layer.ready_s, prefix=prefix,
             orders=line_orders,
         )
-        chosen = [chosen[k] for k in order]
-        report.depths_ft = [report.depths_ft[k] for k in order]
+    else:
+        group_times = [group_times[g] for g in order]
+    flat = [k for g in order for k in groups[g]]
+    times = [t for g, t in zip(order, group_times, strict=True) for _ in groups[g]]
+    chosen = [chosen[k] for k in flat]
+    report.depths_ft = [report.depths_ft[k] for k in flat]
     positions = [_offset(origin, float(grid[i, 0]), float(grid[i, 1]), float(grid[i, 2] / FT_TO_M)) for i in chosen]
     report.drop_times_s = [float(t) for t in times]
     why = "operator request" if force else ("coverage" if coverage_short else "information gain")
+    points_note = f" at {len(groups)} drop points" if len(groups) < len(chosen) else ""
     reason = (
-        f"optimal ({why}): {len(chosen)} observers, depths {report.depths_ft} Ft; predicted error "
+        f"optimal ({why}): {len(chosen)} observers{points_note}, depths {report.depths_ft} Ft; predicted error "
         f"{report.cost_before_yd:.0f} -> {report.cost_after_yd:.0f} YD (horizontal "
         f"{report.horizontal_before_yd:.0f} -> {report.horizontal_after_yd:.0f} YD, "
         f"depth {report.depth_before_ft:.0f} -> {report.depth_after_ft:.0f} Ft, "

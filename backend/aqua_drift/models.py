@@ -216,6 +216,11 @@ class LayerConfig(BaseModel):
     max_bank_deg: float = Field(default=15.0, gt=0, le=60)
     orbit_radius_yd: float = Field(default=5000.0, gt=0)  # raised to the turn radius if smaller
     capture_radius_yd: float = Field(default=150.0, gt=0)
+    # observers one drop (投下) can release at once: open drops whose points lie within
+    # capture_radius_yd of the point being dropped are released in the same pass, up to this many
+    # (a maximum, not a fixed count: the planner stacks observers at one point only when it needs
+    # them there, so the layer does not come back to the same point)
+    max_per_release: int = Field(default=4, ge=1, le=8)
     proposal_timeout_s: int = Field(default=600, ge=10, le=7200)  # unanswered proposals expire
     preferred_turn: str = Field(default="left", pattern="^(left|right)$")  # standard turn direction
     turn_margin_s: float = Field(default=10.0, ge=0, le=600)  # other side only if this much quicker
@@ -633,6 +638,7 @@ class DeploymentFeed(BaseModel):
     layer_queue_ticks: list[int | None] = Field(default_factory=list)
     layer_speed_kt: float = 200.0
     layer_max_bank_deg: float = 15.0
+    layer_max_per_release: int = 1  # observers one drop can release at once (LayerConfig.max_per_release)
     source_frequency_hz: float = 400.0  # operator's (recognized) source frequency
     sound_speed_mps: float = 1500.0
     frequency_sigma_hz: float = 0.03

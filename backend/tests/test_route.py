@@ -155,3 +155,34 @@ def test_layer_lays_a_line_of_close_drops_in_one_pass() -> None:
     assert done[4] - done[1] < 3 * 450.0 / (200.0 * 0.5144444444444445) + 10
     for task_id, time in zip((1, 2, 3, 4), predicted, strict=True):
         assert abs(done[task_id] - time) <= 10.0
+
+
+def _lay_with(points: list[Position], config: LayerConfig) -> dict[int, int]:
+    rng = random.Random(3)
+    state = initial_state(config, DATUM, 0, rng)
+    tasks = [DropTask(task_id=k + 1, created_tick=0, source="forward", position=p, status="APPROVED")
+             for k, p in enumerate(points)]
+    done: dict[int, int] = {}
+    for tick in range(1, 1500):
+        open_tasks = [t for t in tasks if t.task_id not in done]
+        if not open_tasks:
+            break
+        state, update = advance(LayerFeed(tick=tick, config=config, tasks=open_tasks, datum=DATUM), state, rng)
+        for task_id in update.completed:
+            done[task_id] = tick
+    return done
+
+
+def test_one_drop_releases_the_observers_at_one_point_up_to_the_maximum() -> None:
+    """Three observers at one drop point (different depths) and one elsewhere: one release lays
+    those at the point (no second pass over it), up to max_per_release; the others there wait for
+    another pass."""
+    stacked = [_offset(DATUM, 0.0, 12000.0, depth) for depth in (60.0, 500.0, 1500.0)]
+    other = _offset(DATUM, 9000.0, 20000.0, 300.0)
+    done = _lay_with([*stacked, other], LayerConfig())
+    assert set(done) == {1, 2, 3, 4}
+    assert done[1] == done[2] == done[3] < done[4]  # one release at the point
+    done = _lay_with(stacked, LayerConfig(max_per_release=2))
+    assert done[1] == done[2] < done[3]  # the third one needs another pass
+    done = _lay_with(stacked, LayerConfig(max_per_release=1))
+    assert len(set(done.values())) == 3

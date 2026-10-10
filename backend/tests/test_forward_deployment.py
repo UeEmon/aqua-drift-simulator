@@ -253,3 +253,45 @@ def test_cost_only_is_the_cost_before_of_a_full_plan() -> None:
     only = plan_optimal_deployment(estimate(), FIELD, [], config, 6000, 99, cost_only=True)[2]
     assert only.candidates == 0
     assert abs(only.cost_before_yd - full.cost_before_yd) < 1e-6
+
+
+# ------------------------------------------------------------- several observers in one drop
+def _points(positions: list[Position]) -> list[tuple[int, int]]:
+    return [tuple(round(v) for v in local_offset_m(ORIGIN, p)[0:2]) for p in positions]
+
+
+def test_observers_stack_at_one_drop_point_only_up_to_the_layers_release() -> None:
+    """With the layer releasing up to max_per_release observers in one drop, the planner may give a
+    drop point other depths when they help most there: the observers at one point are due together
+    and routed as one drop (one pass). It is a maximum: a drop point holds at most that many, and
+    with one observer per drop the observers keep apart as before."""
+    from aqua_drift.deployment import _offset
+    from aqua_drift.optimal_deployment import (
+        MIN_SEPARATION,
+        LayerAvailability,
+        plan_optimal_deployment,
+    )
+
+    behind = [offset(-3000, 2000), offset(-3000, -2000)]
+    config = ForwardDeploymentConfig(depth_weight=10.0, target_error_yd=1.0, min_relative_gain=0.0, max_per_drop=8)
+    plans = {}
+    for release in (1, 2, 4):
+        layer = LayerAvailability(ready_s=0.0, position=_offset(ORIGIN, 0.0, -5000.0, 0.0), speed_kt=200.0,
+                                  max_bank_deg=15.0, heading_deg=0.0, max_per_release=release)
+        positions, reason, report = plan_optimal_deployment(estimate(), behind, [], config, 6000, 99,
+                                                            coverage_short=True, layer=layer)
+        assert positions, reason
+        points = _points(positions)
+        for point in set(points):
+            at = [k for k, p in enumerate(points) if p == point]
+            assert len(at) <= release
+            assert at == list(range(at[0], at[0] + len(at)))  # one drop after the other: adjacent
+            assert len({report.drop_times_s[k] for k in at}) == 1  # released together
+            assert len({positions[k].depth_ft for k in at}) == len(at)  # each at its own depth
+        plans[release] = (points, reason)
+    points = plans[1][0]
+    assert len(set(points)) == len(points)
+    assert all(math.dist(a, b) >= MIN_SEPARATION * 6000 * 0.9144 - 1 for a in points for b in points if a != b)
+    stacked, reason = plans[4]
+    assert len(set(stacked)) < len(stacked), (stacked, reason)  # needed here: several in one drop
+    assert "drop points" in reason
