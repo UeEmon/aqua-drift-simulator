@@ -331,14 +331,15 @@ class EstimatorConfig(BaseModel):
     # lost contact (失探知): no observer detects. COASTING after lost_debounce_s without a
     # detection; LOST once the 1 sigma major reaches lost_sigma_fraction x R or no detection for
     # lost_timeout_s; after LOST, REACQUIRED until detections have lasted recover_hold_s and the
-    # 1 sigma major is below recover_sigma_fraction x R. While coasting a larger share of the
-    # particles maneuvers (a lost contact is often a maneuver), so the cloud stays honest.
+    # 1 sigma major is below recover_sigma_fraction x R. coast_maneuver_fraction replaces
+    # maneuver_fraction while coasting; it defaults to the same 10 %: 30 % made tracking worse
+    # at 500 YD once short-range laying was in place (lost-contact study, 2026-10-10).
     lost_debounce_s: int = Field(default=10, ge=1, le=600)
     lost_sigma_fraction: float = Field(default=0.5, gt=0)
     lost_timeout_s: int = Field(default=900, ge=10, le=36000)
     recover_hold_s: int = Field(default=60, ge=0, le=3600)
     recover_sigma_fraction: float = Field(default=0.15, gt=0)
-    coast_maneuver_fraction: float = Field(default=0.3, ge=0, le=0.9)
+    coast_maneuver_fraction: float = Field(default=0.1, ge=0, le=0.9)
     move_min_window_s: int = Field(default=60, ge=20, le=3600)
     move_mismatch_chi2: float = Field(default=4.0, gt=1)
     use_bearing: bool = True
