@@ -955,6 +955,22 @@ function circlePositions(center, radiusM, n = 72) {
 const flightOrder = (a, b) => (a.planned_tick ?? -1) - (b.planned_tick ?? -1)
   || (a.sequence || a.task_id) - (b.sequence || b.task_id) || a.task_id - b.task_id;
 
+// the planned path is streamed every few seconds while the layer moves every second: start it at
+// the layer, dropping the points already flown (searched only near the path's start, so a later
+// pass close to the layer's position is not mistaken for it)
+function pathFromLayer(path, position) {
+  if (path.length < 2 || !position) return path;
+  const k = Math.cos((position.latitude * Math.PI) / 180);
+  const d2 = ([lat, lon]) => ((lat - position.latitude) ** 2 + ((lon - position.longitude) * k) ** 2);
+  let best = 0;
+  let along = 0;
+  for (let i = 1; i < path.length && along < 0.02; i += 1) { // ~2 km of path
+    along += Math.sqrt((path[i][0] - path[i - 1][0]) ** 2 + ((path[i][1] - path[i - 1][1]) * k) ** 2);
+    if (d2(path[i]) < d2(path[best])) best = i;
+  }
+  return [[position.latitude, position.longitude], ...path.slice(best + 1)];
+}
+
 function updateLayer(deployment) {
   const status = deployment || {};
   const layer = status.layer;
@@ -980,7 +996,7 @@ function updateLayer(deployment) {
     // planned flight path (飛行予定経路, dashed): the turn-limited path the layer will fly through
     // the drop points, from the backend (straight legs from an older backend without it)
     const approved = open.filter((t) => t.status === "APPROVED");
-    const planned = layer.planned_path || [];
+    const planned = pathFromLayer(layer.planned_path || [], layer.position);
     const route = planned.length > 1
       ? planned.map(([lat, lon]) => Cesium.Cartesian3.fromDegrees(lon, lat, 0))
       : approved.length && !("planned_path" in layer)

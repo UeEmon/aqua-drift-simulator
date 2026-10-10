@@ -67,5 +67,10 @@ def test_layer_planned_path_sent_only_when_changed() -> None:
     assert "planned_path" not in first["lay"]
     second = encoder.encode(snapshot(2, path), 2.0)
     assert "lpp" not in second and second["lay"]["tick"] == 2  # the layer itself moves every message
-    third = encoder.encode(snapshot(3, path[1:]), 3.0)
-    assert len(third["lpp"]) == 149
+    assert second["lay"]["position"]["longitude"] == 140.0002  # floats rounded to 1e-6
+    # flying along the same plan: the path's start moves every second, resent every 5 s
+    assert "lpp" not in encoder.encode(snapshot(3, path[1:]), 3.0)
+    assert len(encoder.encode(snapshot(6, path[2:]), 6.0)["lpp"]) == 148
+    # where the path leads changed (a drop added): sent at once
+    assert len(encoder.encode(snapshot(7, path[2:] + [(35.5, 140.5)]), 7.0)["lpp"]) == 149
+    assert encoder.encode(snapshot(8, []), 8.0)["lpp"] == []
