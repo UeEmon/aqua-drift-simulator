@@ -328,6 +328,17 @@ class EstimatorConfig(BaseModel):
     maneuver_fraction: float = Field(default=0.1, ge=0, le=0.5)
     maneuver_accel_sigma_mps2: float = Field(default=0.12, ge=0)
     maneuver_vertical_sigma_mps: float = Field(default=0.15, ge=0)
+    # lost contact (失探知): no observer detects. COASTING after lost_debounce_s without a
+    # detection; LOST once the 1 sigma major reaches lost_sigma_fraction x R or no detection for
+    # lost_timeout_s; after LOST, REACQUIRED until detections have lasted recover_hold_s and the
+    # 1 sigma major is below recover_sigma_fraction x R. While coasting a larger share of the
+    # particles maneuvers (a lost contact is often a maneuver), so the cloud stays honest.
+    lost_debounce_s: int = Field(default=10, ge=1, le=600)
+    lost_sigma_fraction: float = Field(default=0.5, gt=0)
+    lost_timeout_s: int = Field(default=900, ge=10, le=36000)
+    recover_hold_s: int = Field(default=60, ge=0, le=3600)
+    recover_sigma_fraction: float = Field(default=0.15, gt=0)
+    coast_maneuver_fraction: float = Field(default=0.3, ge=0, le=0.9)
     move_min_window_s: int = Field(default=60, ge=20, le=3600)
     move_mismatch_chi2: float = Field(default=4.0, gt=1)
     use_bearing: bool = True
@@ -460,6 +471,7 @@ class ObserverPlacement(BaseModel):
     observer_id: str | None = None
     source: str = "manual"  # manual (operator) | forward (automatic 前程 deployment)
     planned_tick: int | None = None  # drop time requested by the operator (None = as soon as possible)
+    task_id: int | None = None  # the drop task (設標) that laid this observer, if any
 
 
 class ObserverAssignment(Position):
@@ -669,6 +681,10 @@ class DropTask(BaseModel):
     planned_position: Position | None = None  # the drop point when the observer entered the water
     splash_tick: int | None = None
     miss_yd: float | None = None  # entry point - drop point (horizontal)
+    # the observer container that took this drop's position ("<observer_id>#<session>" is
+    # archived when it stops observing)
+    observer_id: str | None = None
+    observer_session: int | None = None
 
     def flight_key(self) -> tuple[int, int, int]:
         """Order the layer flies the drops in: planned time (as soon as possible first), then

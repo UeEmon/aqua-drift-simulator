@@ -103,6 +103,9 @@ class TrackingEngine:
         self.tick = -1
         self.last_rows: list[ObservationRow] = []
         self.last_detect_tick: int | None = None
+        self.detect_since: int | None = None  # start of the current run of detections
+        self.lost = False  # latched lost contact (see _update_contact)
+        self.lost_count = 0
         self.nondetect_tick: dict[str, int] = {}
         self.online_track: list[TrackPoint] = []
         self.smoothed_track: dict[int, TrackPoint] = {}
@@ -278,6 +281,10 @@ class TrackingEngine:
         any_detection = any(row.detected for row in rows)
         if any_detection:
             self.last_detect_tick = batch.tick
+            if self.detect_since is None:
+                self.detect_since = batch.tick
+        else:
+            self.detect_since = None
 
         self.pf.record_epoch(batch.tick, rows, self.settings.estimator.move_window_s)
         if not self.pf.initialized:
@@ -289,6 +296,10 @@ class TrackingEngine:
                 if self.pf.initialize(batch.tick, rows, self.current_fit, previously_watching):
                     self.pf.update(rows, self.current_fit)
         else:
+            e = self.settings.estimator
+            self.pf.maneuver_fraction = (
+                e.coast_maneuver_fraction if self._coasting(batch.tick) else e.maneuver_fraction
+            )
             self.pf.predict(batch.tick - self.pf.tick, self.current_fit)
             self.pf.tick = batch.tick
             detections = sum(1 for row in rows if row.detected and row.frequency is not None)
@@ -321,9 +332,62 @@ class TrackingEngine:
                 self.nondetect_tick[row.observer_id] = batch.tick
         self.last_rows = rows
         self.tick = batch.tick
+        self._update_contact(batch.tick)
         if self.pf.initialized and batch.tick % self.pf.hist_stride == 0:
             self.online_track.append(self._track_point())
             self.online_track = _thin(self.online_track)
+
+    # ------------------------------------------------------------------ lost contact
+    def _coasting(self, tick: int) -> bool:
+        """No observer has detected for at least lost_debounce_s (a short gap at the edge of a
+        detection circle is not a lost contact)."""
+        return (self.last_detect_tick is None
+                or tick - self.last_detect_tick >= self.settings.estimator.lost_debounce_s)
+
+    def _horizontal_sigma(self) -> float:
+        w, pos = self.pf.w, self.pf.x[:, 0:2]
+        diff = pos - w @ pos
+        cov = (diff * w[:, None]).T @ diff
+        return math.sqrt(max(float(np.linalg.eigvalsh(cov)[-1]), 0.0))
+
+    def _update_contact(self, tick: int) -> None:
+        """Latch LOST when the coasted cloud is as wide as the detection range (or the contact
+        has been gone too long); release it once detections have lasted and the track has
+        converged again (REACQUIRED in between)."""
+        if not self.pf.initialized or self.last_detect_tick is None:
+            return
+        e = self.settings.estimator
+        r = self.pf.max_range
+        if not self.lost:
+            if self._coasting(tick) and (
+                self._horizontal_sigma() >= e.lost_sigma_fraction * r
+                or tick - self.last_detect_tick >= e.lost_timeout_s
+            ):
+                self.lost = True
+                self.lost_count += 1
+        elif (self.detect_since is not None and tick - self.detect_since >= e.recover_hold_s
+              and self._horizontal_sigma() < e.recover_sigma_fraction * r):
+            self.lost = False
+
+    def _densest(self, x: np.ndarray, w: np.ndarray) -> np.ndarray:
+        """Centre of the densest part of the cloud: while coasting, non-detection pushes the
+        particles out of every detection circle, so the mean of a ring-shaped cloud can lie
+        where the target is known not to be."""
+        radius = 0.25 * self.pf.max_range
+        sample = np.argsort(w)[-min(len(w), 300):]
+        d = np.linalg.norm(x[sample, None, 0:2] - x[None, :, 0:2], axis=2)
+        near = d <= radius
+        best = int(np.argmax(near @ w))
+        members = near[best]
+        return (w[members] @ x[members]) / max(float(w[members].sum()), 1e-12)
+
+    def representative_state(self) -> np.ndarray:
+        """The state reported as the target position (without the disconnected-region case,
+        which needs the presence region): the posterior mean, or the densest part of the cloud
+        while coasting. Used for the layer's datum as well."""
+        if self._coasting(self.tick):
+            return self._densest(self.pf.x, self.pf.w)
+        return self.pf.w @ self.pf.x
 
     # ------------------------------------------------------------------ maneuver timing
     TIMING_GATE_CHI2_PER_PAIR = 9.0
@@ -492,6 +556,10 @@ class TrackingEngine:
             "recompute_window_s": self.settings.smoothing_window_seconds,
             "history_stride_s": self.pf.hist_stride,
             "reinitializations": self.reinitializations,
+            "lost_contacts": self.lost_count,
+            "seconds_since_detection": (
+                None if self.last_detect_tick is None else max(self.tick - self.last_detect_tick, 0)
+            ),
             "maneuver_detected_tick": self.pf.maneuver_detected_tick,
             "maneuver_timing": self._timing_meta(),
         }
@@ -558,17 +626,22 @@ class TrackingEngine:
                 )
             )
         detecting = [item for item in relative if item.detected]
-        coasting = self.last_detect_tick is None or self.tick - self.last_detect_tick > 0
+        coasting = self._coasting(self.tick)
         if region.disconnected:
             status = "AMBIGUOUS"
         elif uncertainty.horizontal_major_yd < 0.25 * self.settings.max_slant_range_yd:
             status = "TRACKING"
         else:
             status = "LOW_CONFIDENCE"
-        if coasting:
+        if self.lost:
+            status = "LOST" if self.detect_since is None else "REACQUIRED"
+        elif coasting:
             status = f"COASTING_{status}"
         position_basis = "posterior mean"
         position_mean = mean
+        if coasting and not region.disconnected:
+            position_mean = self._densest(x, w)
+            position_basis = "densest part of the cloud (no detection)"
         if region.disconnected:
             labels = pf.clusters()
             masses = {lab: float(w[labels == lab].sum()) for lab in np.unique(labels)}
