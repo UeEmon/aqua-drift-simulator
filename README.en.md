@@ -100,7 +100,7 @@ GPU with WebGL2 is recommended; the GIS also runs on software WebGL (used in CI)
 
 | | Minimum (default, 12 observer containers) | Recommended |
 |---|---|---|
-| Server | Docker Engine 24+ / Compose v2.20+, x86-64, 4 cores, 3 GB RAM for Docker, 10 GB free | 4–8 cores, 4–8 GB, 20 GB SSD |
+| Server | Docker Engine 24+ / Compose v2.20+, x86-64 or arm64 (Apple Silicon), 4 cores, 3 GB RAM for Docker, 10 GB free | 4–8 cores, 4–8 GB, 20 GB SSD |
 | Browser | Chrome / Edge 98+, Firefox 94+, Safari 15.4+, WebGL 2, hardware acceleration on, 1280 px wide | Latest Chrome / Edge, recent GPU, 1600 px+ |
 
 Internet is needed only for the first build; the system runs offline. There is no

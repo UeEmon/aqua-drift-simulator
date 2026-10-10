@@ -23,14 +23,14 @@ AQUA-DRIFT Simulator を動かすための環境要件です。数値の根拠�
 | Docker Engine | 24 以上 | |
 | Docker Compose | v2.20 以上（`docker compose` コマンド） | `profiles`・`cpus`・`healthcheck.start_period` を使用 |
 | Docker ソケット | `orchestrator` に `/var/run/docker.sock` をマウント（観測者コンテナの可変起動に使用） | Linux・Docker Desktop で標準的に利用可。**ソケットはホストの管理者権限に相当**するため、共有サーバーでは静的構成（下記）を推奨 |
-| CPU アーキテクチャ | x86-64 推奨 | Apple Silicon（arm64）では、公式 `postgis/postgis` イメージに arm64 版がないタグがあり、エミュレーションで動作し遅くなる場合がある（未検証） |
+| CPU アーキテクチャ | x86-64 または arm64（Apple Silicon） | 使用イメージ（`imresamu/postgis`・`python:3.12-slim`・`node:22-alpine`・`nginx:1.27-alpine`）と Python 依存はすべて arm64 版があり、エミュレーションなしで動作する。公式 `postgis/postgis` は amd64 のみのため、同じ管理者・同じタグのマルチアーキテクチャ版 `imresamu/postgis` を使用（arm64 は実機未検証） |
 | インターネット接続 | **初回ビルド時のみ必要**（Docker Hub・PyPI・npm からイメージとパッケージを取得） | 実行時はオフラインで動作（背景地図 Natural Earth II は同梱、外部タイル不使用） |
 
 ### 2.2 ハードウェア
 
 | 項目 | 最小（観測者 4〜12 台） | 推奨（観測者 12〜30 台） | 観測者 99 台 |
 |---|---|---|---|
-| CPU | 4 コア（x86-64、2 GHz 以上） | 4〜8 コア | 8 コア以上 |
+| CPU | 4 コア（x86-64 2 GHz 以上、または Apple M シリーズ） | 4〜8 コア | 8 コア以上 |
 | メモリ（Docker に割当） | 3 GB | 4〜8 GB | 12 GB 以上（ホスト 16 GB 以上） |
 | ストレージ空き | 10 GB | 20 GB 以上（SSD） | 40 GB 以上（SSD） |
 
