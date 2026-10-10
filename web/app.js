@@ -988,7 +988,7 @@ function updateLayer(deployment) {
     state.layerMarker.show(true);
     state.layerMarker.set(Cesium.Cartesian3.fromDegrees(layer.position.longitude, layer.position.latitude, 0));
     const doing = layer.mode === "TRANSIT" ? `設標へ #${layer.task_id} 到着 ${layer.eta_s != null ? clockAt((layer.tick || 0) + layer.eta_s) : "--"}`
-      : layer.mode === "HOLD" ? `#${layer.task_id} 設標点で計画時刻待ち` : "旋回待機";
+      : "旋回待機";
     state.layerMarker.label.text = `設標者 ${fmt(layer.altitude_ft, 0)} ft ${fmt(layer.speed_kt, 0)} kt ${doing}`;
     // planned flight path (飛行予定経路, dashed): the turn-limited path the layer will fly through
     // the drop points, from the backend (straight legs from an older backend without it)
@@ -1078,11 +1078,11 @@ function updateLayer(deployment) {
   const enabled = lay.enabled !== false;
   const paused = Boolean(lay.paused);
   $("layer-status").textContent = !enabled ? "設標者なし（追加の観測者は即時に投入）"
-    : layer ? `設標者 ${fmt(layer.speed_kt, 0)} kt・バンク ${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）・${layer.mode === "TRANSIT" ? `設標 #${layer.task_id} へ移動中（到着 ${layer.eta_s != null ? clockAt((layer.tick || 0) + layer.eta_s) : "--"}）` : layer.mode === "HOLD" ? `設標 #${layer.task_id} の地点で計画時刻まで旋回` : "目標推定位置の周囲を旋回待機"}${paused ? "【設標一時停止中】" : ""}　了承待ち ${proposed.length}・設標待ち ${open.length - proposed.length}`
+    : layer ? `設標者 ${fmt(layer.speed_kt, 0)} kt・バンク ${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）・${layer.mode === "TRANSIT" ? `設標 #${layer.task_id} へ移動中（到着 ${layer.eta_s != null ? clockAt((layer.tick || 0) + layer.eta_s) : "--"}）` : "目標推定位置の周囲を旋回待機"}${paused ? "【設標一時停止中】" : ""}　了承待ち ${proposed.length}・設標待ち ${open.length - proposed.length}`
       : "設標者の準備中";
   const next = open.find((t) => t.status === "APPROVED");
   const detail = layer && enabled ? [
-    ["状態", { ORBIT: "旋回待機", TRANSIT: "設標へ移動", HOLD: "設標点で時刻待ち" }[layer.mode] || layer.mode],
+    ["状態", { ORBIT: "旋回待機", TRANSIT: "設標へ移動" }[layer.mode] || layer.mode],
     ["位置", `${fmt(layer.position.latitude, 4)}, ${fmt(layer.position.longitude, 4)}`],
     ["高度", `${fmt(layer.altitude_ft, 0)} ft（巡航 ${fmt(lay.cruise_altitude_ft, 0)} ft・投下 ${fmt(lay.drop_altitude_ft, 0)} ft）`],
     ["速力・針路", `${fmt(layer.speed_kt, 0)} kt・${fmt(layer.heading_deg, 0)}°`],
@@ -1434,7 +1434,7 @@ function updateForces(snapshot, estimate) {
       const open = tasks.filter((t) => t.status === "PROPOSED" || t.status === "APPROVED").sort(flightOrder);
       const next = open.find((t) => t.status === "APPROVED" && t.task_id !== layer.task_id);
       const proposed = open.filter((t) => t.status === "PROPOSED").length;
-      const mode = { ORBIT: "旋回待機", TRANSIT: `設標 #${layer.task_id} へ移動`, HOLD: `設標 #${layer.task_id} の地点で時刻待ち` }[layer.mode] || layer.mode;
+      const mode = { ORBIT: "旋回待機", TRANSIT: `設標 #${layer.task_id} へ移動` }[layer.mode] || layer.mode;
       row("状態", `${mode}${lay.paused ? "（一時停止中）" : ""}`);
       row("位置", `${latText(layer.position.latitude)} ${lonText(layer.position.longitude)}`);
       row("高度", `${fmt(layer.altitude_ft, 0)} ft`);

@@ -712,7 +712,7 @@ class LayerState(BaseModel):
     heading_deg: float
     speed_kt: float
     bank_deg: float = 0.0
-    mode: str = "ORBIT"  # ORBIT (circling the estimated target) | TRANSIT (to a drop point) | HOLD (early at the point)
+    mode: str = "ORBIT"  # ORBIT (circling the estimated target) | TRANSIT (to a drop point)
     task_id: int | None = None
     orbit_center: Position | None = None
     orbit_radius_yd: float = 0.0

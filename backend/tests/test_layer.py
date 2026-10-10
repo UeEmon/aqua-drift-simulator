@@ -10,7 +10,6 @@ from aqua_drift.layer import (
     orbit_radius_m,
     planned_path,
     step,
-    timed_turn,
     turn_radius_m,
 )
 from aqua_drift.models import (
@@ -183,7 +182,10 @@ async def test_drop_point_drifts_with_the_estimated_current() -> None:
     assert abs(east - 2.0 * 0.5144 * 100) < 5.0 and abs(north) < 1.0
 
 
-async def _drop_time(planned_in: int, east: float, north: float, seed: int = 4) -> tuple[int, int, list[str]]:
+async def _drop_time(planned_in: int, east: float, north: float,
+                     seed: int = 4) -> tuple[int, int, list[str], float]:
+    """(drop tick, planned tick, mode per second, drop - (departure + the guidance' arrival
+    when it left))."""
     sim = SimulationState(ScenarioConfig())
     rng = random.Random(seed)
     state = await _layer_steps(sim, 60, rng)  # settle on the orbit
@@ -192,31 +194,43 @@ async def _drop_time(planned_in: int, east: float, north: float, seed: int = 4) 
     await sim.queue_deployment(request)
     planned = sim.tick + planned_in
     modes = []
+    predicted = math.inf
     for _ in range(planned_in + 600):
         state = await _layer_steps(sim, 1, rng, state)
+        if state.mode == "TRANSIT" and "TRANSIT" not in modes:
+            predicted = sim.tick + state.eta_s
         modes.append(state.mode)
         task = (await sim.snapshot()).deployment.tasks[-1]
         if task.status == "DONE":
-            return task.done_tick, planned, modes
-    return -1, planned, modes
+            return task.done_tick, planned, modes, task.done_tick - predicted
+    return -1, planned, modes, math.inf
+
+
+def _left_once(modes: list[str]) -> bool:
+    """Circled, then flew to the point without coming back to the orbit (or holding)."""
+    first = modes.index("TRANSIT")
+    return set(modes[:first]) <= {"ORBIT"} and set(modes[first:]) == {"TRANSIT"}
 
 
 @pytest.mark.asyncio
 async def test_layer_lays_the_observer_at_the_planned_time() -> None:
     # far point, plenty of time: keeps circling the target first, leaves late, arrives on time
-    done, planned, modes = await _drop_time(500, 15000.0, -5000.0)
+    done, planned, modes, _ = await _drop_time(500, 15000.0, -5000.0)
     assert abs(done - planned) <= 5
-    assert modes[:100].count("ORBIT") > 90  # did not leave at once
-    # close point: gets there early and holds over the point until the planned time
-    done, planned, modes = await _drop_time(400, 1500.0, 1500.0)
-    assert abs(done - planned) <= 5
-    assert "HOLD" in modes or modes[:150].count("ORBIT") > 100
+    assert modes[:100].count("ORBIT") > 90 and _left_once(modes)  # did not leave at once
+    # close point: waits on the orbit, not over the point, and flies straight in when it gets
+    # there; the orbit passes close by, so no departure arrives at the planned time and the
+    # path is not lengthened to make it (the planned time is that of the shortest flight)
+    done, planned, modes, error = await _drop_time(400, 1500.0, 1500.0)
+    assert _left_once(modes) and modes[:150].count("ORBIT") > 100
+    assert abs(error) <= 5 and done < planned
 
 
-def _timed_drop_error(seed: int) -> tuple[int | None, bool]:
+def _timed_drop_error(seed: int) -> tuple[int | None, bool, float, bool]:
     """One random timed drop as the planner sets it (planned 30..290 s ahead, never before the
     layer's earliest time) with a random current. Returns (drop - planned time in s, feasible:
-    some speed of the band can get there by the planned time)."""
+    some speed of the band can get there by the planned time, drop - (departure + the
+    guidance' arrival when it left), left once: circled, then flew to the point)."""
     import numpy as np
 
     from aqua_drift.layer import flight_time_s, speed_band
@@ -237,30 +251,44 @@ def _timed_drop_error(seed: int) -> tuple[int | None, bool]:
     planned = 60 + max(math.ceil(earliest), r.randint(30, 290))
     current = (r.uniform(-2.0, 2.0), r.uniform(-2.0, 2.0))
     quickest = min(flight_time_s(state, config, point, sp, dt=1.0) for sp in speed_band(config))
+    feasible = planned - 60 >= quickest + 5
     task = DropTask(task_id=1, created_tick=60, source="forward", position=point, status="APPROVED",
                     planned_tick=planned)
+    modes, predicted, speed = [], math.inf, None
     for tick in range(61, planned + 600):
         feed = LayerFeed(tick=tick, config=config, tasks=[task], datum=DATUM,
                          current_east_kt=current[0], current_north_kt=current[1])
         state, update = advance(feed, state, rng)
+        if state.mode == "TRANSIT" and "TRANSIT" not in modes:
+            predicted, speed = tick + state.eta_s, state.speed_kt
+        modes.append(state.mode)
         if 1 in update.completed:
-            return tick - planned, planned - 60 >= quickest + 5
-    return None, planned - 60 >= quickest + 5
+            steady = _left_once(modes) and state.speed_kt == speed
+            return tick - planned, feasible, tick - predicted, steady
+    return None, feasible, math.inf, False
 
 
-def test_layer_drops_within_seconds_of_the_planned_time() -> None:
-    """Random drops as the planner schedules them: the layer is on time, adjusting the time
-    with the flight path (docs/handoff.md reported +-24 s and up to +52 s; the coarse
-    flight-time simulation, no correction on the way and the departure rule were the causes)."""
-    errors = [e for e, feasible in map(_timed_drop_error, range(60)) if feasible]
-    assert len(errors) >= 45 and None not in errors
-    assert sum(abs(e) <= 5 for e in errors) >= 0.95 * len(errors)
-    assert max(abs(e) for e in errors) <= 30
+def test_layer_flies_the_shortest_path_and_drops_when_it_gets_there() -> None:
+    """Random drops as the planner schedules them. The planned time is the arrival of the
+    shortest flight: the layer waits on its orbit for the departure that arrives closest to it,
+    then flies the guidance path at the speed it has and drops on arrival. It is on time when
+    some departure from the orbit gets there then; the path and the speed are not changed to
+    make it otherwise (a point close to the orbit, a slower speed than the planner's, or a
+    point inside the turning circle at the departure: the guidance finds a shorter path a
+    few seconds later)."""
+    runs = list(map(_timed_drop_error, range(60)))
+    assert None not in [e for e, *_ in runs]
+    assert all(steady for *_, steady in runs)  # no detour back to the orbit, no hold, one speed
+    assert sum(abs(a) <= 5 for _, _, a, _ in runs) >= 0.8 * len(runs)  # dropped on the arrival
+    errors = [e for e, feasible, _, _ in runs if feasible]
+    assert len(errors) >= 45
+    assert sum(abs(e) <= 5 for e in errors) >= 0.4 * len(errors)
 
 
-def test_timed_leg_takes_up_time_with_a_left_detour_at_constant_speed() -> None:
-    """Time is adjusted with the flight path: an early layer makes a detour turning left (4.15)
-    and keeps its speed."""
+def test_layer_on_its_way_flies_the_shortest_path_even_when_early() -> None:
+    """The planned time is the time of the shortest flight: a layer on its way that would be
+    early does not change its path (no detour, no circling at the point) or its speed, it drops
+    when it gets there."""
     from aqua_drift.layer import _arrival_s
     from aqua_drift.models import DropTask, LayerFeed
 
@@ -269,33 +297,32 @@ def test_timed_leg_takes_up_time_with_a_left_detour_at_constant_speed() -> None:
     state = initial_state(config, DATUM, 0, rng).model_copy(
         update={"speed_kt": 190.0, "heading_deg": 0.0, "mode": "TRANSIT", "task_id": 1})
     point = _offset(state.position, 0.0, 12000.0, 500.0)
-    planned = round(_arrival_s(state, config, point)) + 90  # 90 s early on the direct path
+    arrival = _arrival_s(state, config, point)
+    planned = round(arrival) + 90  # 90 s early on the shortest path
     task = DropTask(task_id=1, created_tick=0, source="forward", position=point, status="APPROVED",
                     planned_tick=planned)
-    banks, speeds = [], []
+    banks, speeds, modes = [], [], []
     for tick in range(1, planned + 300):
         state, update = advance(LayerFeed(tick=tick, config=config, tasks=[task], datum=DATUM), state, rng)
         banks.append(state.bank_deg)
         speeds.append(state.speed_kt)
+        modes.append(state.mode)
         if 1 in update.completed:
             break
-    assert abs(tick - planned) <= 5
+    assert abs(tick - arrival) <= 5  # on arrival, not at the planned time
     assert set(speeds) == {190.0}
-    assert sum(b < -10.0 for b in banks) > 20  # the detour is a left turn
+    assert set(modes) == {"TRANSIT"}
+    assert sum(abs(b) > 1.0 for b in banks) <= 5  # straight ahead: no detour
 
 
-def test_timed_leg_adjusts_the_speed_on_the_way() -> None:
-    from aqua_drift.layer import SPEED_RATE_KT_S
-
+def test_a_leg_keeps_its_speed() -> None:
     config = LayerConfig()
     state = initial_state(config, DATUM, 0, random.Random(1)).model_copy(update={"speed_kt": 200.0})
     target = _offset(DATUM, 20000.0, 0.0, 0.0)
     state, _ = step(state, config, target, 1, DATUM, random.Random(1), wanted_speed_kt=200.0)
-    state, _ = step(state, config, target, 1, DATUM, random.Random(1), wanted_speed_kt=150.0)
-    assert state.speed_kt == pytest.approx(200.0 - SPEED_RATE_KT_S)  # rate-limited
     for _ in range(20):
         state, _ = step(state, config, target, 1, DATUM, random.Random(1), wanted_speed_kt=150.0)
-    assert state.speed_kt == pytest.approx(150.0)
+    assert state.speed_kt == pytest.approx(200.0)
 
 
 def test_planner_schedules_drops_before_detection_and_after_the_layer_can_be_there() -> None:
@@ -427,7 +454,13 @@ async def test_operator_reorders_drops_and_the_times_follow_the_new_order() -> N
     state = await _layer_steps(sim, 715, rng, state)
     done = {t.task_id: t for t in (await sim.snapshot()).deployment.tasks}
     assert done[second.task_id].status == "DONE" and abs(done[second.task_id].done_tick - 700) <= 15
-    assert done[first.task_id].status == "APPROVED" and state.task_id == first.task_id
+    assert done[first.task_id].status == "APPROVED"
+    for _ in range(300):  # then the near one: waits for its departure, flies there and drops
+        state = await _layer_steps(sim, 1, rng, state)
+        done = {t.task_id: t for t in (await sim.snapshot()).deployment.tasks}
+        if done[first.task_id].status == "DONE":
+            break
+    assert done[first.task_id].status == "DONE"
 
 
 @pytest.mark.asyncio
@@ -447,16 +480,24 @@ async def test_reorder_of_drops_as_soon_as_possible() -> None:
     assert (await sim.layer_feed()).tasks[-1].task_id > first.task_id
 
 
-def test_timed_leg_flies_on_along_the_path_that_arrives_on_time() -> None:
-    """The path being flown arrives on time while a fresh plan from here is late (close to the
-    point a fresh plan can be a loop): the speed is kept. A new speed, a new turn radius, would
-    drop the path being flown and cost the loop."""
-    config = LayerConfig(speed_spread_kt=50.0)
-    state = initial_state(config, DATUM, 0, random.Random(1)).model_copy(
-        update={"mode": "TRANSIT", "task_id": 1, "heading_deg": 0.0, "speed_kt": 150.0})
-    point = _offset(state.position, 1000.0, 2000.0, 300.0)
-    v = 150.0 * 0.5144444444444445
-    _, speed = timed_turn(state, config, point, 20.0)
-    assert speed != 150.0  # the fresh plan alone is late: the speed would change
-    flown = 20.0 * v + config.capture_radius_yd * 0.9144
-    assert timed_turn(state, config, point, 20.0, flown_m=flown) == (None, 150.0)
+
+@pytest.mark.asyncio
+async def test_layer_reaches_a_drop_point_drifting_in_the_wind() -> None:
+    """In the wind a drop point moves in the air mass; the layer meets it where it will be when
+    it arrives along the path flown. Led by the straight-line time instead, the point moved as
+    the path bent, the path end missed it and the guidance turned another loop again and again
+    (an operator placement between timed drops was never laid; e2e reuse_check)."""
+    sim = SimulationState(ScenarioConfig())
+    rng = random.Random(3)
+    points = [_offset(DATUM, 6000.0 * math.cos(a), 6000.0 * math.sin(a), 300.0) for a in (0.3, 1.5, 2.8, 4.4)]
+    state = await _layer_steps(sim, 5, rng)
+    await sim.queue_deployment(DeploymentRequest(tick=sim.tick, positions=points, reason="plan",
+                                                 planned_ticks=[259, 502, 521, 773]))
+    state = await _layer_steps(sim, 550, rng, state)
+    await sim.queue_placement(ObserverPlacement(position=points[3]))
+    for _ in range(400):
+        state = await _layer_steps(sim, 1, rng, state)
+        manual = [t for t in (await sim.snapshot()).deployment.tasks if t.source == "manual"]
+        if manual[0].status == "DONE":
+            break
+    assert manual[0].status == "DONE"

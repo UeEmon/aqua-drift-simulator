@@ -248,15 +248,16 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
 
     The approach headings (approach_headings per point; the last point on any heading) are
     chosen together by dynamic programming over the points: least LATE_WEIGHT x (seconds late
-    after the planned times) + the drop time of the last point. A layer early at a point waits
-    (detours) for its planned time; the next leg starts at the point on the approach heading.
+    after the planned times) + the drop time of the last point. A drop is at its planned time
+    when the layer can wait for it on its orbit (it leaves when the shortest flight takes up the
+    time, see layer.departure), else at the arrival; the path itself is never lengthened to keep a
+    planned time. The next leg starts at the point on the approach heading.
     The first leg is flown as the guidance flies it (path_to loose, capture_m): close to the point
     a small offset from the path is not a loop.
 
-    first_s: the drop time of the first point per approach heading (first_headings, default
-    approach_headings(east, north, 0)) as the layer can really fly it. A timed leg cannot always wait: close to the point the paths
-    on one approach heading arrive either at once or about a loop later. An early drop there
-    costs as much as a late one."""
+    first_s: the flight time to the first point per approach heading (first_headings, default
+    approach_headings(east, north, 0)) when the layer is already on its way to it: it is dropped
+    on arrival, without waiting."""
     n = len(east)
     first = first_s is not None and n > 1
     if n == 0:
@@ -287,9 +288,9 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
                                    np.repeat(pose[:, None], len(headings), axis=1), headings[None, :], radius,
                                    prefer, margin_m, loose=k == 0, capture_m=capture_m)
         arrive = drop[:, None] + length / v
-        if k == 0 and first:
+        if k == 0 and first:  # on its way: dropped on arrival
             arrive = drop[:, None] + np.asarray(first_s, dtype=float)[None, :]
-            late = np.abs(arrive - planned_s[0]) if planned_s[0] is not None else np.zeros_like(arrive)
+            late = np.maximum(arrive - planned_s[0], 0.0) if planned_s[0] is not None else np.zeros_like(arrive)
             here = arrive
         elif planned_s[k] is not None:
             late, here = np.maximum(arrive - planned_s[k], 0.0), np.maximum(arrive, planned_s[k])
