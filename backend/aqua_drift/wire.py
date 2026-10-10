@@ -7,8 +7,8 @@ The first message of a connection carries everything; later messages carry only 
   when the beginning changed (server-side thinning, new run);
 * presence region: shared by both estimate modes, sent when it changed, at most every
   `region_interval_s` (unless the run / probability changed);
-* config, CPA, current estimate, deployment status, archive list, Lloyd's mirror depth:
-  only when changed;
+* config, CPA, current estimate, deployment status, archive list, Lloyd's mirror depth, the
+  layer's planned flight path: only when changed;
 * observers, Doppler truth, bearings, relative kinematics: compact arrays.
 
 Numbers are rounded to display precision (lat/lon 1e-6 deg ~ 0.1 m).
@@ -166,10 +166,16 @@ class WireEncoder:
         # the layer (設標者) moves every second: its state travels in every message, apart from
         # the deployment status (tasks, history), which is sent only when it changed
         layer = data["deployment"].pop("layer", None)
+        path = None
         if layer is not None:  # the guidance' own path bookkeeping is not shown
             for key in ("approach_key", "path_sides", "path_lengths_m"):
                 layer.pop(key, None)
+            # the planned flight path (up to a few hundred points) changes only when the plan
+            # does: sent separately, only when changed, instead of in every message
+            path = [[round(lat, 6), round(lon, 6)] for lat, lon in layer.pop("planned_path", [])]
         message["lay"] = layer
+        if self._changed("lpp", path):
+            message["lpp"] = path
         for task in data["deployment"].get("tasks", []):  # the replanner's bookkeeping is not shown
             task.pop("basis", None)
             for key in ("cancel_suggestion", "cancel_suggested_tick"):  # only sent when proposed

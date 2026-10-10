@@ -47,3 +47,25 @@ def test_stream_reconstructs_tracks_and_is_small() -> None:
     mean_delta = sum(map(len, later)) / len(later)
     mean_full = sum(full) / len(full)
     assert mean_delta < 0.35 * mean_full, (mean_delta, mean_full)
+
+
+def test_layer_planned_path_sent_only_when_changed() -> None:
+    from aqua_drift.models import DeploymentStatus, LayerState, Position, ScenarioConfig, Snapshot
+    from aqua_drift.wire import WireEncoder
+
+    def snapshot(tick: int, path: list[tuple[float, float]]) -> Snapshot:
+        layer = LayerState(tick=tick, position=Position(latitude=35.0, longitude=140.0 + tick * 1e-4, depth_ft=0),
+                           heading_deg=90.0, speed_kt=150.0, planned_path=path)
+        return Snapshot(tick=tick, deployment=DeploymentStatus(layer=layer), config=ScenarioConfig(), target=None,
+                        observers=[], doppler=None, estimates=[], cpa=[], current_estimate=None,
+                        archived_observer_ids=[])
+
+    encoder = WireEncoder()
+    path = [(35.0 + k * 1e-3, 140.0 + k * 1.234567891e-3) for k in range(150)]
+    first = encoder.encode(snapshot(1, path), 1.0)
+    assert first["lpp"][1] == [35.001, 140.001235]  # rounded to 1e-6 deg
+    assert "planned_path" not in first["lay"]
+    second = encoder.encode(snapshot(2, path), 2.0)
+    assert "lpp" not in second and second["lay"]["tick"] == 2  # the layer itself moves every message
+    third = encoder.encode(snapshot(3, path[1:]), 3.0)
+    assert len(third["lpp"]) == 149
