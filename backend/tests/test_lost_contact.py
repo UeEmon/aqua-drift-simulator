@@ -18,7 +18,7 @@ def _short_range_run(**estimator) -> ScenarioRun:
 
 
 def test_lost_contact_goes_coasting_then_lost() -> None:
-    run = _short_range_run(lost_timeout_s=120)
+    run = _short_range_run(lost_timeout_s=120, coast_maneuver_fraction=0.3)
     statuses: list[str] = []
     fractions: list[float] = []
     for _ in range(500):
@@ -35,7 +35,7 @@ def test_lost_contact_goes_coasting_then_lost() -> None:
     assert estimate.metadata["lost_contacts"] == 1
     assert estimate.metadata["seconds_since_detection"] >= 120
     assert estimate.metadata["position_basis"].startswith("densest part")
-    # while coasting a larger share of the particles maneuvers
+    # while coasting, coast_maneuver_fraction replaces maneuver_fraction
     config = run.config.estimator
     assert fractions[0] == config.maneuver_fraction
     assert fractions[-1] == config.coast_maneuver_fraction

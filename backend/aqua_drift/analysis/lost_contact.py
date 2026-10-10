@@ -10,6 +10,9 @@ Scenarios (target 8 kt, HDG 090, 500 Ft at the start; R = max slant range):
   L0 straight                           L1 90 deg course change at 1200 s
   L2 speed 8 -> 16 kt at 1200 s         L3 180 deg course change at 1200 s
 Ranges: "6000" (default field) and "500" (initial square shrunk to 400 YD).
+Variants: "current" (as configured), "off" (the estimator's lost-contact handling switched off:
+no debounce, no LOST state, no extra maneuvering particles while coasting), or prototype
+variants of lost_contact_proto joined with "+".
 """
 from __future__ import annotations
 
@@ -44,8 +47,18 @@ def run_one(scenario: str, seed: int, range_yd: float, seconds: int, particles: 
     config.bearing.random_seed = 11 + 101 * seed
     config.lloyd.random_seed = 23 + 101 * seed
     config.layer.random_seed = 31 + 101 * seed
+    if variant == "off":  # the lost-contact handling of the estimator switched off
+        e = config.estimator
+        e.lost_debounce_s = 1
+        e.coast_maneuver_fraction = e.maneuver_fraction
+        e.lost_sigma_fraction = 1e6
+        e.lost_timeout_s = 36000
+    if variant.startswith("est:"):  # "est:key=value,key=value" overrides estimator settings
+        for item in variant[4:].split(","):
+            key, value = item.split("=", 1)
+            setattr(config.estimator, key, json.loads(value))
     run = ScenarioRun(config, 4, forward=True)
-    if variant != "current":
+    if variant not in ("current", "off") and not variant.startswith("est:"):
         from aqua_drift.analysis import lost_contact_proto
         lost_contact_proto.install(run, variant)
     events = {tick: rest for tick, *rest in SCENARIOS[scenario]}
@@ -165,7 +178,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--scenarios", default=",".join(SCENARIOS))
     parser.add_argument("--ranges", default="6000,500")
-    parser.add_argument("--variants", default="current")
+    parser.add_argument("--variants", default="current", help="separated by ';'")
     parser.add_argument("--seeds", type=int, default=4)
     parser.add_argument("--seconds", type=int, default=3000)
     parser.add_argument("--particles", type=int, default=2000)
@@ -174,7 +187,7 @@ def main() -> None:
     parser.add_argument("--max-t", type=int, default=None, help="summarize every run up to this time")
     args = parser.parse_args()
     jobs = [(s, seed, float(r), args.seconds, args.particles, v)
-            for v in args.variants.split(",") for r in args.ranges.split(",")
+            for v in args.variants.split(";") for r in args.ranges.split(",")
             for s in args.scenarios.split(",") for seed in range(args.seeds)]
     results: list[dict] = []
     if args.out and os.path.exists(args.out):
