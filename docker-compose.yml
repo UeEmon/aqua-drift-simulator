@@ -14,7 +14,9 @@ x-worker: &worker
 
 services:
   db:
-    image: postgis/postgis:16-3.4-alpine
+    # Same build as postgis/postgis (same maintainer and tags), published for amd64 and arm64,
+    # so the stack also runs natively on Apple Silicon. postgis/postgis is amd64-only.
+    image: imresamu/postgis:16-3.4-alpine
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-aqua_drift}

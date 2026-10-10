@@ -86,7 +86,7 @@
 
 | | 最小（既定、観測者コンテナ 12） | 推奨 |
 |---|---|---|
-| サーバー | Docker Engine 24+ / Compose v2.20+、x86-64、4 コア、Docker 用 RAM 3 GB、空き 10 GB | 4〜8 コア、4〜8 GB、SSD 20 GB |
+| サーバー | Docker Engine 24+ / Compose v2.20+、x86-64 または arm64（Apple Silicon）、4 コア、Docker 用 RAM 3 GB、空き 10 GB | 4〜8 コア、4〜8 GB、SSD 20 GB |
 | ブラウザ | Chrome / Edge 98+、Firefox 94+、Safari 15.4+、WebGL 2、ハードウェアアクセラレーション有効、幅 1280 px | 最新の Chrome / Edge、最近の GPU、1600 px 以上 |
 
 インターネット接続は初回ビルド時のみ必要で、その後はオフラインで動作します。認証はないため、
