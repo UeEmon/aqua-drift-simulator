@@ -23,7 +23,7 @@ AQUA-DRIFT Simulator を動かすための環境要件です。数値の根拠�
 | Docker Engine | 24 以上 | |
 | Docker Compose | v2.20 以上（`docker compose` コマンド） | `profiles`・`cpus`・`healthcheck.start_period` を使用 |
 | Docker ソケット | `orchestrator` に `/var/run/docker.sock` をマウント（観測者コンテナの可変起動に使用） | Linux・Docker Desktop で標準的に利用可。**ソケットはホストの管理者権限に相当**するため、共有サーバーでは静的構成（下記）を推奨 |
-| CPU アーキテクチャ | x86-64 または arm64（Apple Silicon） | 使用イメージ（`imresamu/postgis`・`python:3.12-slim`・`node:22-alpine`・`nginx:1.27-alpine`）と Python 依存はすべて arm64 版があり、エミュレーションなしで動作する。公式 `postgis/postgis` は amd64 のみのため、同じ管理者・同じタグのマルチアーキテクチャ版 `imresamu/postgis` を使用（arm64 は実機未検証） |
+| CPU アーキテクチャ | x86-64 または arm64（Apple Silicon） | 使用イメージ（`imresamu/postgis`・`python:3.12-slim`・`node:22-alpine`・`nginx:1.27-alpine`）と Python 依存はすべて arm64 版があり、エミュレーションなしで動作する。公式 `postgis/postgis` は amd64 のみのため、同じ管理者・同じタグのマルチアーキテクチャ版 `imresamu/postgis` を使用（Apple Silicon の Mac・Docker Desktop で起動を確認済み） |
 | インターネット接続 | **初回ビルド時のみ必要**（Docker Hub・PyPI・npm からイメージとパッケージを取得） | 実行時はオフラインで動作（背景地図 Natural Earth II は同梱、外部タイル不使用） |
 
 ### 2.2 ハードウェア
@@ -133,7 +133,7 @@ Docker イメージとビルドキャッシュに約 2〜3 GB（試算）。履�
 ## 5. 未検証事項
 
 - 実機 GPU での描画性能（推奨 GPU は未計測の推奨値）
-- Windows・macOS（特に Apple Silicon）での Docker 動作
+- Windows での Docker 動作（macOS は Apple Silicon で起動のみ確認済み）
 - Chrome 系以外のブラウザ
 - 観測者 99 台構成の Docker 上での通し動作（API 負荷が上限要因になる見込み）
 
