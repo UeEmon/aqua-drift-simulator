@@ -53,8 +53,12 @@ def run_one(scenario: str, seed: int, range_yd: float, seconds: int, particles: 
         e.coast_maneuver_fraction = e.maneuver_fraction
         e.lost_sigma_fraction = 1e6
         e.lost_timeout_s = 36000
+    if variant.startswith("est:"):  # "est:key=value,key=value" overrides estimator settings
+        for item in variant[4:].split(","):
+            key, value = item.split("=", 1)
+            setattr(config.estimator, key, json.loads(value))
     run = ScenarioRun(config, 4, forward=True)
-    if variant not in ("current", "off"):
+    if variant not in ("current", "off") and not variant.startswith("est:"):
         from aqua_drift.analysis import lost_contact_proto
         lost_contact_proto.install(run, variant)
     events = {tick: rest for tick, *rest in SCENARIOS[scenario]}
@@ -174,7 +178,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--scenarios", default=",".join(SCENARIOS))
     parser.add_argument("--ranges", default="6000,500")
-    parser.add_argument("--variants", default="current")
+    parser.add_argument("--variants", default="current", help="separated by ';'")
     parser.add_argument("--seeds", type=int, default=4)
     parser.add_argument("--seconds", type=int, default=3000)
     parser.add_argument("--particles", type=int, default=2000)
@@ -183,7 +187,7 @@ def main() -> None:
     parser.add_argument("--max-t", type=int, default=None, help="summarize every run up to this time")
     args = parser.parse_args()
     jobs = [(s, seed, float(r), args.seconds, args.particles, v)
-            for v in args.variants.split(",") for r in args.ranges.split(",")
+            for v in args.variants.split(";") for r in args.ranges.split(",")
             for s in args.scenarios.split(",") for seed in range(args.seeds)]
     results: list[dict] = []
     if args.out and os.path.exists(args.out):
