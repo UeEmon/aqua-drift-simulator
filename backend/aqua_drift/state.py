@@ -350,6 +350,7 @@ class SimulationState:
             "layer_queue_ticks": [t.planned_tick for t in queue],
             "layer_speed_kt": layer.speed_kt,
             "layer_max_bank_deg": layer.max_bank_deg,
+            "layer_max_per_release": layer.max_per_release,
         }
 
     def _deployment_status(self) -> DeploymentStatus:

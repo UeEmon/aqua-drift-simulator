@@ -1286,6 +1286,7 @@ $("layer-form").addEventListener("submit", (event) => {
     next.layer.cruise_altitude_ft = num("layer-cruise-alt");
     next.layer.drop_altitude_ft = num("layer-drop-alt");
     next.layer.climb_rate_fpm = num("layer-climb");
+    next.layer.max_per_release = num("layer-max-release");
   })
     .then(() => setMessage("設標者の条件を反映しました。"))
     .catch((error) => setMessage(`設定エラー: ${error.message}`));
@@ -2701,7 +2702,8 @@ function populateForms(config) {
     $("layer-turn").value = lay.preferred_turn || "left";
     const layValues = { "layer-speed": lay.speed_kt, "layer-spread": lay.speed_spread_kt, "layer-bank": lay.max_bank_deg,
       "layer-orbit": lay.orbit_radius_yd, "layer-turn-margin": lay.turn_margin_s ?? 10, "layer-timeout": lay.proposal_timeout_s,
-      "layer-cruise-alt": lay.cruise_altitude_ft ?? 3000, "layer-drop-alt": lay.drop_altitude_ft ?? 1000, "layer-climb": lay.climb_rate_fpm ?? 2000 };
+      "layer-cruise-alt": lay.cruise_altitude_ft ?? 3000, "layer-drop-alt": lay.drop_altitude_ft ?? 1000, "layer-climb": lay.climb_rate_fpm ?? 2000,
+      "layer-max-release": lay.max_per_release ?? 4 };
     for (const [id, value] of Object.entries(layValues)) $(id).value = value;
     $("layer-wind-correction").checked = lay.wind_correction !== false;
   }
