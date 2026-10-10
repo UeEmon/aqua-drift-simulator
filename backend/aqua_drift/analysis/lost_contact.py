@@ -10,6 +10,9 @@ Scenarios (target 8 kt, HDG 090, 500 Ft at the start; R = max slant range):
   L0 straight                           L1 90 deg course change at 1200 s
   L2 speed 8 -> 16 kt at 1200 s         L3 180 deg course change at 1200 s
 Ranges: "6000" (default field) and "500" (initial square shrunk to 400 YD).
+Variants: "current" (as configured), "off" (the estimator's lost-contact handling switched off:
+no debounce, no LOST state, no extra maneuvering particles while coasting), or prototype
+variants of lost_contact_proto joined with "+".
 """
 from __future__ import annotations
 
@@ -44,8 +47,14 @@ def run_one(scenario: str, seed: int, range_yd: float, seconds: int, particles: 
     config.bearing.random_seed = 11 + 101 * seed
     config.lloyd.random_seed = 23 + 101 * seed
     config.layer.random_seed = 31 + 101 * seed
+    if variant == "off":  # the lost-contact handling of the estimator switched off
+        e = config.estimator
+        e.lost_debounce_s = 1
+        e.coast_maneuver_fraction = e.maneuver_fraction
+        e.lost_sigma_fraction = 1e6
+        e.lost_timeout_s = 36000
     run = ScenarioRun(config, 4, forward=True)
-    if variant != "current":
+    if variant not in ("current", "off"):
         from aqua_drift.analysis import lost_contact_proto
         lost_contact_proto.install(run, variant)
     events = {tick: rest for tick, *rest in SCENARIOS[scenario]}
