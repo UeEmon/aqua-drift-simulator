@@ -127,11 +127,12 @@ const gpu = {
   points: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
   labels: scene.primitives.add(new Cesium.LabelCollection()),
   regionLabels: scene.primitives.add(new Cesium.LabelCollection()),
-  drops: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
+  drops: scene.primitives.add(new Cesium.BillboardCollection()), // planned drop points (△)
   voxelPoints: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
   dropLabels: scene.primitives.add(new Cesium.LabelCollection()),
   layerLines: scene.primitives.add(new Cesium.PolylineCollection()),
   taskPoints: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
+  taskMarks: scene.primitives.add(new Cesium.BillboardCollection()), // open drop tasks' points (△)
   taskLabels: scene.primitives.add(new Cesium.LabelCollection()),
   releaseLines: scene.primitives.add(new Cesium.PolylineCollection()), // release point -> drop / entry point
   vectors: scene.primitives.add(new Cesium.PolylineCollection()), // wind and external-force arrows
@@ -140,6 +141,33 @@ const gpu = {
   regionOutline: { current: null, pending: null },
   voxels: { current: null, pending: null },
 };
+
+// triangle (△) marker image for planned drop points (投下予定地点): outlined, lightly filled
+const triangleImages = new Map();
+function triangleImage(color, fillAlpha, size = 16, lineWidth = 2) {
+  const key = `${color.toCssColorString()}|${fillAlpha}|${size}|${lineWidth}`;
+  let image = triangleImages.get(key);
+  if (!image) {
+    image = document.createElement("canvas");
+    image.width = size;
+    image.height = size;
+    const ctx = image.getContext("2d");
+    const m = lineWidth / 2 + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(size / 2, m);
+    ctx.lineTo(size - m, size - m);
+    ctx.lineTo(m, size - m);
+    ctx.closePath();
+    ctx.lineJoin = "round";
+    ctx.fillStyle = color.withAlpha(fillAlpha).toCssColorString();
+    ctx.fill();
+    ctx.lineWidth = lineWidth;
+    ctx.strokeStyle = color.toCssColorString();
+    ctx.stroke();
+    triangleImages.set(key, image);
+  }
+  return image;
+}
 
 function colorMaterial(color) {
   return Cesium.Material.fromType("Color", { color });
@@ -879,8 +907,11 @@ function updateDeployment(deployment) {
     if (checked("show-drops")) {
       for (const record of status.history) {
         const positions = planned(record);
-        for (const position of positions) {
-          gpu.drops.add({ position: cartOf(position), pixelSize: 9, color: COLORS.drop.withAlpha(0.25), outlineColor: COLORS.drop, outlineWidth: 2 });
+        // with the layer the open drop tasks draw these points (△, yellow while awaiting approval)
+        if (!record.task_ids?.length) {
+          for (const position of positions) {
+            gpu.drops.add({ position: cartOf(position), image: triangleImage(COLORS.drop, 0.25, 15) });
+          }
         }
         if (positions.length) {
           gpu.dropLabels.add({
@@ -978,6 +1009,7 @@ function updateLayer(deployment) {
   if (taskKey !== state.taskKey) {
     state.taskKey = taskKey;
     gpu.taskPoints.removeAll();
+    gpu.taskMarks.removeAll();
     gpu.taskLabels.removeAll();
     gpu.releaseLines.removeAll();
     const surface = (p) => Cesium.Cartesian3.fromDegrees(p.longitude, p.latitude, 0);
@@ -994,7 +1026,7 @@ function updateLayer(deployment) {
     for (const [index, t] of open.entries()) {
       const proposed = t.status === "PROPOSED";
       const color = proposed ? COLORS.proposed : t.cancel_suggestion ? COLORS.cancel : COLORS.drop;
-      gpu.taskPoints.add({ position: cartOf(t.position), pixelSize: 10, color: color.withAlpha(proposed ? 0.15 : 0.6), outlineColor: color, outlineWidth: 2 });
+      gpu.taskMarks.add({ position: cartOf(t.position), image: triangleImage(color, proposed ? 0.15 : 0.6) });
       gpu.taskLabels.add({
         position: cartOf(t.position),
         text: `${open.length > 1 ? `${index + 1}番目 ` : ""}${proposed ? "提案 " : ""}#${t.task_id}（${Math.round(t.position.depth_ft)} Ft）`

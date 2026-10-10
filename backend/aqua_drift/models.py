@@ -325,6 +325,17 @@ class EstimatorConfig(BaseModel):
     maneuver_fraction: float = Field(default=0.1, ge=0, le=0.5)
     maneuver_accel_sigma_mps2: float = Field(default=0.12, ge=0)
     maneuver_vertical_sigma_mps: float = Field(default=0.15, ge=0)
+    # lost contact (失探知): no observer detects. COASTING after lost_debounce_s without a
+    # detection; LOST once the 1 sigma major reaches lost_sigma_fraction x R or no detection for
+    # lost_timeout_s; after LOST, REACQUIRED until detections have lasted recover_hold_s and the
+    # 1 sigma major is below recover_sigma_fraction x R. While coasting a larger share of the
+    # particles maneuvers (a lost contact is often a maneuver), so the cloud stays honest.
+    lost_debounce_s: int = Field(default=10, ge=1, le=600)
+    lost_sigma_fraction: float = Field(default=0.5, gt=0)
+    lost_timeout_s: int = Field(default=900, ge=10, le=36000)
+    recover_hold_s: int = Field(default=60, ge=0, le=3600)
+    recover_sigma_fraction: float = Field(default=0.15, gt=0)
+    coast_maneuver_fraction: float = Field(default=0.3, ge=0, le=0.9)
     move_min_window_s: int = Field(default=60, ge=20, le=3600)
     move_mismatch_chi2: float = Field(default=4.0, gt=1)
     use_bearing: bool = True
