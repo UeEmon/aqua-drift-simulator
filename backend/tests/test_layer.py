@@ -131,6 +131,9 @@ async def test_auto_approval_layer_flies_and_lays_the_observer() -> None:
     assigned = await sim.assign_position("obs-09")
     assert (assigned.latitude, assigned.longitude) == (task.position.latitude, task.position.longitude)
     assert status.layer.mode == "ORBIT" or status.layer.task_id != task.task_id
+    # the drop remembers which observer took its position (the GIS lists laid observers)
+    task = (await sim.snapshot()).deployment.tasks[-1]
+    assert (task.observer_id, task.observer_session) == ("obs-09", assigned.session)
 
 
 @pytest.mark.asyncio

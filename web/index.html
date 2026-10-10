@@ -21,6 +21,7 @@
             <span><i class="sw bearing"></i>方位観測（探知中は実線・失探知は破線）</span>
             <span><i class="sw drop"></i>前程配置の投入点</span>
             <span><i class="sw layer"></i>設標者・設標予定点</span>
+            <span><i class="sw cancel"></i>中止を提案された設標点</span>
             <span><i class="sw flight-wind"></i>飛行高度の風</span>
             <span><i class="sw drop-wind"></i>投下修正の風</span>
             <span><i class="sw current-force"></i>外力（潮流）</span>
@@ -73,6 +74,14 @@
           <div id="force-info" class="map-panel" aria-label="風・外力" hidden><table><tbody></tbody></table></div>
         </div>
         <pre id="perf-hud" hidden></pre>
+        <div id="drop-cancel-alert" class="map-alert" role="alert" aria-label="設標の中止を提案" hidden>
+          <div class="map-alert-head">
+            <strong>設標の中止を提案 <span id="drop-cancel-count">0</span> 件</strong>
+            <button type="button" id="drop-cancel-suggested" class="mini">すべて中止</button>
+          </div>
+          <p class="map-alert-note">推定の更新で探知に寄与しない見込みになった設標です。中止するまで設標者は向かい続けます。</p>
+          <ul id="drop-cancel-list"></ul>
+        </div>
         <div id="layer-info" class="map-panel" aria-label="設標者の状態" hidden><table><tbody></tbody></table></div>
         <div id="status-strip">
           <span id="connection-status">接続中</span>
@@ -83,8 +92,6 @@
           <span id="drop-alert" hidden>設標計画 了承待ち <strong id="drop-alert-count">0</strong> 件
             <button type="button" id="drop-approve-all" class="mini">了承</button>
             <button type="button" id="drop-reject-all" class="mini ghost">却下</button></span>
-          <span id="drop-cancel-alert" hidden title="推定の更新で探知に寄与しない見込みになった設標（中止するまで設標者は向かい続けます）">設標の中止を提案 <strong id="drop-cancel-count">0</strong> 件
-            <button type="button" id="drop-cancel-suggested" class="mini">中止</button></span>
         </div>
       </section>
 
@@ -317,6 +324,19 @@
               </table>
             </div>
             <p class="note">追加の観測者は設標者が予定点（潮流とともに移動）に到着した時点で投入されます。投入時刻は最適値（目標が探知距離に入る直前、設標者が間に合う範囲）を計算し、設標者はその時刻に投入できるよう出発時刻と速力を選び、早く着いたときは予定点の周囲で待ちます。旋回は左旋回が基準で、経路上右旋回が効率的な場合だけ右に旋回します。「今すぐ」で計画時刻を取り消して直ちに向かい、「時刻」で投入時刻を変更、「中止」で計画を取り消します。</p>
+          </section>
+
+          <section>
+            <h2>投下済みの観測者</h2>
+            <p class="summary" id="laid-status">--</p>
+            <div class="table-wrap">
+              <table id="laid-table">
+                <colgroup><col style="width:15%" /><col style="width:39%" /><col style="width:16%" /><col style="width:13%" /><col style="width:17%" /></colgroup>
+                <thead><tr><th>観測者</th><th>位置（予測・着水・現在）</th><th>着水誤差</th><th>着水から</th><th>外力移動</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p class="note">着水予測位置は投下時点の予定点（潮流とともに移動）、着水誤差は着水位置と着水予測位置の水平距離、外力移動は着水位置から現在位置までの水平移動量（潮流などの外力による漂流）と方向です。</p>
           </section>
 
           <section>
