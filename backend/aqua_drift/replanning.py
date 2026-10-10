@@ -62,7 +62,7 @@ from aqua_drift.optimal_deployment import (
 from aqua_drift.physics import local_offset_m
 
 KNOT_TO_MPS = 0.5144444444444445
-FLYING_MODES = ("TRANSIT", "HOLD")
+FLYING_MODES = ("TRANSIT",)
 
 
 @dataclass
