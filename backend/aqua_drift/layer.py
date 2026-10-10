@@ -24,7 +24,7 @@
   the air-mass frame (a ground point moves there with current - wind), aiming at the
   interception point. The observer is released at the release point (the drop point less the
   predicted fall displacement: the throw of the layer's ground speed and the drift of the
-  estimated mean wind), the exact release instant within the 1 s step is where the path passes
+  estimated mean wind, or of the wind at the current altitude before there is an estimate), the exact release instant within the 1 s step is where the path passes
   closest to it, and it falls freely through the true wind profile to the sea surface
   (aqua_drift.wind).
 """
@@ -563,18 +563,27 @@ def _climb(state: LayerState, config: LayerConfig, wanted_ft: float, dt: float =
 
 def release_point(layer_position: Position, altitude_ft: float, speed_kt: float, config: LayerConfig,
                   point: Position, wind_mps: tuple[float, float], estimate_mps: tuple[float, float],
-                  current_mps: tuple[float, float], terminal_mps: float) -> tuple[Position, float]:
+                  current_mps: tuple[float, float], terminal_mps: float,
+                  approach_deg: float | None = None) -> tuple[Position, float]:
     """Release point (投下点) for an observer that should enter the water at `point`.
 
     The layer approaches on the bearing to the point with the ground speed its airspeed
     (speed_kt) makes in the wind at its altitude (its navigation knows its own drift) and releases at the
     altitude it will have reached (it descends towards drop_altitude_ft on the way). The fall
-    is predicted with the estimated mean wind from the drop altitude to the sea surface (0
-    without an estimate: the no-wind free fall); the drop point drifts with the current during
-    the fall. Returns (release point, predicted fall time s)."""
+    is predicted with the correction wind estimate_mps (see correction_wind: the estimated mean
+    wind from the drop altitude to the sea surface, else the wind at the current altitude; 0: the
+    no-wind free fall); the drop point drifts with the current during
+    the fall. With approach_deg (the air-mass heading the layer crosses the point on, see
+    _approach) the release is predicted on that heading rather than the bearing from the layer, so the release
+    point stays put while the layer turns onto it. Returns (release point, predicted fall time s)."""
     east, north, _ = local_offset_m(layer_position, point)
-    course = math.atan2(east, north)
-    ge, gn = windlib.ground_velocity(course, max(speed_kt, 1.0) * KNOT_TO_MPS, *wind_mps)
+    airspeed = max(speed_kt, 1.0) * KNOT_TO_MPS
+    if approach_deg is None:
+        ge, gn = windlib.ground_velocity(math.atan2(east, north), airspeed, *wind_mps)
+    else:  # the heading in the air mass: the wind adds to the air velocity
+        heading = math.radians(approach_deg)
+        ge = airspeed * math.sin(heading) + wind_mps[0]
+        gn = airspeed * math.cos(heading) + wind_mps[1]
     eta = math.hypot(east, north) / max(math.hypot(ge, gn), 1.0)
     change = config.climb_rate_fpm / 60.0 * eta
     altitude = altitude_ft + max(-change, min(change, config.drop_altitude_ft - altitude_ft))
@@ -672,6 +681,31 @@ def _approach(state: LayerState, config: LayerConfig, tasks: list, points: list[
                                     "path_lengths_m": []})
 
 
+# where the wind of the release correction comes from (LayerState.correction_source)
+ESTIMATED_WIND = "estimate"  # mean wind estimated from the last drop (drop altitude to the sea surface)
+FLIGHT_ALTITUDE_WIND = "flight_altitude"  # no estimate yet: the wind at the layer's current altitude
+NO_CORRECTION = "none"  # correction off or no wind: the no-wind free fall
+
+
+def correction_source(feed: LayerFeed) -> str:
+    """The wind the release points are corrected with: the estimated mean wind when there is
+    one, else the wind at the layer's current altitude (its navigation knows its own drift)."""
+    if feed.wind is None or not feed.config.wind_correction:
+        return NO_CORRECTION
+    return ESTIMATED_WIND if feed.wind_estimate is not None else FLIGHT_ALTITUDE_WIND
+
+
+def correction_wind(feed: LayerFeed, source: str,
+                    flight_wind_mps: tuple[float, float]) -> tuple[float, float]:
+    """(east, north) m/s towards of the correction wind from `source` (flight_wind_mps: the wind
+    at the layer's current altitude)."""
+    if source == ESTIMATED_WIND:
+        return feed.wind_estimate.east_kt * KNOT_TO_MPS, feed.wind_estimate.north_kt * KNOT_TO_MPS
+    if source == FLIGHT_ALTITUDE_WIND:
+        return flight_wind_mps
+    return 0.0, 0.0
+
+
 def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[LayerState, LayerUpdate]:
     """Advance the layer from state.tick to feed.tick (1 s steps).
 
@@ -684,7 +718,7 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
 
     With feed.wind the layer flies in the air mass (the wind at its altitude carries it), heads
     for the release point of each drop (see release_point: corrected for the observer's fall in
-    the estimated mean wind) and the released observer falls through the true wind profile;
+    the estimated mean wind, or the wind at its altitude before there is an estimate) and the released observer falls through the true wind profile;
     the completed drop is the point where it enters the water (releases: the fall)."""
     config = feed.config
     tasks = sorted(feed.tasks, key=lambda t: t.flight_key())
@@ -692,11 +726,10 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
     completed: dict[int, Position] = {}
     releases: dict[int, DropRelease] = {}
     profile = windlib.WindProfile(feed.wind) if feed.wind is not None else None
-    estimate = (0.0, 0.0)
-    if profile is not None and feed.wind_estimate is not None and config.wind_correction:
-        estimate = (feed.wind_estimate.east_kt * KNOT_TO_MPS, feed.wind_estimate.north_kt * KNOT_TO_MPS)
+    source = correction_source(feed)
     current = (feed.current_east_kt * KNOT_TO_MPS, feed.current_north_kt * KNOT_TO_MPS)
     wind = (0.0, 0.0)
+    estimate = correction_wind(feed, source, wind)
     offset = [0.0, 0.0]  # over the ground = air-mass frame + offset (the wind carries the layer)
 
     def air(position: Position) -> Position:
@@ -711,6 +744,7 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
         positions = {k: drift(p, feed.current_east_kt, feed.current_north_kt) for k, p in positions.items()}
         if profile is not None:
             wind = profile.at(state.altitude_ft)
+            estimate = correction_wind(feed, source, wind)
         open_tasks = [t for t in tasks if t.task_id not in completed]
         task = open_tasks[0] if open_tasks and not config.paused else None
         target = hold = wanted = rate = aim = approach = None
@@ -720,7 +754,8 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
             aim = positions[task.task_id]
             if profile is not None:
                 aim, _ = release_point(over_ground(state.position), state.altitude_ft, state.speed_kt, config,
-                                       aim, wind, estimate, current, profile.terminal_mps)
+                                       aim, wind, estimate, current, profile.terminal_mps,
+                                       state.approach_deg if state.task_id == task.task_id else None)
             point = air(aim)
             if profile is not None:  # in the air mass a ground point moves with current - wind
                 point = _lead(state.position, point, current[0] - wind[0], current[1] - wind[1],
@@ -782,6 +817,7 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
     release_positions: dict[int, Position] = {}
     if profile is not None:
         wind = profile.at(state.altitude_ft)
+        estimate = correction_wind(feed, source, wind)
         v = state.speed_kt * KNOT_TO_MPS
         heading = math.radians(state.heading_deg)
         ge, gn = v * math.sin(heading) + wind[0], v * math.cos(heading) + wind[1]
@@ -796,8 +832,15 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
         for task_id in open_ids:
             release_positions[task_id], _ = release_point(
                 previous, state.altitude_ft, state.speed_kt, config, positions[task_id], wind, estimate,
-                current, profile.terminal_mps)
+                current, profile.terminal_mps, state.approach_deg if task_id == state.task_id else None)
             previous = positions[task_id]
+    corrected = source != NO_CORRECTION
+    direction, speed = windlib.wind_from(*estimate)
+    state = state.model_copy(update={
+        "correction_source": source,
+        "correction_wind_direction_deg": direction if corrected else None,
+        "correction_wind_speed_kt": speed / KNOT_TO_MPS if corrected else None,
+    })
     if not config.paused:
         open_points = [release_positions.get(k, positions[k]) for k in open_ids]
         state = state.model_copy(update={"planned_path": planned_path(state, config, open_points, wind)})

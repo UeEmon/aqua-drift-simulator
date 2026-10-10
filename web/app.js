@@ -719,7 +719,7 @@ function updateLayer(deployment) {
   const releaseKey = (p) => (p ? `${p.latitude.toFixed(4)}:${p.longitude.toFixed(4)}` : "");
   // the latest released drops: release point -> entry point (where the observer fell in the wind)
   const released = tasks.filter((t) => t.status === "DONE" && t.release_position).slice(-6);
-  const taskKey = open.map((t) => `${t.task_id}:${t.status}:${t.planned_tick}:${t.sequence}:${t.position.latitude.toFixed(4)}:${t.position.longitude.toFixed(4)}:${releaseKey(t.release_position)}`).join("|")
+  const taskKey = open.map((t) => `${t.task_id}:${t.status}:${t.planned_tick}:${t.sequence}:${t.cancel_suggestion ? 1 : 0}:${t.position.latitude.toFixed(4)}:${t.position.longitude.toFixed(4)}:${releaseKey(t.release_position)}`).join("|")
     + `|${released.map((t) => `${t.task_id}:${t.splash_tick}:${t.miss_yd}`).join(",")}|${exaggeration()}`;
   if (taskKey !== state.taskKey) {
     state.taskKey = taskKey;
@@ -748,7 +748,8 @@ function updateLayer(deployment) {
       gpu.taskLabels.add({
         position: cartOf(t.position),
         text: `${open.length > 1 ? `${index + 1}番目 ` : ""}${proposed ? "提案 " : ""}#${t.task_id}（${Math.round(t.position.depth_ft)} Ft）`
-          + (t.planned_tick != null ? `計画 ${clockAt(t.planned_tick)}` : "すぐ") + (proposed ? " 了承待ち" : ""),
+          + (t.planned_tick != null ? `計画 ${clockAt(t.planned_tick)}` : "すぐ") + (proposed ? " 了承待ち" : "")
+          + (t.cancel_suggestion ? " 中止を提案" : ""),
         font: "11px sans-serif", fillColor: color, pixelOffset: new Cesium.Cartesian2(0, -14),
       });
     }
@@ -757,6 +758,11 @@ function updateLayer(deployment) {
   const proposed = open.filter((t) => t.status === "PROPOSED");
   $("drop-alert").hidden = proposed.length === 0;
   setText("drop-alert-count", proposed.length);
+  // drops the replanner proposes to cancel (no longer help detection); the layer keeps flying them
+  const suggested = open.filter((t) => t.status === "APPROVED" && t.cancel_suggestion);
+  state.cancelSuggested = suggested.map((t) => t.task_id);
+  $("drop-cancel-alert").hidden = suggested.length === 0;
+  setText("drop-cancel-count", suggested.length);
   if (!state.dropApprovalPending && $("drop-approval").value !== (status.approval || "auto")) $("drop-approval").value = status.approval || "auto";
   if (!tabVisible("tab-deploy")) return;
   const lay = state.latestConfig?.layer || {};
@@ -773,6 +779,7 @@ function updateLayer(deployment) {
     ["速力・針路", `${fmt(layer.speed_kt, 0)} kt・${fmt(layer.heading_deg, 0)}°`],
     ["対地速力・航跡", layer.ground_speed_kt != null ? `${fmt(layer.ground_speed_kt, 0)} kt・${fmt(layer.track_deg, 0)}°` : "--"],
     ["飛行高度の風", layer.wind_speed_kt != null ? `${fmt(layer.wind_direction_deg, 0)}°・${fmt(layer.wind_speed_kt, 1)} kt` : "--"],
+    ["投下修正の風", correctionWind(layer, (status.wind_estimates || []).slice(-1)[0], lay.wind_correction !== false).text],
     ["バンク", `${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）`],
     ["基準旋回", `${lay.preferred_turn === "right" ? "右" : "左"}旋回（反対旋回は ${fmt(lay.turn_margin_s ?? 10, 0)} 秒以上早い場合）`],
     ["実施中", layer.task_id != null ? `#${layer.task_id}・到着 ${layer.eta_s != null ? `${clockAt((layer.tick || 0) + layer.eta_s)}（あと ${fmt(layer.eta_s, 0)} s）` : "--"}` : "なし"],
@@ -802,7 +809,9 @@ function updateLayer(deployment) {
     const when = t.status === "APPROVED" ? `${plan}・あと ${fmt(t.eta_s, 0)} s` : t.status === "DONE" ? `${clockAt(t.done_tick)} 投下${late}${fall}` : plan;
     const src = { forward: "自動", operator: "即時配置", manual: "手動配置" }[t.source] || t.source;
     const rank = index >= 0 && open.length > 1 ? `・${index + 1}番目` : "";
-    return `<tr><td>${t.task_id}<br /><small>${src}${rank}</small></td><td>${TASK_STATUS[t.status] || t.status}</td>`
+    const suggest = t.status === "APPROVED" && t.cancel_suggestion
+      ? `<br /><small class="cancel-note">中止を提案：${escapeHtml(t.cancel_suggestion)}</small>` : "";
+    return `<tr${suggest ? ' class="cancel-suggested"' : ""}><td>${t.task_id}<br /><small>${src}${rank}</small></td><td>${TASK_STATUS[t.status] || t.status}${suggest}</td>`
       + `<td>${Math.round(t.position.depth_ft)} Ft<br /><small>${when}</small></td><td>${actions}</td></tr>`;
   });
   // keep a drop time the operator is typing: do not rebuild the table under the cursor
@@ -867,6 +876,9 @@ $("drop-table").addEventListener("click", (event) => {
   }
 });
 $("drop-approve-all").addEventListener("click", () => decideDrops(null, true));
+$("drop-cancel-suggested").addEventListener("click", () => {
+  if (state.cancelSuggested?.length) cancelDrops(state.cancelSuggested);
+});
 $("drop-approve-all-tab").addEventListener("click", () => decideDrops(null, true));
 $("drop-cancel-all").addEventListener("click", () => cancelDrops(null));
 $("layer-enabled").addEventListener("change", () => {
@@ -917,6 +929,25 @@ const WIND_ARROW_S = 60; // wind arrows: distance the air moves in 1 min
 const CURRENT_ARROW_S = 1200; // current arrows: distance the water moves in 20 min
 const turnName = (bank) => (Math.abs(bank) < 0.5 ? "直進" : bank < 0 ? "左旋回" : "右旋回");
 const dirSpeedText = (dirFrom, speed, digits = 1) => `${pad3(dirFrom)}°・${fmt(speed, digits)} kt`;
+// the wind the release points are corrected with (投下修正の風) and where it comes from
+// (LayerState.correction_source): the mean wind estimated from the last drop, else the wind at
+// the layer's current altitude, else none (correction off or no wind)
+const CORRECTION_SOURCE_NAMES = { estimate: "推定風", flight_altitude: "現在高度の風", none: "なし" };
+function correctionWind(layer, windEstimate, correction) {
+  const source = layer?.correction_source || "none";
+  const name = CORRECTION_SOURCE_NAMES[source] || source;
+  if (source === "none" || layer?.correction_wind_speed_kt == null) {
+    return { source: "none", name: CORRECTION_SOURCE_NAMES.none, arrow: null,
+      text: `【なし】${correction ? "" : "修正オフ・"}無風で投下点を計算` };
+  }
+  const dir = layer.correction_wind_direction_deg, speed = layer.correction_wind_speed_kt;
+  const rad = (dir + 180) * Math.PI / 180;
+  const detail = source === "estimate" && windEstimate
+    ? `#${windEstimate.task_id}・${fmt(windEstimate.altitude_ft, 0)} ft〜海面・${clockAt(windEstimate.tick)}`
+    : `推定なし・${fmt(layer.altitude_ft, 0)} ft`;
+  return { source, name, arrow: { east: speed * Math.sin(rad), north: speed * Math.cos(rad) },
+    short: `【${name}】${dirSpeedText(dir, speed)}`, text: `【${name}】${dirSpeedText(dir, speed)}（${detail}）` };
+}
 function pad3(deg) {
   return deg == null || !Number.isFinite(Number(deg)) ? "---" : String(Math.round(((Number(deg) % 360) + 360) % 360) % 360).padStart(3, "0");
 }
@@ -993,8 +1024,9 @@ function updateForces(snapshot, estimate) {
       ? { east: layer.wind_speed_kt * Math.sin(flightRad), north: layer.wind_speed_kt * Math.cos(flightRad) } : null;
     setArrow("flightWind", COLORS.flightWind, fw ? where : null, fw?.east || 0, fw?.north || 0, WIND_ARROW_S,
       fw ? `飛行高度の風 ${dirSpeedText(layer.wind_direction_deg, layer.wind_speed_kt)}` : "");
-    setArrow("dropWind", COLORS.dropWind, windEstimate ? where : null, windEstimate?.east_kt || 0, windEstimate?.north_kt || 0, WIND_ARROW_S,
-      windEstimate ? `投下修正の風 ${dirSpeedText(windEstimate.direction_deg, windEstimate.speed_kt)}${correction ? "" : "（修正オフ）"}` : "");
+    const dw = layerOn ? correctionWind(layer, windEstimate, correction) : null;
+    setArrow("dropWind", COLORS.dropWind, dw?.arrow ? where : null, dw?.arrow?.east || 0, dw?.arrow?.north || 0, WIND_ARROW_S,
+      dw?.arrow ? `投下修正の風 ${dw.short}` : "");
     const refPos = current?.reference_position;
     const atRef = current ? currentAt(current, refPos) : null;
     setArrow("currentRef", COLORS.current, current ? refPos : null, atRef?.east || 0, atRef?.north || 0, CURRENT_ARROW_S,
@@ -1044,9 +1076,7 @@ function updateForces(snapshot, estimate) {
     rows.push(`<tr class="head"><th colspan="2">風・外力</th></tr>`);
     row(`<i class="sw flight-wind"></i>飛行高度の風`, layerOn && layer.wind_speed_kt != null
       ? `${dirSpeedText(layer.wind_direction_deg, layer.wind_speed_kt)}（${fmt(layer.altitude_ft, 0)} ft）` : "--");
-    row(`<i class="sw drop-wind"></i>投下修正の風`, windEstimate
-      ? `${dirSpeedText(windEstimate.direction_deg, windEstimate.speed_kt)}（#${windEstimate.task_id}・${fmt(windEstimate.altitude_ft, 0)} ft〜海面・${clockAt(windEstimate.tick)}）${correction ? "" : " 修正オフ"}`
-      : "推定なし（無風で投下点を計算）");
+    row(`<i class="sw drop-wind"></i>投下修正の風`, layerOn ? correctionWind(layer, windEstimate, correction).text : "--");
     const base = current ? currentAt(current, current.reference_position) : null;
     row(`<i class="sw current-force"></i>外力（潮流）`, base
       ? `流向 ${dirSpeedText(towards(base.east, base.north), Math.hypot(base.east, base.north), 2)}（観測者 ${current.observer_count}・${fmt(current.window_seconds / 60, 0)} 分、残差 ${fmt(current.residual_kt, 2)} kt）`
@@ -1111,11 +1141,12 @@ function updateWind(deployment) {
   const latest = estimates[0];
   const falling = deployment?.falling || 0;
   const correction = state.latestConfig?.layer?.wind_correction !== false;
+  const applied = deployment?.layer ? correctionWind(deployment.layer, latest, correction) : null;
   $("wind-status").textContent = (latest
     ? `最新の推定（#${latest.task_id}、${fmt(latest.altitude_ft, 0)} ft〜海面）：${fmt(latest.direction_deg, 0)}°・${fmt(latest.speed_kt, 1)} kt`
       + `（真値 ${fmt(latest.true_direction_deg, 0)}°・${fmt(latest.true_speed_kt, 1)} kt）`
-      + `　次の投下点を${correction ? "この平均風で修正" : "修正しない設定"}`
-    : "まだ着水した観測者がありません（最初の投下は無風の自由落下で投下点を計算）")
+    : "まだ着水した観測者がありません（推定風がない間は現在高度の風で投下点を修正）")
+    + `　投下修正の風 ${applied ? applied.text : "--"}`
     + (falling ? `　落下中 ${falling}` : "");
   const rows = estimates.map((w) => `<tr><td>${w.task_id}<br /><small>${clockAt(w.tick)}</small></td>`
     + `<td>${fmt(w.altitude_ft, 0)} ft<br /><small>落下 ${fmt(w.fall_time_s, 1)} s</small></td>`
@@ -1134,6 +1165,12 @@ $("drop-approval").addEventListener("change", () => {
 });
 
 function deployReason(reason) {
+  // replanner: "replan: <why>; drops [..] replaced, predicted error e -> f YD; <optimal planner reason>"
+  const r = /^replan: (.*?); drops \[([^\]]*)\] replaced, predicted error (\d+) -> (\d+) YD; (.*)$/.exec(reason || "");
+  if (r) {
+    const ids = r[2].split(/,\s*/).map((id) => `#${id}`).join("・");
+    return `再計画（${replanWhy(r[1])}）：設標 ${ids} を差し替え、予測誤差 ${r[3]}→${r[4]} YD／${deployReason(r[5])}`;
+  }
   // optimal planner: "optimal (coverage): 2 observers, depths [..] Ft; predicted error e -> f YD
   // (horizontal a -> b YD, depth c -> d Ft, coverage gaps g -> h %); drop in [..] s; replanned after a maneuver .."
   const m = /^optimal \(([^)]+)\): (\d+) observers, depths \[([^\]]*)\] Ft; predicted error (\d+) -> (\d+) YD \(horizontal (\d+) -> (\d+) YD, depth (\d+) -> (\d+) Ft, coverage gaps (\d+) -> (\d+) %\)(?:; drop in \[([^\]]*)\] s)?/.exec(reason || "");
@@ -1143,6 +1180,19 @@ function deployReason(reason) {
   const replan = /replanned after a maneuver/.test(reason) ? "（機動を検出して再計画）" : "";
   return `最適配置（${why}）${replan}：${m[2]} 本・深度 ${m[3].split(/,\s*/).join("/")} Ft、予測誤差 ${m[4]}→${m[5]} YD`
     + `（水平 ${m[6]}→${m[7]} YD・深度 ${m[8]}→${m[9]} Ft・探知不足 ${m[10]}→${m[11]} %）${times}`;
+}
+
+// why the replanner replaced drops (aqua_drift.replanning.estimate_change)
+function replanWhy(why) {
+  let m = /^maneuver detected at tick (\d+) after drop (\d+) was planned$/.exec(why);
+  if (m) return `設標 #${m[2]} の計画後 ${clockAt(Number(m[1]))} に機動を検出`;
+  m = /^heading (\d+) -> (\d+) deg since drop (\d+) was planned$/.exec(why);
+  if (m) return `設標 #${m[3]} の計画時から推定針路 ${m[1]}°→${m[2]}°`;
+  m = /^speed ([\d.]+) -> ([\d.]+) kt since drop (\d+) was planned$/.exec(why);
+  if (m) return `設標 #${m[3]} の計画時から推定速力 ${m[1]}→${m[2]} kt`;
+  m = /^estimate moved (\d+) YD \(> (\d+)\) since drop (\d+) was planned$/.exec(why);
+  if (m) return `設標 #${m[3]} の計画時から推定位置が ${m[1]} YD ずれた・閾値 ${m[2]} YD`;
+  return why;
 }
 
 $("deploy-now").addEventListener("click", async () => {

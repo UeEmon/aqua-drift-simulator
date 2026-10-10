@@ -38,6 +38,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import numpy as np
+
 from aqua_drift import layer as layerlib
 from aqua_drift.forward_deployment import YD_TO_M, covered_count
 from aqua_drift.models import (
@@ -49,7 +51,14 @@ from aqua_drift.models import (
     ReplanFeed,
     TrackEstimate,
 )
-from aqua_drift.optimal_deployment import LayerAvailability, SensorModel, plan_optimal_deployment
+from aqua_drift.optimal_deployment import (
+    FINE_S,
+    FT_TO_M,
+    LayerAvailability,
+    SensorModel,
+    hypotheses,
+    plan_optimal_deployment,
+)
 from aqua_drift.physics import local_offset_m
 
 KNOT_TO_MPS = 0.5144444444444445
@@ -237,3 +246,64 @@ def plan_replacement(
         bases=[basis_for(estimate, p) for p in positions],
         revision=1 + max(t.revision for t in revisable), reason=reason,
     ), reason
+
+
+def detection_weight(estimate: TrackEstimate, point: Position, drop_s: float, config: ForwardDeploymentConfig,
+                     max_slant_range_yd: float, max_depth_ft: float = 1500.0) -> float:
+    """Weight of the motion hypotheses (optimal_deployment.hypotheses: the estimated track +-1 sigma
+    and the maneuvers) in which the target comes within detection range of an observer laid at
+    point drop_s from now, within the planning horizon. The range is R_max plus 2 sigma of the
+    horizontal position uncertainty, so a drop counts as useless only when it clearly is."""
+    origin = estimate.current_position
+    u = estimate.uncertainty
+    depth = (estimate.depth_ft if estimate.depth_ft is not None else origin.depth_ft) * FT_TO_M
+    speed = (estimate.through_water_speed_kt or 0.0) * KNOT_TO_MPS
+    vz = (estimate.vertical_rate_fps or 0.0) * FT_TO_M
+    hdg_sigma = math.radians(min(max(u.hdg_sigma_deg, 3.0), 30.0))
+    horizon = float(config.horizon_s)
+    hyps = hypotheses(np.array([0.0, 0.0, depth]), math.radians(estimate.hdg_deg or 0.0), speed, vz, hdg_sigma,
+                      config, horizon, max_depth_ft * FT_TO_M)
+    east, north, _ = local_offset_m(origin, point)
+    at = np.array([east, north, point.depth_ft * FT_TO_M])
+    reach = max_slant_range_yd * YD_TO_M + 2.0 * u.horizontal_major_yd * YD_TO_M
+    weight = 0.0
+    for h in hyps:
+        after = np.arange(len(h.pos)) * FINE_S >= drop_s
+        if after.any() and np.min(np.linalg.norm(h.pos[after] - at, axis=1)) <= reach:
+            weight += h.weight
+    return weight / sum(h.weight for h in hyps)
+
+
+def cancel_suggestions(tick: int, estimate: TrackEstimate | None, replan: ReplanFeed,
+                       config: ForwardDeploymentConfig, max_slant_range_yd: float,
+                       max_depth_ft: float = 1500.0) -> dict[int, str | None]:
+    """Which approved drops the replanner keeps (flown to, due soon, revised to the limit, operator
+    drops) should be proposed to the operator for cancellation, because the target will no longer
+    come within detection range of them (task id -> reason, None: no longer proposed). Replaceable
+    drops are not listed: the replanner replaces them itself. Nothing is cancelled here: the layer
+    keeps flying a proposed drop until the operator cancels it. Hysteresis: proposed below
+    cancel_suggest_weight, withdrawn only above 2.5 x it."""
+    if not (config.enabled and config.replan_enabled) or estimate is None or estimate.uncertainty is None \
+            or estimate.current_position is None or estimate.hdg_deg is None \
+            or not estimate.observability_status.startswith("TRACKING"):
+        return {}
+    r_max = max_slant_range_yd * YD_TO_M
+    if estimate.uncertainty.horizontal_major_yd * YD_TO_M > config.optimal_max_sigma_fraction * r_max:
+        return {}  # not converged: no reason to doubt the drops yet
+    flying = flying_task_id(replan.layer_state)
+    auto = replan.layer.approval == "auto"
+    out: dict[int, str | None] = {}
+    for task in replan.tasks:
+        if task.status != "APPROVED" or is_revisable(task, tick, config, flying, auto):
+            continue
+        due = due_tick(task, tick)
+        drop_s = max((due if due is not None else tick) - estimate.tick, 0.0)
+        weight = detection_weight(estimate, task.position, drop_s, config, max_slant_range_yd, max_depth_ft)
+        limit = config.cancel_suggest_weight * (2.5 if task.cancel_suggestion else 1.0)
+        if weight < limit:
+            # shown to the operator as it is
+            out[task.task_id] = (f"探知に寄与しない見込み（投入後に目標が探知距離に入る運動仮説は "
+                                 f"{100 * weight:.0f} % のみ）")
+        elif task.cancel_suggestion:
+            out[task.task_id] = None
+    return out

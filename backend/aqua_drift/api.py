@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from aqua_drift.forward_deployment import plan_forward_deployment_scheduled
 from aqua_drift.models import (
+    CancelSuggestions,
     ClockSettings,
     ClockStatus,
     DeploymentFeed,
@@ -293,6 +294,16 @@ async def layer_update(update: LayerUpdate, generation: int | None = None) -> di
     if done:
         await store.append_event("drop_done", update.state.tick, {"tasks": done})
     return {"done": done}
+
+
+@app.post("/internal/cancel-suggestions")
+async def cancel_suggestions(request: CancelSuggestions, generation: int | None = None) -> dict[str, list[int]]:
+    """The replanner proposes cancelling drops that no longer help detection (operator decides)."""
+    changed = await state.set_cancel_suggestions(request, generation)
+    if changed:
+        await store.append_event("drop_cancel_suggestion", request.tick, {
+            "tasks": {task_id: request.suggestions[task_id] for task_id in changed}})
+    return {"changed": changed}
 
 
 @app.post("/internal/deploy", response_model=DeploymentRecord)

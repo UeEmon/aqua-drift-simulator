@@ -226,7 +226,8 @@ class LayerConfig(BaseModel):
     cruise_altitude_ft: float = Field(default=3000.0, ge=100, le=WIND_TOP_FT)
     drop_altitude_ft: float = Field(default=1000.0, ge=100, le=WIND_TOP_FT)
     climb_rate_fpm: float = Field(default=2000.0, gt=0, le=20000)
-    # release the observer upwind by the drift of the estimated mean wind (from the last drop)
+    # release the observer upwind by the drift of the estimated mean wind (from the last drop;
+    # before the first estimate: the wind at the layer's current altitude)
     wind_correction: bool = True
 
 
@@ -287,6 +288,11 @@ class ForwardDeploymentConfig(BaseModel):
     replan_speed_kt: float = Field(default=2.0, ge=0)  # speed change trigger (>= 2 sigma)
     replan_min_improvement: float = Field(default=0.2, ge=0, le=1)  # replace only if the cost drops this much
     replan_max_revisions: int = Field(default=2, ge=0, le=10)  # a drop replaced this often is kept
+    # a kept approved drop (flown to, due soon...) that no longer helps detection is proposed to the
+    # operator for cancellation (the layer keeps flying it until the operator cancels): when the
+    # motion hypotheses that bring the target within R_max (+2 sigma) of it after its drop weigh less
+    # than this (the proposal is withdrawn again above 2.5 x this)
+    cancel_suggest_weight: float = Field(default=0.1, ge=0, le=1)
 
 
 class ObserverDeploymentConfig(BaseModel):
@@ -553,6 +559,13 @@ class DeploymentRecord(BaseModel):
     task_ids: list[int] = Field(default_factory=list)
 
 
+class CancelSuggestions(BaseModel):
+    """The replanner's cancellation proposals: task id -> reason (None withdraws a proposal)."""
+
+    tick: int
+    suggestions: dict[int, str | None]
+
+
 class PlanBasis(BaseModel):
     """The estimate a planned drop was chosen on: the drop point relative to the estimated target
     (water frame, metres east / north) and its estimated heading and through-water speed at tick.
@@ -638,6 +651,10 @@ class DropTask(BaseModel):
     sequence: int = 0  # drop order among tasks with the same planned time (operator reorder)
     basis: PlanBasis | None = None  # the estimate an automatic drop was planned on (replanning)
     revision: int = 0  # how often this drop's plan was replaced (replanning keeps it from the limit on)
+    # proposed to the operator for cancellation: the drop would no longer help detection (the layer
+    # keeps flying it until the operator cancels it)
+    cancel_suggestion: str | None = None
+    cancel_suggested_tick: int | None = None
     approved_tick: int | None = None
     done_tick: int | None = None
     eta_s: float | None = None  # seconds from now to the expected drop
@@ -699,6 +716,12 @@ class LayerState(BaseModel):
     track_deg: float | None = None
     wind_direction_deg: float | None = None  # from
     wind_speed_kt: float | None = None
+    # wind the release points are corrected with (投下修正の風) and where it comes from:
+    # "estimate" (mean wind from the last drop) | "flight_altitude" (no estimate yet: the wind at
+    # the current altitude) | "none" (correction off or no wind)
+    correction_source: str = "none"
+    correction_wind_direction_deg: float | None = None  # from
+    correction_wind_speed_kt: float | None = None
 
 
 class DropRelease(BaseModel):

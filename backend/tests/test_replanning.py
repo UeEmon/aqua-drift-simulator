@@ -201,3 +201,48 @@ async def test_state_replaces_atomically_and_refuses_drops_no_longer_revisable()
     assert [t.status for t in state.tasks] == ["APPROVED", "REPLACED", "APPROVED"]
     assert state.tasks[2].revision == 1 and state.last_replan_tick == TICK
     assert math.isclose(state.tasks[2].basis.hdg_deg, 0.0)
+
+
+# ------------------------------------------------- proposing to cancel drops that no longer help
+def test_kept_drop_that_no_longer_helps_detection_is_proposed_for_cancellation() -> None:
+    from aqua_drift.replanning import cancel_suggestions, detection_weight
+
+    config = ForwardDeploymentConfig()
+    ahead = drop(1, offset(9000, 0), 300, EAST)  # on the track ahead of a target heading east
+    behind = drop(2, offset(-9000, 0), 300, EAST)  # far behind it: never within detection range
+    assert detection_weight(EAST, ahead.position, 300, config, R_MAX_YD) > 0.9
+    assert detection_weight(EAST, behind.position, 300, config, R_MAX_YD) == 0.0
+    # both are kept by the replanner (the layer flies to drop 1, drop 2 is due soon) ...
+    tasks = [ahead, behind.model_copy(update={"planned_tick": TICK + 120})]
+    out = cancel_suggestions(TICK, EAST, feed(tasks, flying_to(1)), config, R_MAX_YD)
+    # ... only the useless one is proposed; nothing is cancelled here
+    assert set(out) == {2} and "探知に寄与しない" in out[2]
+    assert [t.status for t in tasks] == ["APPROVED", "APPROVED"]
+    # the target turned back west: now drop 1 is the useless one
+    west = estimate(hdg=270.0)
+    out = cancel_suggestions(TICK, west, feed(tasks, flying_to(1)), config, R_MAX_YD)
+    assert out.get(1)
+    # a replaceable drop is left to the replanner, a proposal is withdrawn once the drop helps again
+    revisable = drop(3, offset(-9000, 0), 1500, EAST)
+    assert cancel_suggestions(TICK, EAST, feed([revisable]), config, R_MAX_YD) == {}
+    proposed = ahead.model_copy(update={"cancel_suggestion": "x"})
+    assert cancel_suggestions(TICK, EAST, feed([proposed], flying_to(1)), config, R_MAX_YD) == {1: None}
+
+
+async def test_state_keeps_flying_a_proposed_drop_until_the_operator_cancels() -> None:
+    from aqua_drift.models import CancelSuggestions
+
+    config = ScenarioConfig()
+    config.layer.enabled = True
+    state = SimulationState(config)
+    state.tick = TICK
+    await state.queue_deployment(DeploymentRequest(tick=TICK, positions=[offset(-9000, 0)], reason="plan",
+                                                   bases=[basis_for(EAST, offset(-9000, 0))]))
+    task = state.tasks[0]
+    assert await state.set_cancel_suggestions(CancelSuggestions(tick=TICK, suggestions={1: "useless"})) == [1]
+    assert task.status == "APPROVED" and task.cancel_suggestion == "useless" and task.cancel_suggested_tick == TICK
+    # repeated proposals change nothing; the operator decides
+    assert await state.set_cancel_suggestions(CancelSuggestions(tick=TICK + 5, suggestions={1: "useless"})) == []
+    assert task.cancel_suggested_tick == TICK
+    await state.cancel_tasks([1])
+    assert task.status == "CANCELLED"

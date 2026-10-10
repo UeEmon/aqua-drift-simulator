@@ -75,6 +75,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Log in to Docker Hub
+        # authenticated pulls avoid the anonymous rate limit; without the secrets, pull anonymously
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          else
+            echo "DOCKERHUB_TOKEN is not set; pulling anonymously"
+          fi
       - name: Start the full stack
         run: |
           cp .env.example .env
@@ -115,6 +126,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Log in to Docker Hub
+        # authenticated pulls avoid the anonymous rate limit; without the secrets, pull anonymously
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          else
+            echo "DOCKERHUB_TOKEN is not set; pulling anonymously"
+          fi
       - name: Start the full stack
         run: |
           cp .env.example .env
