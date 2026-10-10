@@ -202,3 +202,54 @@ def test_detected_maneuver_replans_within_the_cooldown() -> None:
     assert positions and "replanned after a maneuver" in reason
     turned.metadata["maneuver_detected_tick"] = 40  # already handled by the deployment at 50
     assert plan_forward_deployment(100, turned, behind, [], config, 6000, 50)[1] == "cooldown"
+
+
+# ------------------------------------------------------------- short detection range
+def _layer_at(east_m: float, north_m: float, heading_deg: float):
+    from aqua_drift.deployment import _offset
+    from aqua_drift.optimal_deployment import LayerAvailability
+
+    return LayerAvailability(ready_s=0.0, position=_offset(ORIGIN, east_m, north_m, 0.0), speed_kt=200.0,
+                             max_bank_deg=15.0, heading_deg=heading_deg)
+
+
+def test_short_range_plan_is_one_line_along_the_track_laid_in_one_pass() -> None:
+    """Detection range (500 YD) far shorter than the layer's turn radius (~4 km): the observers of
+    one plan lie on one line along the track, close ahead, and are due together, so the layer lays
+    them in one straight pass instead of a loop per observer. The plan stays cheap (candidates only
+    on a few lines along the track)."""
+    from aqua_drift.optimal_deployment import plan_optimal_deployment
+
+    behind = [offset(-1500, 300), offset(-1500, -300)]
+    positions, reason, report = plan_optimal_deployment(
+        estimate(), behind, [], ForwardDeploymentConfig(), 500, 99, coverage_short=True,
+        layer=_layer_at(-8000.0, -3000.0, 60.0))
+    assert len(positions) >= 2, reason
+    assert report.candidates < 2000
+    north = [local_offset_m(ORIGIN, p)[1] for p in positions]
+    assert max(north) - min(north) < 1.0  # one line, parallel to the track (east)
+    east = sorted(local_offset_m(ORIGIN, p)[0] for p in positions)
+    assert east[-1] < 8.0 * 500 * 0.9144  # close ahead, not spread over the horizon
+    span = max(report.drop_times_s) - min(report.drop_times_s)
+    assert span <= (east[-1] - east[0]) / (200.0 * 0.5144444444444445) + 5.0  # straight along it
+
+
+def test_long_range_plan_keeps_the_free_placement() -> None:
+    from aqua_drift.optimal_deployment import plan_optimal_deployment
+
+    behind = [offset(-3000, 2000), offset(-3000, -2000)]
+    config = ForwardDeploymentConfig(target_error_yd=5.0, min_relative_gain=0.0)
+    lined = plan_optimal_deployment(estimate(), behind, [], config, 6000, 99, layer=_layer_at(0.0, -5000.0, 0.0))
+    off = plan_optimal_deployment(estimate(), behind, [], config.model_copy(update={"line_laying": False}), 6000, 99,
+                                  layer=_layer_at(0.0, -5000.0, 0.0))
+    assert [(p.latitude, p.longitude) for p in lined[0]] == [(p.latitude, p.longitude) for p in off[0]]
+
+
+def test_cost_only_is_the_cost_before_of_a_full_plan() -> None:
+    from aqua_drift.optimal_deployment import plan_optimal_deployment
+
+    config = ForwardDeploymentConfig()
+    full = plan_optimal_deployment(estimate(), FIELD, [], config, 6000, 99, force=True)[2]
+    only = plan_optimal_deployment(estimate(), FIELD, [], config, 6000, 99, cost_only=True)[2]
+    assert only.candidates == 0
+    assert abs(only.cost_before_yd - full.cost_before_yd) < 1e-6

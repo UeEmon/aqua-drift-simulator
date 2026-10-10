@@ -75,10 +75,13 @@ body { overflow: hidden; }
 .sw.smoothed { background: #00ff00; }
 .sw.region { background: #ff4fd8; height: 10px; opacity: 0.7; }
 .sw.bearing { background: repeating-linear-gradient(90deg, #ffe680 0 5px, transparent 5px 8px); }
-/* planned drop points (投下予定地点): outlined triangle, as on the map */
-.sw.drop, .sw.cancel { width: 12px; height: 11px; border-radius: 0; }
-.sw.drop { background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 11'%3E%3Cpath d='M6 1.2 L11 10 L1 10 Z' fill='%23ff9f43' fill-opacity='0.4' stroke='%23ff9f43' stroke-width='1.6' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat; }
-.sw.cancel { background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 11'%3E%3Cpath d='M6 1.2 L11 10 L1 10 Z' fill='%23ff6b5e' fill-opacity='0.4' stroke='%23ff6b5e' stroke-width='1.6' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat; }
+.sw.drop { background: transparent; border: 2px solid #ff9f43; width: 10px; height: 10px; border-radius: 50%; }
+.sw.cancel { background: transparent; border: 2px solid #ff6b5e; width: 10px; height: 10px; border-radius: 50%; }
+/* release points (投下点, where the layer drops): outlined triangle, as on the map */
+.sw.release {
+  width: 12px; height: 11px; border-radius: 0;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 11'%3E%3Cpath d='M6 1.2 L11 10 L1 10 Z' fill='%23e9e4ff' fill-opacity='0.35' stroke='%23e9e4ff' stroke-width='1.6' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+}
 .sw.observer { background: #ffd700; height: 8px; width: 8px; border-radius: 50%; }
 
 #control-panel {
