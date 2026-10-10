@@ -724,7 +724,7 @@ function updateLayer(deployment) {
   // the latest released drops: release point -> entry point (where the observer fell in the wind)
   const released = tasks.filter((t) => t.status === "DONE" && t.release_position).slice(-6);
   const taskKey = open.map((t) => `${t.task_id}:${t.status}:${t.planned_tick}:${t.sequence}:${t.cancel_suggestion ? 1 : 0}:${t.position.latitude.toFixed(4)}:${t.position.longitude.toFixed(4)}:${releaseKey(t.release_position)}`).join("|")
-    + `|${released.map((t) => `${t.task_id}:${t.splash_tick}:${t.miss_yd}`).join(",")}|${exaggeration()}`;
+    + `|${released.map((t) => `${t.task_id}:${t.splash_tick}:${releaseKey(t.position)}`).join(",")}|${exaggeration()}`;
   if (taskKey !== state.taskKey) {
     state.taskKey = taskKey;
     gpu.taskPoints.removeAll();
@@ -740,10 +740,6 @@ function updateLayer(deployment) {
       const target = t.planned_position || t.position;
       gpu.releaseLines.add({ width: 1, material: colorMaterial(COLORS.drop.withAlpha(0.6)), positions: [surface(t.release_position), surface(t.position)] });
       gpu.taskPoints.add({ position: surface(target), pixelSize: 5, color: Cesium.Color.TRANSPARENT, outlineColor: COLORS.proposed, outlineWidth: 1 });
-      if (t.miss_yd != null) {
-        gpu.taskLabels.add({ position: surface(t.position), text: `#${t.task_id} 着水誤差 ${Math.round(t.miss_yd)} YD`, font: "10px sans-serif",
-          fillColor: COLORS.drop, pixelOffset: new Cesium.Cartesian2(0, 14) });
-      }
     }
     for (const [index, t] of open.entries()) {
       const proposed = t.status === "PROPOSED";
@@ -834,6 +830,52 @@ function updateLayer(deployment) {
   // keep a drop time the operator is typing: do not rebuild the table under the cursor
   const editing = document.activeElement?.closest?.("#drop-table") && document.activeElement.matches("input");
   if (!editing) setHtml($("drop-table").querySelector("tbody"), rows.join("") || "<tr><td colspan='4'>設標計画なし</td></tr>");
+}
+
+// ---- observers the layer laid (投下済みの観測者): predicted / actual entry point, where the
+// observer is now, the entry miss, time since it entered the water and its drift since then
+function durationText(seconds) {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return "--";
+  const s = Math.floor(seconds);
+  const h = Math.floor(s / 3600);
+  return h ? `${h}:${pad2(Math.floor(s / 60) % 60)}:${pad2(s % 60)}` : `${Math.floor(s / 60)}:${pad2(s % 60)}`;
+}
+function updateLaidObservers(snapshot) {
+  if (!tabVisible("tab-deploy")) return;
+  const tick = snapshot.tick;
+  const records = new Map((snapshot.observers || []).map((r) => [r.state.observer_id, r]));
+  const archived = new Set(snapshot.archived_observer_ids || []);
+  const laid = (snapshot.deployment?.tasks || []).filter((t) => t.status === "DONE").reverse();
+  const where = (p) => (p ? `${fmt(p.latitude, 4)}, ${fmt(p.longitude, 4)}` : "--");
+  let inWater = 0;
+  const rows = laid.map((t) => {
+    const entryTick = t.splash_tick ?? t.done_tick;
+    const falling = t.splash_tick != null && t.miss_yd == null && tick < t.splash_tick;
+    const predicted = t.planned_position || t.position;
+    const ended = t.observer_id != null && archived.has(`${t.observer_id}#${t.observer_session ?? 0}`);
+    const record = t.observer_id != null && !ended ? records.get(t.observer_id) : null;
+    const now = record?.state.position;
+    let name = "--";
+    let current = "--";
+    if (falling) current = "落下中";
+    else if (t.observer_id == null) current = "起動待ち";
+    else if (ended) current = "観測終了";
+    else if (now) current = where(now);
+    if (t.observer_id != null) name = escapeHtml(t.observer_id);
+    if (!falling) inWater += 1;
+    let drift = "--";
+    if (now && !falling) {
+      const { east, north } = offsetM(t.position, now);
+      const yd = Math.hypot(east, north) / YD_TO_M;
+      drift = `${fmt(yd, 0)} YD${yd >= 1 ? `<br /><small>${fmt((Math.atan2(east, north) * 180 / Math.PI + 360) % 360, 0)}°</small>` : ""}`;
+    }
+    return `<tr><td>#${t.task_id}<br /><small>${name}</small></td>`
+      + `<td><small>予測 ${where(predicted)}<br />着水 ${falling ? "落下中" : where(t.position)}<br />現在 ${current}</small></td>`
+      + `<td>${t.miss_yd != null ? `${fmt(t.miss_yd, 0)} YD` : "--"}</td>`
+      + `<td>${falling ? "--" : durationText(tick - entryTick)}</td><td>${drift}</td></tr>`;
+  });
+  setText("laid-status", laid.length ? `投下 ${laid.length}・着水 ${inWater}・落下中 ${laid.length - inWater}` : "投下済みの観測者なし");
+  setHtml($("laid-table").querySelector("tbody"), rows.join("") || "<tr><td colspan='5'>投下済みの観測者なし</td></tr>");
 }
 
 async function decideDrops(taskIds, approve) {
@@ -2590,6 +2632,7 @@ function render(snapshot) {
   updateLloyd(snapshot.lloyd, snapshot.config, snapshot.target);
   updateDeployment(snapshot.deployment);
   updateLayer(snapshot.deployment);
+  updateLaidObservers(snapshot);
   updateWind(snapshot.deployment);
   updateForces(snapshot, estimate);
   drawCharts();

@@ -457,6 +457,7 @@ class ObserverPlacement(BaseModel):
     observer_id: str | None = None
     source: str = "manual"  # manual (operator) | forward (automatic 前程 deployment)
     planned_tick: int | None = None  # drop time requested by the operator (None = as soon as possible)
+    task_id: int | None = None  # the drop task (設標) that laid this observer, if any
 
 
 class ObserverAssignment(Position):
@@ -666,6 +667,10 @@ class DropTask(BaseModel):
     planned_position: Position | None = None  # the drop point when the observer entered the water
     splash_tick: int | None = None
     miss_yd: float | None = None  # entry point - drop point (horizontal)
+    # the observer container that took this drop's position ("<observer_id>#<session>" is
+    # archived when it stops observing)
+    observer_id: str | None = None
+    observer_session: int | None = None
 
     def flight_key(self) -> tuple[int, int, int]:
         """Order the layer flies the drops in: planned time (as soon as possible first), then
