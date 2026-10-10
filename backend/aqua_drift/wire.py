@@ -30,6 +30,17 @@ def _r(value: float | None, digits: int) -> float | None:
     return None if value is None else round(float(value), digits)
 
 
+def _rounded(value: Any, digits: int = 6) -> Any:
+    """Floats rounded to `digits` decimals (lat/lon 1e-6 deg ~ 0.1 m) throughout a payload."""
+    if isinstance(value, float):
+        return round(value, digits)
+    if isinstance(value, dict):
+        return {k: _rounded(v, digits) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_rounded(v, digits) for v in value]
+    return value
+
+
 def _digest(value: Any) -> str:
     return hashlib.sha1(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
@@ -94,8 +105,11 @@ def track_diff(sent: list[TrackRow], new: list[TrackRow]) -> dict[str, Any] | No
 class WireEncoder:
     """Per-connection encoder: remembers what this client already has."""
 
-    def __init__(self, region_interval_s: float = 3.0) -> None:
+    def __init__(self, region_interval_s: float = 3.0, path_interval_s: float = 5.0) -> None:
         self.region_interval_s = region_interval_s
+        self.path_interval_s = path_interval_s
+        self.path_key: tuple[Any, ...] | None = None
+        self.path_sent_at = -1e9
         self.tracks: dict[str, list[TrackRow]] = {}
         self.hashes: dict[str, str] = {}
         self.region_hash: str | None = None
@@ -174,8 +188,15 @@ class WireEncoder:
             # does: sent separately, only when changed, instead of in every message
             path = [[round(lat, 6), round(lon, 6)] for lat, lon in layer.pop("planned_path", [])]
         message["lay"] = layer
-        if self._changed("lpp", path):
+        # the path starts at the layer, so it changes every second: resend it at most every
+        # `path_interval_s` (the client starts it at the layer's current position), at once when
+        # where it leads changes (new / reordered / finished drops, path cleared)
+        key = (None,) if not path else (len(path) > 1, tuple(path[-1]))
+        due = now - self.path_sent_at >= self.path_interval_s
+        if (key != self.path_key or due) and self._changed("lpp", path):
             message["lpp"] = path
+            self.path_key = key
+            self.path_sent_at = now
         for task in data["deployment"].get("tasks", []):  # the replanner's bookkeeping is not shown
             task.pop("basis", None)
             for key in ("cancel_suggestion", "cancel_suggested_tick"):  # only sent when proposed
@@ -226,4 +247,4 @@ class WireEncoder:
         elif self.region_hash is not None:
             message["rgn"] = None  # region cleared (no estimate)
             self.region_hash = None
-        return message
+        return _rounded(message)
