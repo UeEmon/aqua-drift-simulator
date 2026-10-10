@@ -394,8 +394,9 @@ def _best_path(state: LayerState, config: LayerConfig, point: Position, left: fl
     return float(rate[k, j]), float(error[k, j])
 
 
-def _first_leg_s(state: LayerState, config: LayerConfig, point: Position, left: float | None) -> np.ndarray:
-    """Drop time (s from now) at the point per approach heading (route.approach_headings) on
+def _first_leg_s(state: LayerState, config: LayerConfig, point: Position, left: float | None,
+                 headings: np.ndarray) -> np.ndarray:
+    """Drop time (s from now) at the point per approach heading (compass rad) on
     the timed path the guidance would fly (see _best_path: the guidance path or a detour, the
     arrival closest to the planned time `left`)."""
     v = max(state.speed_kt, 1.0) * KNOT_TO_MPS
@@ -408,7 +409,7 @@ def _first_leg_s(state: LayerState, config: LayerConfig, point: Position, left: 
     safe = np.where(rate == 0.0, 1.0, rate)
     dx = np.where(rate == 0.0, v * t * math.sin(h0), v / safe * (math.cos(h0) - np.cos(h)))
     dy = np.where(rate == 0.0, v * t * math.cos(h0), v / safe * (np.sin(h) - math.sin(h0)))
-    headings = routelib.approach_headings()[:, None, None]
+    headings = np.asarray(headings, dtype=float)[:, None, None]
     times = (t + _dubins_times(east - dx, north - dy, h, v, config, headings)).reshape(len(headings), -1)
     if left is None:  # not timed: the guidance path
         return times[:, 0]
@@ -416,12 +417,20 @@ def _first_leg_s(state: LayerState, config: LayerConfig, point: Position, left: 
 
 
 def timed_turn(state: LayerState, config: LayerConfig, point: Position,
-               left: float, approach: float | None = None) -> tuple[float | None, float]:
+               left: float, approach: float | None = None, flown_m: float | None = None) -> tuple[float | None, float]:
     """Path control of a timed leg, re-planned every second: the best path at the current
     speed (see _best_path). Only when no path arrives within PATH_TOLERANCE_S of the planned
     time is the speed changed: the smallest change of the band (5 kt steps) whose best path
     arrives within PATH_TOLERANCE_S, else the speed whose best path is closest. Returns (turn
-    rate for this second or None = guidance, speed kt)."""
+    rate for this second or None = guidance, speed kt).
+
+    flown_m: the rest of the path the guidance is flying (kept, see _guidance). When it arrives
+    on time it is flown on at the same speed: a fresh plan close to the point can be a loop (a
+    tiny offset), and a new speed (a new turn radius) would drop the path being flown."""
+    if flown_m is not None:
+        v = max(state.speed_kt, 1.0) * KNOT_TO_MPS
+        if abs(max(flown_m - config.capture_radius_yd * YD_TO_M, 0.0) / v - left) <= PATH_TOLERANCE_S:
+            return None, state.speed_kt
     rate, error = _best_path(state, config, point, left, state.speed_kt, approach)
     if abs(error) <= PATH_TOLERANCE_S:
         return rate, state.speed_kt
@@ -584,18 +593,20 @@ def release_point(layer_position: Position, altitude_ft: float, speed_kt: float,
     return release, t
 
 
-ROUTE_AHEAD = 5  # drops looked ahead when choosing the approach heading
+ROUTE_AHEAD = 8  # drops in the route when choosing the approach heading (the current one and up to 7 after it)
 
 
 def _route(state: LayerState, config: LayerConfig, points: list[Position],
-           planned: list[float | None], first_s: np.ndarray | None = None) -> list[routelib.Leg]:
+           planned: list[float | None], first_s: np.ndarray | None = None,
+           first_headings: np.ndarray | None = None) -> list[routelib.Leg]:
     """The route from the current state through the points (planned drop times s from now;
-    first_s: see route.route)."""
+    first_s, first_headings: see route.route)."""
     offsets = [local_offset_m(state.position, p) for p in points]
     v = max(state.speed_kt, 1.0) * KNOT_TO_MPS
     return routelib.route([o[0] for o in offsets], [o[1] for o in offsets], math.radians(state.heading_deg),
                           state.speed_kt, config.max_bank_deg, planned, preferred_side(config),
-                          config.turn_margin_s * v, capture_m=config.capture_radius_yd * YD_TO_M, first_s=first_s)
+                          config.turn_margin_s * v, capture_m=config.capture_radius_yd * YD_TO_M, first_s=first_s,
+                          first_headings=first_headings)
 
 
 def ready_pose(state: LayerState | None, config: LayerConfig, tasks: list, tick: int,
@@ -635,8 +646,21 @@ def _approach(state: LayerState, config: LayerConfig, tasks: list, points: list[
     if committed and state.approach_key == key:
         return state
     planned = [None if t.planned_tick is None else float(t.planned_tick - tick) for t in tasks]
+    offsets = [local_offset_m(state.position, p) for p in points]
+    headings = routelib.approach_headings([o[0] for o in offsets], [o[1] for o in offsets], 0)
+    # the heading flown stays a candidate (the last one): the approach, or on the way to a point
+    # on any heading (it was the last drop) the heading that path arrives on
+    flown = None if state.approach_deg is None else math.radians(state.approach_deg)
+    if flown is None and committed:
+        v = max(state.speed_kt, 1.0) * KNOT_TO_MPS
+        _, _, final = routelib.path_to(offsets[0][0], offsets[0][1], math.radians(state.heading_deg), None,
+                                       turn_radius_m(state.speed_kt, config.max_bank_deg), preferred_side(config),
+                                       config.turn_margin_s * v)
+        flown = float(final) if math.isfinite(float(final)) else None
+    if flown is not None:
+        headings = np.append(headings, flown)
     # on the way (after a drop) a timed drop is flown as the timed guidance can fly it
-    first = _first_leg_s(state, config, points[0], planned[0]) \
+    first = _first_leg_s(state, config, points[0], planned[0], headings) \
         if state.mode == "TRANSIT" and (planned[0] is not None or committed) else None
     if committed and first is not None and state.eta_s is not None and math.isfinite(state.eta_s):
         # the path flown arrives in eta_s (a timed one: on time when early, see timed_turn)
@@ -645,12 +669,11 @@ def _approach(state: LayerState, config: LayerConfig, tasks: list, points: list[
         else:
             worse = np.abs(first - planned[0]) > max(state.eta_s - planned[0], 0.0) + PATH_TOLERANCE_S
         kept = np.where(worse, np.inf, first)
-        if state.approach_deg is not None:  # the heading flown: as the guidance flies it
-            k = round(state.approach_deg * routelib.APPROACH_CANDIDATES / 360.0) % routelib.APPROACH_CANDIDATES
-            kept[k] = state.eta_s if planned[0] is None else max(state.eta_s, planned[0])
+        if flown is not None:  # the heading flown: as the guidance flies it
+            kept[-1] = state.eta_s if planned[0] is None else max(state.eta_s, planned[0])
         if np.isfinite(kept).any():
             first = kept
-    legs = _route(state, config, points, planned, first)
+    legs = _route(state, config, points, planned, first, headings)
     approach = math.degrees(legs[0].approach) % 360.0
     if approach == state.approach_deg:
         return state.model_copy(update={"approach_key": key})
@@ -754,7 +777,8 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
             if decision == "leave":
                 target, task_id = point, task.task_id
                 if timed:
-                    rate, wanted = timed_turn(state, config, point, left, approach)
+                    flown = sum(state.path_lengths_m) if committed and state.path_sides else None
+                    rate, wanted = timed_turn(state, config, point, left, approach, flown)
             elif holding:
                 hold, task_id = point, task.task_id
                 wanted = state.speed_kt

@@ -27,7 +27,10 @@ G = 9.80665
 KNOT_TO_MPS = 0.5144444444444445
 TWO_PI = 2.0 * math.pi
 LOOP_TOLERANCE = math.radians(20.0)  # a turn-then-straight path this close to the approach heading instead of a loop
-APPROACH_CANDIDATES = 36  # approach headings compared at each point (every 10 degrees)
+APPROACH_CANDIDATES = 36  # approach headings compared at each point (every 10 degrees) ...
+# ... and the bearings from the previous point and to the next one (a line of close drops is
+# crossed straight along it: drops a few hundred metres apart cannot take up a 5 degree offset
+# from the 10 degree grid within a turn radius of ~4 km and would cost a loop each)
 LATE_WEIGHT = 5.0  # a second late at a drop costs this many seconds of flight
 ORDER_LIMIT = 5  # drops of one plan ordered by trying every order (more: by drop time)
 
@@ -220,26 +223,38 @@ class Leg:
     heading: float = math.nan  # heading at the point (the approach; the last point: as flown in)
 
 
-def approach_headings() -> np.ndarray:
-    """The approach headings compared at each point (compass rad)."""
-    return np.arange(APPROACH_CANDIDATES) * TWO_PI / APPROACH_CANDIDATES
+def approach_headings(east: list[float] | None = None, north: list[float] | None = None, k: int = 0) -> np.ndarray:
+    """The approach headings compared at point k of the points (east, north m from the start;
+    compass rad): APPROACH_CANDIDATES evenly spaced, then the bearing from the previous point
+    (the start for the first) and the bearing to the next point. Without points: the even ones."""
+    grid = np.arange(APPROACH_CANDIDATES) * TWO_PI / APPROACH_CANDIDATES
+    if east is None or north is None:
+        return grid
+    px, py = (east[k - 1], north[k - 1]) if k > 0 else (0.0, 0.0)
+    extra = []
+    if math.hypot(east[k] - px, north[k] - py) > 0.0:
+        extra.append(_bearing(east[k] - px, north[k] - py))
+    if k + 1 < len(east) and math.hypot(east[k + 1] - east[k], north[k + 1] - north[k]) > 0.0:
+        extra.append(_bearing(east[k + 1] - east[k], north[k + 1] - north[k]))
+    return np.concatenate([grid, np.mod(extra, TWO_PI)])
 
 
 def route(east: list[float], north: list[float], heading: float, speed_kt: float, bank_deg: float,
           planned_s: list[float | None] | None = None, prefer: int = -1, margin_m: float = 0.0,
-          start_s: float = 0.0, capture_m: float = 0.0, first_s: np.ndarray | None = None) -> list[Leg]:
+          start_s: float = 0.0, capture_m: float = 0.0, first_s: np.ndarray | None = None,
+          first_headings: np.ndarray | None = None) -> list[Leg]:
     """The route through points (east, north m from the start) in order: the approach heading,
     arrival and drop time (s) of each.
 
-    The approach headings (APPROACH_CANDIDATES per point; the last point on any heading) are
+    The approach headings (approach_headings per point; the last point on any heading) are
     chosen together by dynamic programming over the points: least LATE_WEIGHT x (seconds late
     after the planned times) + the drop time of the last point. A layer early at a point waits
     (detours) for its planned time; the next leg starts at the point on the approach heading.
     The first leg is flown as the guidance flies it (path_to loose, capture_m): close to the point
     a small offset from the path is not a loop.
 
-    first_s: the drop time of the first point per approach heading (approach_headings()) as
-    the layer can really fly it. A timed leg cannot always wait: close to the point the paths
+    first_s: the drop time of the first point per approach heading (first_headings, default
+    approach_headings(east, north, 0)) as the layer can really fly it. A timed leg cannot always wait: close to the point the paths
     on one approach heading arrive either at once or about a loop later. An early drop there
     costs as much as a late one."""
     n = len(east)
@@ -249,16 +264,19 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
     radius = turn_radius_m(speed_kt, bank_deg)
     v = max(speed_kt, 1.0) * KNOT_TO_MPS
     planned_s = planned_s or [None] * n
-    headings = approach_headings()
     # per state (approach heading at the point): cost, drop time, arrival, parent
     cost = np.zeros(1)
     drop = np.full(1, float(start_s))
     pose = np.array([heading])  # heading at the previous point (one start pose)
     xs, ys = 0.0, 0.0
-    parents, arrivals, drops = [], [], []
+    parents, arrivals, drops, candidates = [], [], [], []
     for k in range(n):
         dx, dy = east[k] - xs, north[k] - ys
         last = k == n - 1
+        headings = approach_headings(east, north, k)
+        if k == 0 and first_headings is not None:
+            headings = np.asarray(first_headings, dtype=float)
+        candidates.append(headings)
         if last:
             _, length, final = path_to(dx, dy, pose, None, radius, prefer, margin_m, loose=k == 0,
                                        capture_m=capture_m)
@@ -292,7 +310,7 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
     state = int(np.argmin(cost))
     legs: list[Leg] = []
     for k in range(n - 1, -1, -1):
-        approach = None if k == n - 1 else float(headings[state])
+        approach = None if k == n - 1 else float(candidates[k][state]) % TWO_PI
         heading_in = float(final[parents[k][state]]) % TWO_PI if approach is None else approach
         legs.append(Leg(approach, float(arrivals[k][state]), float(drops[k][state]), heading_in))
         state = int(parents[k][state])
