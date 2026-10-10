@@ -2,7 +2,8 @@
 
 Checks: no page/console errors, WebGL2 + MSAA active, comparison cards rendered, no horizontal
 overflow in the control panel, view buttons (oblique / top / side) set the camera, centre-on-
-estimate puts the estimate at the screen centre. Writes screenshots and GitHub annotations.
+estimate puts the estimate at the screen centre, map labels do not overlap one another or the
+map panels when the view is zoomed out over the deployment. Writes screenshots and GitHub annotations.
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import os
 import sys
 from pathlib import Path
 
+from label_check import LABELS_JS, label_violations
 from playwright.sync_api import sync_playwright
 
 failures: list[str] = []
@@ -528,6 +530,24 @@ def main() -> int:
             page.wait_for_timeout(2000)
             page.screenshot(path=str(out / "07-forward-deployment.png"))
 
+        def labels() -> None:
+            # zoomed out over observers, drop points, the layer and the arrows, the labels crowd:
+            # they must be spread out (leader lines) or hidden, never overlapping or under a panel
+            for view in ("top", "oblique"):
+                page.evaluate(f"() => window.aquaDrift.applyView('{view}')")
+                page.evaluate("""() => { const c = window.aquaDrift.viewer.camera;
+                    c.zoomOut(c.positionCartographic.height * 1.5); window.aquaDrift.viewer.scene.requestRender(); }""")
+                page.wait_for_timeout(2500)
+                result = page.evaluate(LABELS_JS)
+                note(f"labels ({view}): {result['stats']['labels']} on screen, {result['moved']} moved, "
+                     f"{result['stats']['hidden']} hidden, {result['stats']['ms']:.1f} ms")
+                for message in label_violations(result):
+                    fail(f"labels ({view}): {message}")
+                if not result["enabled"] or result["placed"] < 5:
+                    fail(f"labels ({view}): decluttering not active ({result['placed']} placed)")
+                page.screenshot(path=str(out / f"07c-labels-{view}.png"))
+            page.evaluate("() => window.aquaDrift.applyView('oblique')")
+
         def perf() -> None:
             full = page.evaluate("() => fetch('/api/snapshot').then(r => r.text()).then(t => t.length)")
             t = page.evaluate("() => window.aquaDrift.telemetry")
@@ -564,6 +584,7 @@ def main() -> int:
         stage("follow", follow)
         stage("telemetry following", lambda: telemetry("following"))
         stage("forward deployment", forward_deployment)
+        stage("labels", labels)
         stage("lloyd mirror", lloyd)
         stage("final screenshots", final_screens)
         browser.close()

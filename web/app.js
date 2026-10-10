@@ -147,6 +147,256 @@ function dashMaterial(color, dashLength = 12) {
   return Cesium.Material.fromType("PolylineDash", { color, dashLength });
 }
 
+// ================================================================== label decluttering (添字の重なり回避)
+// Symbols stay where they are; only their labels move, in screen space, so that no two labels
+// overlap and none sits under the map panels (legend, camera readout, toolbar, wind/force and
+// layer panels, status strip). Every frame, after the camera and the gliding markers have moved
+// and before drawing, the labels are placed greedily from the highest priority down: the label's
+// own offset first, then its previous spot, then spots around its symbol, nearest first. A moved
+// label gets a thin leader line to its symbol; a label with no free spot is hidden.
+const LABEL_PRIORITY = new WeakMap(); // label -> priority (higher keeps its place); default per collection
+function ranked(label, priority) {
+  LABEL_PRIORITY.set(label, priority);
+  return label;
+}
+const declutter = {
+  enabled: true,
+  collections: [[gpu.labels, 50], [gpu.taskLabels, 60], [gpu.vectorLabels, 45], [gpu.dropLabels, 35], [gpu.regionLabels, 30]],
+  symbols: [gpu.points, gpu.drops, gpu.taskPoints], // symbols a label should rather not cover
+  panels: "#legend, #camera-hud, #view-toolbar, #right-huds > *, #layer-info, #perf-hud, #status-strip, .cesium-viewer-toolbar",
+  panelRects: [],
+  panelsAt: 0,
+  placed: [], // [{label, x0, y0, x1, y1, moved}] visible labels as placed in the last frame
+  stats: { labels: 0, moved: 0, hidden: 0, ms: 0 },
+  failed: false,
+};
+const LABEL_PAD = 2; // px kept clear around each label
+const showLabel = Object.getOwnPropertyDescriptor(Cesium.Label.prototype, "show").set;
+const textWidths = new Map();
+const measureCtx = document.createElement("canvas").getContext("2d");
+
+// per-label state; `show` keeps meaning "the app wants it shown", the decluttering hides on top
+function declutterState(label) {
+  let s = label._aqDeclutter;
+  if (s) return s;
+  s = { want: label.show, hidden: false, base: Cesium.Cartesian2.clone(label.pixelOffset), slot: 0 };
+  label._aqDeclutter = s;
+  Object.defineProperty(label, "show", {
+    configurable: true,
+    get: () => s.want,
+    set(value) {
+      s.want = value;
+      showLabel.call(label, value && !s.hidden);
+    },
+  });
+  return s;
+}
+function setLabelHidden(label, s, hidden) {
+  if (s.hidden === hidden) return;
+  s.hidden = hidden;
+  showLabel.call(label, s.want && !hidden);
+}
+
+// label size in CSS px and where its box sits relative to the label's anchor + pixel offset
+function labelMetrics(label) {
+  const key = `${label.font}|${label.text}`;
+  let width = textWidths.get(key);
+  if (width === undefined) {
+    if (textWidths.size > 2000) textWidths.clear();
+    measureCtx.font = label.font;
+    width = measureCtx.measureText(label.text).width;
+    textWidths.set(key, width);
+  }
+  const size = Number((/([\d.]+)px/.exec(label.font) || [0, 12])[1]) * label.scale;
+  const ascent = 0.92 * size;
+  const h = ascent + 0.28 * size;
+  const w = width * label.scale;
+  const fx = label.horizontalOrigin === Cesium.HorizontalOrigin.LEFT ? 0 : label.horizontalOrigin === Cesium.HorizontalOrigin.RIGHT ? 1 : 0.5;
+  const v = label.verticalOrigin;
+  const top = v === Cesium.VerticalOrigin.TOP ? 0 : v === Cesium.VerticalOrigin.CENTER ? -h / 2 : v === Cesium.VerticalOrigin.BOTTOM ? -h : -ascent;
+  return { w, h, fx, top };
+}
+
+// candidate spots: 0 = the label's own offset; then 8 directions x 4 rings around the symbol
+const LABEL_SLOTS = [null];
+for (const ring of [0, 1, 2, 3]) {
+  for (const [dx, dy] of [[0, -1], [0, 1], [1, 0], [-1, 0], [1, -1], [-1, -1], [1, 1], [-1, 1]]) LABEL_SLOTS.push({ dx, dy, gap: 8 + ring * 18 });
+}
+const slotOffset = new Cesium.Cartesian2();
+function slotBox(anchor, m, s, slot, out) {
+  if (slot === 0) {
+    out.ox = s.base.x;
+    out.oy = s.base.y;
+  } else {
+    const { dx, dy, gap } = LABEL_SLOTS[slot];
+    // box centre beside the symbol, then the label offset that puts the box there
+    const cx = dx * (m.w / 2 + gap);
+    const cy = dy * (m.h / 2 + gap);
+    out.ox = cx - m.w / 2 + m.fx * m.w;
+    out.oy = cy - m.h / 2 - m.top;
+  }
+  out.x0 = anchor.x + out.ox - m.fx * m.w - LABEL_PAD;
+  out.y0 = anchor.y + out.oy + m.top - LABEL_PAD;
+  out.x1 = out.x0 + m.w + 2 * LABEL_PAD;
+  out.y1 = out.y0 + m.h + 2 * LABEL_PAD;
+  return out;
+}
+const overlaps = (a, b) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+
+function refreshPanelRects(now) {
+  if (now - declutter.panelsAt < 300) return;
+  declutter.panelsAt = now;
+  const canvas = scene.canvas.getBoundingClientRect();
+  declutter.panelRects = [];
+  for (const element of document.querySelectorAll(declutter.panels)) {
+    const r = element.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1 || element.closest("[hidden]")) continue;
+    declutter.panelRects.push({ x0: r.left - canvas.left, y0: r.top - canvas.top, x1: r.right - canvas.left, y1: r.bottom - canvas.top });
+  }
+}
+
+const toWindow = Cesium.SceneTransforms.worldToWindowCoordinates || Cesium.SceneTransforms.wgs84ToWindowCoordinates;
+function onScreen(position, width, height, out) {
+  if (!position || Cesium.Cartesian3.magnitudeSquared(position) < 1e12) return null; // not placed yet
+  const w = toWindow(scene, position, out);
+  return w && w.x > -50 && w.y > -50 && w.x < width + 50 && w.y < height + 50 ? w : null;
+}
+
+function placeLabels() {
+  const t0 = performance.now();
+  const width = scene.canvas.clientWidth;
+  const height = scene.canvas.clientHeight;
+  refreshPanelRects(t0);
+  const items = [];
+  const reset = [];
+  for (const [collection, rank] of declutter.collections) {
+    for (let i = 0; i < collection.length; i += 1) {
+      const label = collection.get(i);
+      const s = declutterState(label);
+      if (!s.want || !label.text || !declutter.enabled) {
+        reset.push([label, s]);
+        continue;
+      }
+      const anchor = onScreen(label.position, width, height, new Cesium.Cartesian2());
+      if (!anchor) {
+        reset.push([label, s]);
+        continue;
+      }
+      items.push({ label, s, anchor, m: labelMetrics(label), rank: LABEL_PRIORITY.get(label) ?? rank, order: items.length });
+    }
+  }
+  for (const [label, s] of reset) {
+    setLabelHidden(label, s, false);
+    s.slot = 0;
+    label.pixelOffset = s.base;
+  }
+  items.sort((a, b) => b.rank - a.rank || a.order - b.order);
+  // symbols on screen: a label may cover one only when there is no other free spot
+  const dots = [];
+  const scratch = new Cesium.Cartesian2();
+  if (declutter.enabled) {
+    for (const collection of declutter.symbols) {
+      for (let i = 0; i < collection.length; i += 1) {
+        const point = collection.get(i);
+        if (!point.show) continue;
+        const p = onScreen(point.position, width, height, scratch);
+        if (!p) continue;
+        const r = point.pixelSize / 2 + point.outlineWidth;
+        dots.push({ x0: p.x - r, y0: p.y - r, x1: p.x + r, y1: p.y + r });
+      }
+    }
+  }
+  const taken = declutter.panelRects.slice();
+  const placed = [];
+  let moved = 0;
+  let hidden = 0;
+  const box = {};
+  for (const item of items) {
+    const { label, s, anchor, m } = item;
+    const order = s.slot ? [0, s.slot] : [0];
+    for (let k = 1; k < LABEL_SLOTS.length; k += 1) if (k !== s.slot) order.push(k);
+    let best = -1;
+    let bestDots = Infinity;
+    let bestBox = null;
+    for (const slot of order) {
+      slotBox(anchor, m, s, slot, box);
+      // inside the view (the 3D canvas ends at the control panel) and clear of labels and panels
+      if (box.x0 < 0 || box.y0 < 0 || box.x1 > width || box.y1 > height || taken.some((r) => overlaps(box, r))) continue;
+      let covered = 0;
+      for (const d of dots) if (overlaps(box, d) && !(Math.abs((d.x0 + d.x1) / 2 - anchor.x) < 1 && Math.abs((d.y0 + d.y1) / 2 - anchor.y) < 1)) covered += 1;
+      if (covered < bestDots) {
+        best = slot;
+        bestDots = covered;
+        bestBox = { ...box };
+        if (!covered) break;
+      }
+    }
+    if (best < 0) {
+      setLabelHidden(label, s, true);
+      hidden += 1;
+      continue;
+    }
+    setLabelHidden(label, s, false);
+    s.slot = best;
+    slotOffset.x = bestBox.ox;
+    slotOffset.y = bestBox.oy;
+    label.pixelOffset = slotOffset;
+    taken.push(bestBox);
+    if (best) moved += 1;
+    placed.push({ label, anchor, x0: bestBox.x0, y0: bestBox.y0, x1: bestBox.x1, y1: bestBox.y1, moved: best !== 0 });
+  }
+  declutter.placed = placed;
+  declutter.stats = { labels: items.length, moved, hidden, ms: performance.now() - t0 };
+  drawLeaders(width, height);
+}
+
+// leader lines from a moved label to its symbol, on a 2D canvas over the 3D view
+const leaderCanvas = document.createElement("canvas");
+leaderCanvas.id = "label-leaders";
+$("cesiumContainer").insertAdjacentElement("afterend", leaderCanvas);
+function drawLeaders(width, height) {
+  const ratio = window.devicePixelRatio || 1;
+  if (leaderCanvas.width !== Math.round(width * ratio) || leaderCanvas.height !== Math.round(height * ratio)) {
+    leaderCanvas.width = Math.round(width * ratio);
+    leaderCanvas.height = Math.round(height * ratio);
+  }
+  const g = leaderCanvas.getContext("2d");
+  g.setTransform(ratio, 0, 0, ratio, 0, 0);
+  g.clearRect(0, 0, width, height);
+  g.lineWidth = 1;
+  for (const p of declutter.placed) {
+    if (!p.moved) continue;
+    // to the nearest point of the label's box, stopping just short of the symbol
+    const x = Math.min(Math.max(p.anchor.x, p.x0 + LABEL_PAD), p.x1 - LABEL_PAD);
+    const y = Math.min(Math.max(p.anchor.y, p.y0 + LABEL_PAD), p.y1 - LABEL_PAD);
+    const dx = x - p.anchor.x;
+    const dy = y - p.anchor.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 8) continue;
+    const start = 5 / len;
+    g.strokeStyle = p.label.fillColor.withAlpha(0.85).toCssColorString();
+    g.beginPath();
+    g.moveTo(p.anchor.x + dx * start, p.anchor.y + dy * start);
+    g.lineTo(x, y);
+    g.stroke();
+  }
+}
+
+scene.preRender.addEventListener(() => {
+  if (declutter.failed) return;
+  try {
+    placeLabels();
+  } catch (error) {
+    // never break the 3D view for the labels: stop decluttering and leave them where they are
+    declutter.failed = true;
+    if (window.console) console.error("label declutter stopped", error);
+  }
+});
+$("declutter-labels")?.addEventListener("change", () => {
+  declutter.enabled = checked("declutter-labels");
+  scene.requestRender();
+});
+
 const state = {
   region: null,
   observers: new Map(), // id -> {point, label, track, range}
@@ -500,7 +750,7 @@ function updateTruth(target) {
   if (!state.truth) {
     state.truth = new Marker(
       gpu.points.add({ pixelSize: 10, color: COLORS.truth, outlineColor: Cesium.Color.BLACK, outlineWidth: 2, id: "truth" }),
-      gpu.labels.add({ text: "TRUTH", font: "12px sans-serif", fillColor: COLORS.truth, pixelOffset: new Cesium.Cartesian2(0, -18) }),
+      ranked(gpu.labels.add({ text: "TRUTH", font: "12px sans-serif", fillColor: COLORS.truth, pixelOffset: new Cesium.Cartesian2(0, -18) }), 100),
       "truth",
     );
   }
@@ -681,7 +931,7 @@ function updateLayer(deployment) {
     if (!state.layerMarker) {
       state.layerMarker = new Marker(
         gpu.points.add({ pixelSize: 11, color: COLORS.layer, outlineColor: Cesium.Color.BLACK, outlineWidth: 2, id: "layer" }),
-        gpu.labels.add({ text: "設標者", font: "12px sans-serif", fillColor: COLORS.layer, pixelOffset: new Cesium.Cartesian2(0, -18) }),
+        ranked(gpu.labels.add({ text: "設標者", font: "12px sans-serif", fillColor: COLORS.layer, pixelOffset: new Cesium.Cartesian2(0, -18) }), 90),
         null,
       );
       state.layerRoute = gpu.layerLines.add({ width: 2, material: dashMaterial(COLORS.layer, 10), positions: [] });
@@ -737,8 +987,8 @@ function updateLayer(deployment) {
       gpu.releaseLines.add({ width: 1, material: colorMaterial(COLORS.drop.withAlpha(0.6)), positions: [surface(t.release_position), surface(t.position)] });
       gpu.taskPoints.add({ position: surface(target), pixelSize: 5, color: Cesium.Color.TRANSPARENT, outlineColor: COLORS.proposed, outlineWidth: 1 });
       if (t.miss_yd != null) {
-        gpu.taskLabels.add({ position: surface(t.position), text: `#${t.task_id} 着水誤差 ${Math.round(t.miss_yd)} YD`, font: "10px sans-serif",
-          fillColor: COLORS.drop, pixelOffset: new Cesium.Cartesian2(0, 14) });
+        ranked(gpu.taskLabels.add({ position: surface(t.position), text: `#${t.task_id} 着水誤差 ${Math.round(t.miss_yd)} YD`, font: "10px sans-serif",
+          fillColor: COLORS.drop, pixelOffset: new Cesium.Cartesian2(0, 14) }), 20);
       }
     }
     for (const [index, t] of open.entries()) {
@@ -1213,7 +1463,7 @@ function estimateGraphics(mode) {
   const color = mode === "ONLINE" ? COLORS.online : COLORS.smoothed;
   const graphics = new Marker(
     gpu.points.add({ pixelSize: 11, color, outlineColor: Cesium.Color.BLACK, outlineWidth: 2, id: `estimate-${mode}` }),
-    gpu.labels.add({ text: mode === "ONLINE" ? "EST" : "", font: "12px sans-serif", fillColor: color, pixelOffset: new Cesium.Cartesian2(0, 20) }),
+    ranked(gpu.labels.add({ text: mode === "ONLINE" ? "EST" : "", font: "12px sans-serif", fillColor: color, pixelOffset: new Cesium.Cartesian2(0, 20) }), 95),
     `est:${mode}`,
   );
   state.estimates[mode] = graphics;
@@ -2641,4 +2891,4 @@ const stream = (() => {
   return { setExaggeration: (value) => guard(() => handleUpdate({ snapshot: null, tracks: decoder.setExaggeration(value) }, 0, 0)) };
 })();
 
-window.aquaDrift = { viewer, state, applyView, centerOn, cameraInfo, renderFaults, quality, telemetry, gpu, baseMap, setBaseMap, tracks, anim }; // diagnostics / E2E
+window.aquaDrift = { viewer, state, declutter, applyView, centerOn, cameraInfo, renderFaults, quality, telemetry, gpu, baseMap, setBaseMap, tracks, anim }; // diagnostics / E2E

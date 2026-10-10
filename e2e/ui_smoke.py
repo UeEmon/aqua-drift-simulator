@@ -2,8 +2,9 @@
 
 Serves web/ (with Cesium from web/node_modules) on a local port, opens it in headless Chromium
 (real WebGL via SwiftShader) and checks: no page errors, the Cesium viewer is created with a
-WebGL context and a visible canvas, frames are rendered and the canvas shows the globe. The API
-and WebSocket are not running, so the page stays in "再接続中"; that is expected here.
+WebGL context and a visible canvas, frames are rendered and the canvas shows the globe, and
+crowded map labels are moved apart (and clear of the map panels) by the label decluttering.
+The API and WebSocket are not running, so the page stays in "再接続中"; that is expected here.
 
 Usage: python e2e/ui_smoke.py [--out ui-smoke-artifacts]   (run `npm ci` in web/ first)
 """
@@ -16,6 +17,7 @@ import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from label_check import LABELS_JS, label_violations
 from playwright.sync_api import sync_playwright
 
 WEB = Path(__file__).resolve().parent.parent / "web"
@@ -48,6 +50,42 @@ FRAME_JS = """() => new Promise((resolve) => {
     const px = (fx, fy) => Array.from(g.getImageData(Math.floor(src.width * fx), Math.floor(src.height * fy), 1, 1).data);
     resolve({ center: px(0.5, 0.5), corner: px(0.01, 0.01) });
   });
+  scene.requestRender();
+})"""
+
+# a crowd of symbols with labels: 12 at the view centre (nearly the same spot) and 4 under the legend
+CROWD_JS = """() => new Promise((resolve) => {
+  const a = window.aquaDrift; const scene = a.viewer.scene; const gpu = a.gpu;
+  // close enough that the globe fills the view, also under the legend
+  scene.camera.setView({ destination: Cesium.Cartesian3.fromDegrees(140, 35, 300000) });
+  const legend = document.getElementById('legend').getBoundingClientRect();
+  const c = scene.canvas.getBoundingClientRect();
+  const at = (x, y) => scene.camera.pickEllipsoid(new Cesium.Cartesian2(x, y));
+  const spots = [];
+  for (let k = 0; k < 12; k += 1) spots.push(at(c.width / 2 + (k % 3) * 4, c.height / 2 + k * 2));
+  for (let k = 0; k < 4; k += 1) spots.push(at(legend.left - c.left + 40 + k * 30, legend.top - c.top + 12));
+  const made = { labels: [], points: [] };
+  spots.forEach((position, k) => {
+    made.points.push(gpu.points.add({ position, pixelSize: 8, color: Cesium.Color.GOLD }));
+    made.labels.push(gpu.labels.add({ position, text: `smoke-${k} 観測者ラベル`, font: '11px sans-serif',
+      fillColor: Cesium.Color.GOLD, pixelOffset: new Cesium.Cartesian2(0, -14) }));
+  });
+  window.__crowd = made;
+  // the label placement runs per frame: wait for a frame after the panels were measured
+  setTimeout(() => { const off = scene.postRender.addEventListener(() => { off(); resolve(spots.filter(Boolean).length); });
+    scene.requestRender(); }, 400);
+})"""
+
+CROWD_OFF_JS = """() => new Promise((resolve) => {
+  const a = window.aquaDrift; const scene = a.viewer.scene; const el = document.getElementById('declutter-labels');
+  el.checked = false; el.dispatchEvent(new Event('change'));
+  const off = scene.postRender.addEventListener(() => { off();
+    const labels = window.__crowd.labels;
+    const result = { base: labels.every((l) => l.pixelOffset.x === 0 && l.pixelOffset.y === -14), shown: labels.every((l) => l._show) };
+    el.checked = true; el.dispatchEvent(new Event('change'));
+    for (const l of labels) a.gpu.labels.remove(l);
+    for (const p of window.__crowd.points) a.gpu.points.remove(p);
+    resolve(result); });
   scene.requestRender();
 })"""
 
@@ -123,6 +161,22 @@ def main() -> int:
             if sum(frame["center"][:3]) == 0:
                 failures.append(f"globe not drawn: centre pixel {frame['center']}")
             page.wait_for_timeout(1000)
+            # label decluttering: the crowd is spread out without overlaps and kept off the panels
+            spots = page.evaluate(CROWD_JS)
+            labels = page.evaluate(LABELS_JS)
+            print(f"labels: {spots} crowded labels -> placed {labels['placed']}, moved {labels['moved']}, "
+                  f"stats {labels['stats']}", flush=True)
+            page.screenshot(path=str(out / "ui-smoke-labels.png"))
+            if spots < 16:
+                failures.append(f"label crowd: only {spots} of 16 spots on the globe")
+            failures.extend(label_violations(labels))
+            if labels["placed"] + labels["stats"]["hidden"] != labels["stats"]["labels"]:
+                failures.append(f"labels neither placed nor hidden: {labels}")
+            if labels["moved"] < 8:
+                failures.append(f"crowded labels were not moved apart: {labels['moved']} moved")
+            restored = page.evaluate(CROWD_OFF_JS)
+            if not (restored["base"] and restored["shown"]):
+                failures.append(f"labels not restored when the decluttering is turned off: {restored}")
             render_faults = page.evaluate("() => window.aquaDrift.renderFaults.count")
             if render_faults:
                 failures.append(f"Cesium render loop errors: {render_faults}")
