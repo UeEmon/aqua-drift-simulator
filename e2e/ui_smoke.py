@@ -90,6 +90,58 @@ CROWD_OFF_JS = """() => new Promise((resolve) => {
 })"""
 
 
+def check_stream_recovery(browser, url: str) -> None:
+    """Exercise worker startup failures with the real page and a clock-only stream."""
+    for mode in ("constructor", "script"):
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.add_init_script("""
+            window.__streamSocketCount = 0;
+            window.WebSocket = class extends EventTarget {
+              constructor(url) {
+                super();
+                window.__streamSocketCount += 1;
+                queueMicrotask(() => {
+                  this.dispatchEvent(new Event('open'));
+                  this.dispatchEvent(new MessageEvent('message', { data: '{"clk":0}' }));
+                });
+              }
+              close() { this.dispatchEvent(new Event('close')); }
+            };
+        """)
+        if mode == "constructor":
+            page.add_init_script("""
+                window.Worker = class {
+                  constructor() { throw new Error('simulated blocked Worker'); }
+                };
+            """)
+        else:
+            page.route("**/stream-worker.js", lambda route: route.fulfill(
+                content_type="application/javascript",
+                body="throw new Error('simulated Worker script failure');",
+            ))
+        try:
+            page.goto(url, wait_until="load")
+            page.wait_for_function("""() => window.aquaDrift &&
+                !window.aquaDrift.telemetry.worker &&
+                document.getElementById('connection-status').textContent === '接続済み' &&
+                document.getElementById('clock-badge').textContent === '一時停止'
+            """, timeout=30_000)
+            # Controls remain usable after the receiver changes; no duplicate connections.
+            page.evaluate("""() => {
+                const input = document.getElementById('depth-exaggeration');
+                input.value = '25'; input.dispatchEvent(new Event('change'));
+            }""")
+            if page.evaluate("window.__streamSocketCount") != 1:
+                raise AssertionError(f"{mode}: more than one fallback WebSocket")
+            if errors:
+                raise AssertionError(f"{mode}: page errors: {errors}")
+            print(f"stream recovery ({mode}): connected and received clock update", flush=True)
+        finally:
+            page.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default="ui-smoke-artifacts")
@@ -180,6 +232,7 @@ def main() -> int:
             render_faults = page.evaluate("() => window.aquaDrift.renderFaults.count")
             if render_faults:
                 failures.append(f"Cesium render loop errors: {render_faults}")
+            check_stream_recovery(browser, url)
         except Exception as error:  # noqa: BLE001 - report as a failure with the screenshot
             failures.append(f"{type(error).__name__}: {error}"[:800])
         finally:

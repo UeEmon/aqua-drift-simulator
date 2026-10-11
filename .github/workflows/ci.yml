@@ -38,6 +38,8 @@ jobs:
         run: cd backend && python -m aqua_drift.analysis.wire_fixture ../wire-fixture.json 600
       - name: Decode it with the browser decoder and compare
         run: node web/tests/decoder_test.js wire-fixture.json
+      - name: Browser stream transport recovery
+        run: node --test web/tests/stream_test.js
       - run: node --check web/app.js && node --check web/stream-worker.js && node --check web/stream-decoder.js
 
   ui-smoke:
