@@ -419,13 +419,11 @@ def main() -> int:
             note(f"forward deployment: initial observers {ids}")
             if ids[:4] != ["obs-01", "obs-02", "obs-03", "obs-04"]:
                 fail(f"initial observers should be obs-01..obs-04, got {ids}")
-            # the layer (設標者) has its own control tab; left turn is the standard
+            # the layer (設標者) has its own control tab; it turns either way (the shorter path)
             page.evaluate("() => document.querySelector(\".tab[data-tab='tab-deploy']\").click()")
-            if page.evaluate("() => document.getElementById('layer-turn').value") != "left":
-                fail("layer standard turn should be left")
             try:
                 page.wait_for_function(
-                    "() => document.querySelector('#layer-detail tbody').innerText.includes('基準旋回')", timeout=15_000)
+                    "() => document.querySelector('#layer-detail tbody').innerText.includes('旋回方向')", timeout=15_000)
                 note("layer tab: " + page.inner_text("#layer-status") + " / "
                      + page.inner_text("#layer-detail tbody").replace("\n", " "))
             except Exception:  # noqa: BLE001

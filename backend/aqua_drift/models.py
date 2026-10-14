@@ -221,8 +221,6 @@ class LayerConfig(BaseModel):
     # them there, so the layer does not come back to the same point)
     max_per_release: int = Field(default=4, ge=1, le=8)
     proposal_timeout_s: int = Field(default=600, ge=10, le=7200)  # unanswered proposals expire
-    preferred_turn: str = Field(default="left", pattern="^(left|right)$")  # standard turn direction
-    turn_margin_s: float = Field(default=10.0, ge=0, le=600)  # other side only if this much quicker
     # wings level at a drop: straight on the approach heading for this long before the drop point
     # and after it (aqua_drift.route.path_to); two drops on one line are one straight flight
     straight_before_s: float = Field(default=2.0, ge=0, le=120)
@@ -728,6 +726,9 @@ class LayerState(BaseModel):
     task_id: int | None = None
     orbit_center: Position | None = None
     orbit_radius_yd: float = 0.0
+    # direction of the orbit: -1 counter-clockwise (left turn), +1 clockwise (right turn), 0 not
+    # orbiting (chosen on entering the orbit: the one the layer turns onto with the least turn)
+    orbit_sense: int = 0
     eta_s: float | None = None
     # heading the layer crosses its current drop point on (lined up for the next drop point;
     # None: any heading) and the drops it was chosen for ("task>next")

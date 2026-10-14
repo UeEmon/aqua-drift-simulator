@@ -103,8 +103,8 @@ def dubins_words(east, north, heading, approach, radius: float) -> dict[str, tup
 def turn_then_straight(east, north, heading, radius: float, prefer: int = -1, margin_m: float = 0.0):
     """Turn-then-straight path (Dubins CS) to a point on any heading (arrays or scalars).
 
-    The preferred side (default -1 = left turn) is taken unless the other side is shorter by
-    more than margin_m. Returns (side +1 / -1, 0 where none is possible: the point is inside
+    The shorter side is taken (prefer: the side taken when both are as long, or when the other
+    is shorter by no more than margin_m). Returns (side +1 / -1, 0 where none is possible: the point is inside
     both turning circles; turn angle rad; straight length m; length m, inf where none)."""
     east, north, heading = np.broadcast_arrays(*(np.asarray(x, dtype=float) for x in (east, north, heading)))
     paths = {}
@@ -228,8 +228,8 @@ def _path_core(east, north, heading, approach, radius: float, prefer: int, margi
                loose: bool, capture_m: float, segments: bool):
     """Path to a point crossed on the approach heading (None or nan: any heading).
 
-    The shortest Dubins path, the preferred side first unless a path starting with the other
-    turn is shorter by more than margin_m. Arrays or scalars.
+    The shortest Dubins path, starting with either turn (prefer: the first turn taken when both
+    are as short, or the other is shorter by no more than margin_m). Arrays or scalars.
 
     loose: instead of a loop (close to the point a small offset cannot be flown out any more),
     a turn-then-straight path within LOOP_TOLERANCE of the approach heading, or -- when the
