@@ -78,11 +78,11 @@ operator (approval **automatic** by default, or **manual** with 了承/却下 in
 Without a task the layer circles the estimated target position. Each drop has an **optimal drop
 time** (just before the predicted target comes within detection range, and not before the layer
 can be there); the layer leaves when it must, picks its speed to arrive on time, holds over the
-point if early and lays the observer at the planned time. The layer turns **left** as the standard
-(orbit and holds counter-clockwise) and takes a right turn only when that route is clearly shorter
-(by the configurable margin, 10 s by default). The **設標者 tab** controls it: live state (mode,
-speed, heading, bank and turn direction, current / next drop), pause, approval mode, standard turn
-side, speed / bank / orbit settings, and the drop list (approve / reject, drop now, set a drop
+point if early and lays the observer at the planned time. The layer keeps within the maximum bank
+and turns either way, whichever gives the shorter path (it orbits in the direction it turns onto
+with the least turn). The **設標者 tab** controls it: live state (mode,
+speed, heading, bank and turn direction, current / next drop), pause, approval mode,
+speed / bank / orbit settings, and the drop list (approve / reject, drop now, set a drop
 time, cancel) plus manual placement.
 
 The background map (Natural Earth II) is **off by default** to prioritise rendering; switch it
