@@ -3,12 +3,13 @@ import math
 import random
 
 import numpy as np
+import pytest
 
 from aqua_drift.deployment import _offset
 from aqua_drift.layer import advance, initial_state
 from aqua_drift.models import DropTask, LayerConfig, LayerFeed, Position
 from aqua_drift.physics import local_offset_m
-from aqua_drift.route import WORDS, dubins_words, path_to, route, schedule, turn_radius_m
+from aqua_drift.route import WORDS, dubins_words, motion, path_to, route, schedule, turn_radius_m
 
 DATUM = Position(latitude=35.0, longitude=140.0, depth_ft=0.0)
 
@@ -81,7 +82,7 @@ def test_schedule_orders_the_drops_and_keeps_times_the_layer_can_meet() -> None:
 def _lay(points: list[Position], seed: int = 3) -> tuple[dict[int, int], float, list[float]]:
     """Fly the layer through drops (as soon as possible). Returns (drop tick by task, total
     heading change in degrees, the route's predicted drop times at the start)."""
-    config = LayerConfig(speed_spread_kt=0.0)
+    config = LayerConfig()
     rng = random.Random(seed)
     state = initial_state(config, DATUM, 0, rng)
     tasks = [DropTask(task_id=k + 1, created_tick=0, source="forward", position=p, status="APPROVED")
@@ -186,3 +187,45 @@ def test_one_drop_releases_the_observers_at_one_point_up_to_the_maximum() -> Non
     assert done[1] == done[2] < done[3]  # the third one needs another pass
     done = _lay_with(stacked, LayerConfig(max_per_release=1))
     assert len(set(done.values())) == 3
+
+
+def test_path_to_flies_wings_level_before_and_after_a_drop() -> None:
+    """The path ends with before_m straight on the approach heading and starts with the hold
+    (straight on after the last drop); a point straight ahead on the line is flown to straight."""
+    radius = turn_radius_m(200.0, 15.0)
+    _, length, final, _, _, sides, lengths = path_to(5000.0, 8000.0, 0.0, math.pi / 2, radius, before_m=500.0,
+                                                     hold_m=300.0, segments=True)
+    assert int(sides[0]) == 0 and float(lengths[0]) * radius == pytest.approx(300.0)
+    assert int(sides[-1]) == 0 and float(lengths[-1]) * radius == pytest.approx(500.0)
+    _, x, y = motion(tuple(sides), tuple(lengths), 0.0, radius, float(length) / radius)
+    assert math.hypot(float(x) - 5000.0, float(y) - 8000.0) < 1e-3 and float(final) == pytest.approx(math.pi / 2)
+    _, along, _ = path_to(0.0, 450.0, 0.0, 0.0, radius, before_m=500.0, hold_m=500.0)
+    assert float(along) == pytest.approx(450.0)
+
+
+def test_layer_drops_wings_level() -> None:
+    """Wings level (no bank) for straight_before_s before every drop and straight_after_s after
+    it, also on a line of close drops (one straight flight) and at a drop off to the side."""
+    config = LayerConfig(straight_before_s=5.0, straight_after_s=5.0)
+    bearing = math.radians(43.0)
+    points = [_offset(DATUM, (6000.0 + 450.0 * k) * math.sin(bearing) - 3000.0,
+                      (6000.0 + 450.0 * k) * math.cos(bearing) + 6000.0, 300.0) for k in range(3)]
+    points.append(_offset(DATUM, 9000.0, -2000.0, 300.0))
+    rng = random.Random(3)
+    state = initial_state(config, DATUM, 0, rng)
+    tasks = [DropTask(task_id=k + 1, created_tick=0, source="forward", position=p, status="APPROVED")
+             for k, p in enumerate(points)]
+    done: dict[int, int] = {}
+    banks: dict[int, float] = {}
+    for tick in range(1, 1500):
+        open_tasks = [t for t in tasks if t.task_id not in done]
+        if not open_tasks:
+            break
+        state, update = advance(LayerFeed(tick=tick, config=config, tasks=open_tasks, datum=DATUM), state, rng)
+        banks[tick] = state.bank_deg
+        for task_id in update.completed:
+            done[task_id] = tick
+    assert set(done) == {1, 2, 3, 4}
+    assert done[3] - done[1] < 2 * 450.0 / (200.0 * 0.5144444444444445) + 5  # the line in one pass
+    for tick in done.values():
+        assert all(abs(banks.get(t, 0.0)) < 1e-6 for t in range(tick - 4, min(tick + 5, max(banks) + 1)))

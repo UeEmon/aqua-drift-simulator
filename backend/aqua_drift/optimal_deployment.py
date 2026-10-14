@@ -356,6 +356,8 @@ class LayerAvailability:
     max_bank_deg: float
     heading_deg: float | None = None  # its heading then (None: unknown -> an average half turn)
     max_per_release: int = 1  # observers one drop can release at once (stacked at one point)
+    straight_before_s: float = 0.0  # wings level at a drop (LayerConfig.straight_before_s / after_s)
+    straight_after_s: float = 0.0
     # where it is now and its open drops in flight order (planned drop time s from now, None:
     # at once): a new plan is routed on after them
     now_position: Position | None = None
@@ -673,7 +675,7 @@ def plan_optimal_deployment(
             [float(grid[i, 0]) - start_e for i in heads], [float(grid[i, 1]) - start_n for i in heads],
             None if heading is None else math.radians(heading), layer.speed_kt,
             layer.max_bank_deg, group_times, start_s=0.0 if queued else layer.ready_s, prefix=prefix,
-            orders=line_orders,
+            orders=line_orders, before_s=layer.straight_before_s, after_s=layer.straight_after_s,
         )
     else:
         group_times = [group_times[g] for g in order]
@@ -706,6 +708,8 @@ def availability_from_feed(feed) -> LayerAvailability | None:
         speed_kt=feed.layer_speed_kt,
         max_bank_deg=feed.layer_max_bank_deg,
         heading_deg=feed.layer_ready_heading_deg,
+        straight_before_s=feed.layer_straight_before_s,
+        straight_after_s=feed.layer_straight_after_s,
         now_position=feed.layer_position,
         now_heading_deg=feed.layer_heading_deg,
         queue=[(p, None if t is None else float(t - feed.tick))

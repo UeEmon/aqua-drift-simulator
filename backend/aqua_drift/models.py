@@ -204,15 +204,14 @@ class WindConfig(BaseModel):
 
 class LayerConfig(BaseModel):
     """設標者 (layer): the craft that lays additional observers. It moves over the sea surface
-    at speed_kt +- speed_spread_kt (a new speed for every leg) with bank <= max_bank_deg and,
-    without a task, circles the estimated target position. An additional observer is in the
+    at the reference speed speed_kt (planned and flown at it, no speed changes) with bank <=
+    max_bank_deg and, without a task, circles the estimated target position. An additional observer is in the
     water only when the layer reaches its drop point. Planned drops are proposed to the
     operator; approval is automatic (default) or manual."""
 
     enabled: bool = True  # False: additional observers appear at once (no layer)
     approval: str = Field(default="auto", pattern="^(auto|manual)$")
     speed_kt: float = Field(default=200.0, gt=0, le=600)
-    speed_spread_kt: float = Field(default=50.0, ge=0, le=300)
     max_bank_deg: float = Field(default=15.0, gt=0, le=60)
     orbit_radius_yd: float = Field(default=5000.0, gt=0)  # raised to the turn radius if smaller
     capture_radius_yd: float = Field(default=150.0, gt=0)
@@ -224,6 +223,10 @@ class LayerConfig(BaseModel):
     proposal_timeout_s: int = Field(default=600, ge=10, le=7200)  # unanswered proposals expire
     preferred_turn: str = Field(default="left", pattern="^(left|right)$")  # standard turn direction
     turn_margin_s: float = Field(default=10.0, ge=0, le=600)  # other side only if this much quicker
+    # wings level at a drop: straight on the approach heading for this long before the drop point
+    # and after it (aqua_drift.route.path_to); two drops on one line are one straight flight
+    straight_before_s: float = Field(default=2.0, ge=0, le=120)
+    straight_after_s: float = Field(default=5.0, ge=0, le=120)
     paused: bool = False  # operator hold: the layer circles the target and does not leave
     random_seed: int = 31
     # 3-D flight: the layer cruises (orbit) at cruise_altitude_ft, descends to drop_altitude_ft
@@ -640,6 +643,8 @@ class DeploymentFeed(BaseModel):
     layer_speed_kt: float = 200.0
     layer_max_bank_deg: float = 15.0
     layer_max_per_release: int = 1  # observers one drop can release at once (LayerConfig.max_per_release)
+    layer_straight_before_s: float = 0.0  # LayerConfig.straight_before_s
+    layer_straight_after_s: float = 0.0  # LayerConfig.straight_after_s
     source_frequency_hz: float = 400.0  # operator's (recognized) source frequency
     sound_speed_mps: float = 1500.0
     frequency_sigma_hz: float = 0.03
@@ -733,6 +738,9 @@ class LayerState(BaseModel):
     # longer (small errors at the joins of the path can make the exact plan jump to a detour)
     path_sides: list[int] = Field(default_factory=list)
     path_lengths_m: list[float] = Field(default_factory=list)
+    # wings level after a drop: seconds of straight flight left (LayerConfig.straight_after_s)
+    straight_s: float = 0.0
+    loops: int = 0  # times the path to the current drop point has grown by a loop
     # planned flight path ahead (飛行予定経路): [latitude, longitude] from the current position
     # through the open drop points in order, along the turn-limited guidance path
     planned_path: list[tuple[float, float]] = Field(default_factory=list)

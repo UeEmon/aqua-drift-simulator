@@ -149,6 +149,7 @@ class ScenarioRun:
         return LayerAvailability(
             ready_s=float(ready - self.tick), position=where, speed_kt=layer.speed_kt,
             max_bank_deg=layer.max_bank_deg, heading_deg=heading,
+            straight_before_s=layer.straight_before_s, straight_after_s=layer.straight_after_s,
             now_position=state.position if state is not None else None,
             now_heading_deg=state.heading_deg if state is not None else None,
             queue=[(t.position, None if t.planned_tick is None else float(t.planned_tick - self.tick)) for t in queue],

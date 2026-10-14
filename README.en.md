@@ -73,7 +73,7 @@ the next 30 min, taking the detection range into account (see docs/optimal-deplo
 表示・観測者 tab shows each plan (count, depths, predicted error) and has a "deploy now" button.
 Additional observers are laid by the **layer (設標者)**: the planned drop points are proposed to the
 operator (approval **automatic** by default, or **manual** with 了承/却下 in the status strip and the
-設標者 tab); the layer then flies there over the sea surface at 200±50 kt with bank ≤ 15°
+設標者 tab); the layer then flies there over the sea surface at a constant reference speed of 200 kt with bank ≤ 15°
 (drop points drift with the estimated current) and the observer is in the water when it arrives.
 Without a task the layer circles the estimated target position. Each drop has an **optimal drop
 time** (just before the predicted target comes within detection range, and not before the layer

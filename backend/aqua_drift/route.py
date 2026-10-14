@@ -27,6 +27,9 @@ G = 9.80665
 KNOT_TO_MPS = 0.5144444444444445
 TWO_PI = 2.0 * math.pi
 LOOP_TOLERANCE = math.radians(20.0)  # a turn-then-straight path this close to the approach heading instead of a loop
+LINE_TOLERANCE_M = 5.0  # a point this close across the heading is ahead on the line (loose: capture / 2) ...
+LINE_TOLERANCE = math.radians(2.0)  # ... with its approach this close to the heading
+LOOSE_PENALTY_M = 1.0  # a loose path (not on the approach heading) only when strictly shorter
 APPROACH_CANDIDATES = 36  # approach headings compared at each point (every 10 degrees) ...
 # ... and the bearings from the previous point and to the next one (a line of close drops is
 # crossed straight along it: drops a few hundred metres apart cannot take up a 5 degree offset
@@ -140,7 +143,89 @@ def motion(sides, lengths, heading, radius: float, step):
 
 
 def path_to(east, north, heading, approach, radius: float, prefer: int = -1, margin_m: float = 0.0,
-            step_m: float = 0.0, loose: bool = False, capture_m: float = 0.0, segments: bool = False):
+            step_m: float = 0.0, loose: bool = False, capture_m: float = 0.0, segments: bool = False,
+            before_m=0.0, hold_m=0.0, relax: bool = False):
+    """Path to a point crossed on the approach heading (None or nan: any heading), wings level
+    over the last before_m metres to it (on the approach heading) and straight on for the first
+    hold_m metres from the craft (the straight flight after a drop that is still to be flown).
+
+    With a straight part (before_m or hold_m > 0) a point straight ahead on the heading (within
+    LINE_TOLERANCE_M across, loose: capture_m / 2; the approach within LINE_TOLERANCE of the heading) is flown to
+    straight on: the straight parts of two drops on one line are one straight flight. The rest
+    is the path below from the end of the hold to the start of the straight approach; loose
+    (the guidance): close to the point, when that is a loop, a turn-then-straight path to the
+    point with at least before_m (less capture_m / 2) of straight flight and within
+    LOOP_TOLERANCE of the approach; relax (the guidance has gone round once already, a point
+    moving across in the wind): when that is a loop too, the loose path below without the
+    straight approach.
+
+    Returns as below; the path (segments=True) is then the hold, the three parts below and the
+    straight approach (five turn sides and radius-normalised lengths)."""
+    heading = np.asarray(heading, dtype=float)
+    east, north = np.asarray(east, dtype=float), np.asarray(north, dtype=float)
+    hold = np.asarray(hold_m, dtype=float)
+    straight = np.any(hold > 0.0) or np.any(np.asarray(before_m, dtype=float) > 0.0)
+    if not straight:
+        return _path_core(east, north, heading, approach, radius, prefer, margin_m, step_m, loose, capture_m,
+                          segments)
+    he, hn = east - hold * np.sin(heading), north - hold * np.cos(heading)
+    if approach is None:
+        shape = np.broadcast(east, north, heading, hold).shape
+        before, goal, free = np.zeros(shape), np.zeros(shape), np.ones(shape, dtype=bool)
+    else:
+        approach = np.asarray(approach, dtype=float)
+        free = np.isnan(approach)
+        goal = np.where(free, 0.0, approach)
+        before = np.where(free, 0.0, before_m)
+    te, tn = he - before * np.sin(goal), hn - before * np.cos(goal)
+    _, length, final, _, _, sides, lengths = _path_core(te, tn, heading, approach, radius, prefer, margin_m, 0.0,
+                                                        False, 0.0, True)  # exactly onto the straight approach
+    zero = np.zeros_like(length)
+    sides = [zero, *(s + zero for s in sides), zero]
+    lengths = [hold / radius + zero, *(x + zero for x in lengths), before / radius + zero]
+    length = length + hold + before
+    if loose:  # close to the point: turn, then straight to it (wings level over before_m at least,
+        # within LOOP_TOLERANCE of the approach) rather than a loop back to the straight approach
+        _, direct, d_final, _, _, d_sides, d_lengths = _path_core(he, hn, heading, None, radius, prefer, margin_m,
+                                                                  0.0, False, 0.0, True)
+        off = np.abs(np.mod(d_final - goal + math.pi, TWO_PI) - math.pi)
+        use = (np.isfinite(direct) & (d_lengths[1] * radius >= before - capture_m / 2.0) & (free | (off <= LOOP_TOLERANCE))
+               & (direct + hold + math.pi * radius < length))
+        direct = direct + LOOSE_PENALTY_M  # the exact approach first where it is as short
+        sides = [sides[0], *(np.where(use, a, b) for a, b in zip(d_sides, sides[1:4], strict=True)),
+                 np.where(use, 0, sides[4])]
+        lengths = [lengths[0], *(np.where(use, a, b) for a, b in zip(d_lengths, lengths[1:4], strict=True)),
+                   np.where(use, 0.0, lengths[4])]
+        length = np.where(use, direct + hold, length)
+        final = np.where(use, d_final, final)
+    if loose and relax:  # still a loop after one more round (a point moving across in the wind):
+        # the loose path without the straight approach rather than going round again
+        _, near, n_final, _, _, n_sides, n_lengths = _path_core(he, hn, heading, approach, radius, prefer, margin_m,
+                                                                0.0, True, capture_m, True)
+        use = np.isfinite(near) & (near + hold + math.pi * radius < length)
+        sides = [sides[0], *(np.where(use, a, b) for a, b in zip(n_sides, sides[1:4], strict=True)),
+                 np.where(use, 0, sides[4])]
+        lengths = [lengths[0], *(np.where(use, a, b) for a, b in zip(n_lengths, lengths[1:4], strict=True)),
+                   np.where(use, 0.0, lengths[4])]
+        length = np.where(use, near + hold + 2.0 * LOOSE_PENALTY_M, length)
+        final = np.where(use, n_final, final)
+    # straight on to a point ahead on the line
+    along = east * np.sin(heading) + north * np.cos(heading)
+    across = np.abs(east * np.cos(heading) - north * np.sin(heading))
+    aligned = free | (np.abs(np.mod(goal - heading + math.pi, TWO_PI) - math.pi) <= LINE_TOLERANCE)
+    lined = (along >= 0.0) & (across <= max(LINE_TOLERANCE_M, capture_m / 2.0 if loose else 0.0)) & aligned
+    sides = [np.where(lined, 0, x) for x in sides]
+    lengths = [np.where(lined, along / radius, lengths[0]), *(np.where(lined, 0.0, x) for x in lengths[1:])]
+    length = np.where(lined, along, length)
+    final = np.where(lined, heading, final)
+    turn, step_east, step_north = motion(tuple(sides), tuple(lengths), heading, radius, step_m / radius)
+    if segments:
+        return turn, length, final, step_east, step_north, sides, lengths
+    return turn, length, final
+
+
+def _path_core(east, north, heading, approach, radius: float, prefer: int, margin_m: float, step_m: float,
+               loose: bool, capture_m: float, segments: bool):
     """Path to a point crossed on the approach heading (None or nan: any heading).
 
     The shortest Dubins path, the preferred side first unless a path starting with the other
@@ -242,7 +327,8 @@ def approach_headings(east: list[float] | None = None, north: list[float] | None
 def route(east: list[float], north: list[float], heading: float, speed_kt: float, bank_deg: float,
           planned_s: list[float | None] | None = None, prefer: int = -1, margin_m: float = 0.0,
           start_s: float = 0.0, capture_m: float = 0.0, first_s: np.ndarray | None = None,
-          first_headings: np.ndarray | None = None) -> list[Leg]:
+          first_headings: np.ndarray | None = None, before_s: float = 0.0, after_s: float = 0.0,
+          hold_s: float = 0.0) -> list[Leg]:
     """The route through points (east, north m from the start) in order: the approach heading,
     arrival and drop time (s) of each.
 
@@ -257,7 +343,11 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
 
     first_s: the flight time to the first point per approach heading (first_headings, default
     approach_headings(east, north, 0)) when the layer is already on its way to it: it is dropped
-    on arrival, without waiting."""
+    on arrival, without waiting.
+
+    Wings level at the drops (see path_to): straight on the approach heading for before_s before
+    each point and for after_s after it (hold_s: what is left of that after the last drop, from
+    the start). With before_s the last point is crossed on one of its approach headings too."""
     n = len(east)
     first = first_s is not None and n > 1
     if n == 0:
@@ -265,6 +355,8 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
     radius = turn_radius_m(speed_kt, bank_deg)
     v = max(speed_kt, 1.0) * KNOT_TO_MPS
     planned_s = planned_s or [None] * n
+    # the observer is released up to capture_m before the point
+    straight = {"before_m": before_s * v + capture_m if before_s > 0.0 else 0.0}
     # per state (approach heading at the point): cost, drop time, arrival, parent
     cost = np.zeros(1)
     drop = np.full(1, float(start_s))
@@ -273,20 +365,21 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
     parents, arrivals, drops, candidates = [], [], [], []
     for k in range(n):
         dx, dy = east[k] - xs, north[k] - ys
-        last = k == n - 1
+        last = k == n - 1 and before_s <= 0.0
+        straight["hold_m"] = hold_s * v if k == 0 else after_s * v
         headings = approach_headings(east, north, k)
         if k == 0 and first_headings is not None:
             headings = np.asarray(first_headings, dtype=float)
         candidates.append(headings)
         if last:
             _, length, final = path_to(dx, dy, pose, None, radius, prefer, margin_m, loose=k == 0,
-                                       capture_m=capture_m)
+                                       capture_m=capture_m, **straight)
             final = np.where(np.isfinite(final), final, pose + math.pi)
             length = np.where(np.isfinite(length), length, math.hypot(dx, dy) + math.pi * radius)[:, None]
         else:
             _, length, _ = path_to(np.full((len(pose), len(headings)), dx), np.full((len(pose), len(headings)), dy),
                                    np.repeat(pose[:, None], len(headings), axis=1), headings[None, :], radius,
-                                   prefer, margin_m, loose=k == 0, capture_m=capture_m)
+                                   prefer, margin_m, loose=k == 0, capture_m=capture_m, **straight)
         arrive = drop[:, None] + length / v
         if k == 0 and first:  # on its way: dropped on arrival
             arrive = drop[:, None] + np.asarray(first_s, dtype=float)[None, :]
@@ -311,7 +404,7 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
     state = int(np.argmin(cost))
     legs: list[Leg] = []
     for k in range(n - 1, -1, -1):
-        approach = None if k == n - 1 else float(candidates[k][state]) % TWO_PI
+        approach = None if k == n - 1 and before_s <= 0.0 else float(candidates[k][state]) % TWO_PI
         heading_in = float(final[parents[k][state]]) % TWO_PI if approach is None else approach
         legs.append(Leg(approach, float(arrivals[k][state]), float(drops[k][state]), heading_in))
         state = int(parents[k][state])
@@ -321,14 +414,16 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
 def schedule(east: list[float], north: list[float], heading: float | None, speed_kt: float, bank_deg: float,
              wanted_s: list[float], start_s: float = 0.0,
              prefix: tuple[list[float], list[float], list[float | None]] | None = None,
-             orders: list[list[int]] | None = None) -> tuple[list[int], list[float]]:
+             orders: list[list[int]] | None = None, before_s: float = 0.0,
+             after_s: float = 0.0) -> tuple[list[int], list[float]]:
     """Order and drop times for the drops of one plan: wanted_s are the optimal drop times
     (s from now; the layer is free at start_s at the origin on `heading`, None: unknown).
 
     Every order is tried (up to ORDER_LIMIT drops, else by wanted time): the one with the least
     total delay after the wanted times, then the earliest end. A drop is at its wanted time, or
     when the layer can be there after the previous drop (route along the order), whichever is
-    later. `orders`: only these orders (e.g. along a line, either way). Returns (order: indices into
+    later. `orders`: only these orders (e.g. along a line, either way). before_s, after_s: wings
+    level at the drops (see route). Returns (order: indices into
     the inputs, drop times in that order)."""
     n = len(east)
     if n == 0:
@@ -342,7 +437,7 @@ def schedule(east: list[float], north: list[float], heading: float | None, speed
         pe, pn, ps = prefix or ([], [], [])
         h = heading if heading is not None else _bearing(*((pe[0], pn[0]) if pe else (east[order[0]], north[order[0]])))
         legs = route([*pe, *(east[i] for i in order)], [*pn, *(north[i] for i in order)], h, speed_kt, bank_deg,
-                     [*ps, *(wanted_s[i] for i in order)], start_s=start_s)
+                     [*ps, *(wanted_s[i] for i in order)], start_s=start_s, before_s=before_s, after_s=after_s)
         drops = [leg.drop_s for leg in legs[len(pe):]]
         delay = sum(max(t - wanted_s[i], 0.0) for t, i in zip(drops, order, strict=True)) + sum(
             max(leg.drop_s - s, 0.0) for leg, s in zip(legs, ps) if s is not None)

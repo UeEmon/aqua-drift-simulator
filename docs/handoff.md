@@ -49,7 +49,7 @@ node --check web/app.js
 | 4.16 | 設標順の入れ替え：「配置・設標」タブの計画一覧で ▲▼。投入時刻は新しい順で再計算（最適時刻 `requested_tick` か前の設標点から到着できる時刻の遅い方）。API `/api/drops/reorder` | `state.py`（`reorder_tasks`）、`models.py`（`DropTask.flight_key`）、`web/app.js`（`moveDrop`） |
 | 4.15 | 設標者の旋回は左旋回が基準。右旋回は経路が `turn_margin_s`（既定 10 秒）× 速力以上短い場合だけ。「配置・設標」タブ（状態表、有無・一時停止・了承方式・基準旋回・速力などの設定、計画一覧で了承／却下／今すぐ／時刻変更／中止、手動配置）。API `/api/drops/cancel`・`/api/drops/reschedule` | `backend/aqua_drift/layer.py`（`dubins_turn`、`preferred_side`）、`state.py`、`api.py`、`web/index.html`（`tab-deploy`）、`web/app.js`（`updateLayer`） |
 | 4.14 | 最適な投入予定時刻を計算し、設標者は最短経路の到着が計画時刻に最も近い時に旋回待機から出発し、経路・速力を変えずに到着時に設標 | `optimal_deployment.py`（`LayerAvailability`、`drop_times`）、`layer.advance` |
-| 4.13 | 追加の観測者は設標者（200±50 kt、バンク 15° 以内）が配置。提案→了承（既定は自動）→設標。待機中は推定位置の周囲を旋回 | `layer.py`、`services/layer.py`、`models.py`（`LayerConfig`、`DropTask`） |
+| 4.13 | 追加の観測者は設標者（基準速力 200 kt 一定、バンク 15° 以内）が配置。提案→了承（既定は自動）→設標。待機中は推定位置の周囲を旋回 | `layer.py`、`services/layer.py`、`models.py`（`LayerConfig`、`DropTask`） |
 | 4.12 | 観測者の最適自動投入（位置・本数・深度をフィッシャー情報量と探知距離から計算） | `optimal_deployment.py`、`forward_deployment.py`、`services/deployer.py` |
 | — | ロイドミラー（直接波と海面反射波の干渉）による深度推定。処理が重いため設定でオン／オフ | `estimation/lloyd.py`、`physics.py`、`engine.py` |
 | 12.x | カメラ HUD、追従（既定オン・真値）、初期高度 10,000 ft、地図の縦領域を画面内に、GPU 過負荷による固まり対策 | `web/app.js`、`web/styles.css` |

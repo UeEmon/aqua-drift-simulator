@@ -23,7 +23,7 @@ end
 loop every 1 s
   Layer -> API : GET /internal/layer-feed\n(approved tasks, estimated target, estimated current)
   alt approved task (in planned-time order)
-    Layer -> Layer : leave when it must, speed chosen to arrive on time,\nhold over the point if early\n(200±50 kt, bank ≤ 15°; point drifts with the current)
+    Layer -> Layer : leave when it must, speed chosen to arrive on time,\nhold over the point if early\n(constant 200 kt, bank ≤ 15°, wings level before and after the drop; point drifts with the current)
   else no task
     Layer -> Layer : circle the estimated target position
   end
