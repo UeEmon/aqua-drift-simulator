@@ -45,7 +45,7 @@ from aqua_drift.models import (
     WindEstimate,
 )
 from aqua_drift.physics import local_offset_m
-from aqua_drift.wind import WindProfile, wind_estimate
+from aqua_drift.wind import FT_TO_M, WindProfile, wind_estimate
 
 BATCH_RETENTION_TICKS = 900
 # above 1x the clock waits for the estimator when it falls this many ticks behind the newest batch
@@ -329,6 +329,7 @@ class SimulationState:
             + [drop.splash_position for drop, _ in self.falling],
             layer_state=self.layer_state, layer=self.config.layer,
             datum=self.config.target.initial_position, last_replan_tick=self.last_replan_tick,
+            fall_terminal_mps=self.config.wind.terminal_velocity_fps * FT_TO_M,
         )
 
     def _layer_availability(self) -> dict:
@@ -353,6 +354,11 @@ class SimulationState:
             "layer_max_per_release": layer.max_per_release,
             "layer_straight_before_s": layer.straight_before_s,
             "layer_straight_after_s": layer.straight_after_s,
+            "layer_fall_terminal_mps": self.config.wind.terminal_velocity_fps * FT_TO_M,
+            "layer_ready_altitude_ft": layerlib.ready_altitude_ft(self.layer_state, layer, bool(queue)),
+            "layer_cruise_altitude_ft": layer.cruise_altitude_ft,
+            "layer_drop_altitude_ft": layer.drop_altitude_ft,
+            "layer_climb_rate_fpm": layer.climb_rate_fpm,
         }
 
     def _deployment_status(self) -> DeploymentStatus:
