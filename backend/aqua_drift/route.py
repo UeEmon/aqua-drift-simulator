@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import itertools
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 
 import numpy as np
 
@@ -36,6 +38,15 @@ APPROACH_CANDIDATES = 36  # approach headings compared at each point (every 10 d
 # from the 10 degree grid within a turn radius of ~4 km and would cost a loop each)
 LATE_WEIGHT = 5.0  # a second late at a drop costs this many seconds of flight
 ORDER_LIMIT = 5  # drops of one plan ordered by trying every order (more: by drop time)
+# among routes as costly (the layer waits for a planned time on every approach): the approach
+# to the first point kept (keep)
+KEEP_TIE_S = 1e-3
+# a moving point is met where it is when the layer gets there: fixed-point steps from the
+# straight-line meeting (each cuts the error ~6x at 30 kt of wind) ...
+MEET_STEPS = 2
+# ... and a leg still this far off after them has no shortest path that meets the point (the
+# path jumps from going round to turning straight in): it costs a turn round more
+MEET_MISS_S = 5.0
 
 # Dubins words: (first turn, middle, last turn) with +1 right / -1 left / 0 straight
 WORDS = {"LSL": (-1, 0, -1), "RSR": (1, 0, 1), "LSR": (-1, 0, 1), "RSL": (1, 0, -1),
@@ -128,6 +139,9 @@ def motion(sides, lengths, heading, radius: float, step):
     """Heading change and displacement (east, north m) over the first `step` (radius-normalised
     distance) along a path of three segments (turn sides, radius-normalised lengths)."""
     h = np.asarray(heading, dtype=float)
+    if not np.any(step):  # nothing flown yet
+        zero = np.zeros(np.broadcast(h, *sides, *lengths).shape)
+        return zero, zero, zero
     east = north = 0.0
     left = step
     for side, length in zip(sides, lengths, strict=True):
@@ -300,12 +314,59 @@ def _bearing(east: float, north: float) -> float:
     return math.atan2(east, north)
 
 
+def intercept_s(east, north, drift: tuple[float, float], speed_mps: float):
+    """Time (s, arrays) to meet a point at (east, north) m moving at drift (m/s) flying straight at
+    speed_mps: |d + u t| = v t."""
+    east, north = np.asarray(east, dtype=float), np.asarray(north, dtype=float)
+    a = drift[0] * drift[0] + drift[1] * drift[1] - speed_mps * speed_mps
+    b = 2.0 * (east * drift[0] + north * drift[1])
+    c = east * east + north * north
+    if a >= -1e-9:
+        return np.sqrt(c) / max(speed_mps, 1.0)
+    return (b + np.sqrt(np.maximum(b * b - 4.0 * a * c, 0.0))) / (-2.0 * a)
+
+
+def _leg_to(east, north, xs, ys, pose, headings, drift, radius, options, t):
+    """Length (m) of the shortest path from the previous points (xs, ys on pose) to the points
+    (east, north at the start, moving at drift) crossed on headings, where they are at t."""
+    with np.errstate(invalid="ignore"):  # inf * 0 after an excluded heading (an inf time)
+        east, north = east + drift[0] * t - xs, north + drift[1] * t - ys
+    return path_to(east, north, pose, headings, radius, **options)[1]
+
+
+def _last_leg_to(east, north, xs, ys, pose, drift, radius, release, options, t):
+    """_leg_to for the last point, on any heading: (length m, inf -> straight plus half a turn;
+    heading at the point)."""
+    with np.errstate(invalid="ignore"):  # inf * 0 after an excluded heading (an inf time)
+        dx, dy = east + drift[0] * t - xs, north + drift[1] * t - ys
+    if release is not None:
+        de, dn = release(np.arctan2(dx, dy))
+        dx, dy = dx + de, dy + dn
+    _, length, final = path_to(dx, dy, pose, None, radius, **options)
+    return np.where(np.isfinite(length), length, np.hypot(dx, dy) + math.pi * radius), final
+
+
+def crab(tracks, speed_mps: float, wind_mps: tuple[float, float]):
+    """The heading in the air (compass rad) that makes good the track over the ground (compass
+    rad, arrays) at airspeed speed_mps in the wind (east, north m/s towards): the track plus the
+    wind correction angle (偏流修正角)."""
+    tracks = np.asarray(tracks, dtype=float)
+    if not wind_mps[0] and not wind_mps[1]:
+        return tracks
+    ue, un = np.sin(tracks), np.cos(tracks)
+    along = wind_mps[0] * ue + wind_mps[1] * un
+    cross = -wind_mps[0] * un + wind_mps[1] * ue
+    ground = np.maximum(along + np.sqrt(np.maximum(speed_mps * speed_mps - cross * cross, 0.0)), 1.0)
+    return np.mod(np.arctan2(ground * ue - wind_mps[0], ground * un - wind_mps[1]), TWO_PI)
+
+
 @dataclass
 class Leg:
     approach: float | None  # compass rad, None: any heading
     arrive_s: float  # flight time from the start of the route to the point
     drop_s: float  # drop time: the arrival, or the planned time when the layer is early
     heading: float = math.nan  # heading at the point (the approach; the last point: as flown in)
+    track: float | None = None  # track over the ground at the point (the approach less the wind correction)
 
 
 def approach_headings(east: list[float] | None = None, north: list[float] | None = None, k: int = 0) -> np.ndarray:
@@ -328,7 +389,10 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
           planned_s: list[float | None] | None = None, prefer: int = -1, margin_m: float = 0.0,
           start_s: float = 0.0, capture_m: float = 0.0, first_s: np.ndarray | None = None,
           first_headings: np.ndarray | None = None, before_s: float = 0.0, after_s: float = 0.0,
-          hold_s: float = 0.0) -> list[Leg]:
+          hold_s: float = 0.0,
+          release: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None,
+          keep: float | None = None, drift: tuple[float, float] = (0.0, 0.0),
+          wind: tuple[float, float] = (0.0, 0.0)) -> list[Leg]:
     """The route through points (east, north m from the start) in order: the approach heading,
     arrival and drop time (s) of each.
 
@@ -347,7 +411,25 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
 
     Wings level at the drops (see path_to): straight on the approach heading for before_s before
     each point and for after_s after it (hold_s: what is left of that after the last drop, from
-    the start). With before_s the last point is crossed on one of its approach headings too."""
+    the start). With before_s the last point is crossed on one of its approach headings too.
+
+    release: the release point of a drop crossed on a heading lies this far (east, north m, per
+    compass rad heading) from its point (the observer's fall: thrown forward along the heading,
+    carried by the wind): every point is then flown to its release point for the approach
+    heading of the state, so the headings are chosen with the release points they make. The
+    point of a drop on any heading (the last one): the release point on the bearing to it.
+
+    Routes as costly (waiting for planned times, any approach is in time) are told apart by the
+    approach to the first point: keep (compass rad, the one being flown) if it is among them.
+
+    In a wind the points are in the air mass (the frame the layer flies Dubins paths in) as they
+    are at the start: they move at drift (east, north m/s; a point fixed over the ground moves
+    with the wind's opposite, plus the current) and each is met where it is when the layer gets
+    there (a few fixed-point steps on the arrival). The approaches compared are tracks over the
+    ground (approach_headings: on the bearings between the points, a line is laid along it) and
+    flown on the heading that makes them good in the wind (crab: the track plus the wind
+    correction angle); Leg.approach is that heading, Leg.track the track. first_headings are
+    headings in the air."""
     n = len(east)
     first = first_s is not None and n > 1
     if n == 0:
@@ -361,25 +443,53 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
     cost = np.zeros(1)
     drop = np.full(1, float(start_s))
     pose = np.array([heading])  # heading at the previous point (one start pose)
-    xs, ys = 0.0, 0.0
-    parents, arrivals, drops, candidates = [], [], [], []
+    xs, ys = np.zeros(1), np.zeros(1)  # the previous point per state (its release point)
+    moving = bool(drift[0] or drift[1])
+    parents, arrivals, drops, candidates, tracks_at = [], [], [], [], []
     for k in range(n):
-        dx, dy = east[k] - xs, north[k] - ys
         last = k == n - 1 and before_s <= 0.0
         straight["hold_m"] = hold_s * v if k == 0 else after_s * v
-        headings = approach_headings(east, north, k)
+        tracks = approach_headings(east, north, k)
+        headings = crab(tracks, v, wind)
         if k == 0 and first_headings is not None:
             headings = np.asarray(first_headings, dtype=float)
+            tracks = np.full(len(headings), np.nan)
         candidates.append(headings)
+        tracks_at.append(tracks)
+        start = drop[:, None] - start_s  # s from the start: where the points are
         if last:
-            _, length, final = path_to(dx, dy, pose, None, radius, prefer, margin_m, loose=k == 0,
-                                       capture_m=capture_m, **straight)
+            last_leg = partial(_last_leg_to, east[k], north[k], xs, ys, pose, drift, radius, release,
+                               {"prefer": prefer, "margin_m": margin_m, "loose": k == 0, "capture_m": capture_m,
+                                **straight})
+
+            if moving:  # from the straight-line meeting (a path along a line closes on it at once)
+                t0 = start[:, 0] + intercept_s(east[k] + drift[0] * start[:, 0] - xs,
+                                               north[k] + drift[1] * start[:, 0] - ys, drift, v)
+                when = t0
+                for _ in range(MEET_STEPS):
+                    when = start[:, 0] + last_leg(when)[0] / v
+            else:
+                when = start[:, 0]
+            length, final = last_leg(when)
             final = np.where(np.isfinite(final), final, pose + math.pi)
-            length = np.where(np.isfinite(length), length, math.hypot(dx, dy) + math.pi * radius)[:, None]
+            length = length[:, None]
+            here_e, here_n = np.full(1, east[k]), np.full(1, north[k])  # not used further
         else:
-            _, length, _ = path_to(np.full((len(pose), len(headings)), dx), np.full((len(pose), len(headings)), dy),
-                                   np.repeat(pose[:, None], len(headings), axis=1), headings[None, :], radius,
-                                   prefer, margin_m, loose=k == 0, capture_m=capture_m, **straight)
+            de, dn = release(headings) if release is not None else (np.zeros(len(headings)), np.zeros(len(headings)))
+            base_e, base_n = east[k] + de, north[k] + dn  # the release point per approach heading, at the start
+            leg = partial(_leg_to, base_e[None, :], base_n[None, :], xs[:, None], ys[:, None],
+                          np.repeat(pose[:, None], len(headings), axis=1), headings[None, :], drift, radius,
+                          {"prefer": prefer, "margin_m": margin_m, "loose": k == 0, "capture_m": capture_m, **straight})
+            when = np.broadcast_to(start, (len(pose), len(headings)))
+            if moving:  # from the straight-line meeting (a path along a line closes on it at once)
+                when = when + intercept_s(base_e[None, :] + drift[0] * when - xs[:, None],
+                                          base_n[None, :] + drift[1] * when - ys[:, None], drift, v)
+                for _ in range(MEET_STEPS):
+                    length = leg(when)
+                    when = np.where(np.isfinite(length), start + length / v, when)
+            length = leg(when)
+            if moving:  # no shortest path meets it: a turn round more
+                length = np.where(np.abs(start + length / v - when) > MEET_MISS_S, length + TWO_PI * radius, length)
         arrive = drop[:, None] + length / v
         if k == 0 and first:  # on its way: dropped on arrival
             arrive = drop[:, None] + np.asarray(first_s, dtype=float)[None, :]
@@ -391,6 +501,9 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
             late, here = np.zeros_like(arrive), arrive
         with np.errstate(invalid="ignore"):  # inf - inf after an excluded heading (first_s inf)
             total = cost[:, None] + LATE_WEIGHT * late + (here - drop[:, None])
+            if k == 0 and keep is not None:
+                other = np.abs(np.mod(headings - keep + math.pi, TWO_PI) - math.pi) > 1e-9
+                total = total + KEEP_TIE_S * other[None, :]
         total = np.where(np.isnan(total), np.inf, total)
         best = np.argmin(total, axis=0)
         cols = np.arange(total.shape[1])
@@ -399,14 +512,18 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
         arrivals.append(arrive[best, cols])
         drops.append(drop)
         pose = headings if not last else pose
-        xs, ys = east[k], north[k]
+        if not last:  # the release point where it is at the drop
+            here_e = base_e + drift[0] * np.where(np.isfinite(drop), drop - start_s, 0.0)
+            here_n = base_n + drift[1] * np.where(np.isfinite(drop), drop - start_s, 0.0)
+        xs, ys = np.broadcast_to(here_e, cost.shape).copy(), np.broadcast_to(here_n, cost.shape).copy()
     # back along the parents
     state = int(np.argmin(cost))
     legs: list[Leg] = []
     for k in range(n - 1, -1, -1):
         approach = None if k == n - 1 and before_s <= 0.0 else float(candidates[k][state]) % TWO_PI
         heading_in = float(final[parents[k][state]]) % TWO_PI if approach is None else approach
-        legs.append(Leg(approach, float(arrivals[k][state]), float(drops[k][state]), heading_in))
+        track = None if approach is None or math.isnan(tracks_at[k][state]) else float(tracks_at[k][state]) % TWO_PI
+        legs.append(Leg(approach, float(arrivals[k][state]), float(drops[k][state]), heading_in, track))
         state = int(parents[k][state])
     return legs[::-1]
 
