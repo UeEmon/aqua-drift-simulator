@@ -574,25 +574,38 @@ def release_point(layer_position: Position, altitude_ft: float, speed_kt: float,
 RELEASE_HEADINGS = 72  # headings of the release offset table (every 5 degrees, interpolated between)
 
 
+def release_table(altitude_ft: float, speed_kt: float, wind_mps: tuple[float, float],
+                  estimate_mps: tuple[float, float], current_mps: tuple[float, float],
+                  terminal_mps: float) -> tuple[list[float], list[float]]:
+    """The release point of a drop crossed on a heading, from its point (east, north m) as
+    release_point predicts it with approach_deg: a table over RELEASE_HEADINGS headings round
+    the compass, the first repeated at the end (route.release_table)."""
+    airspeed = max(speed_kt, 1.0) * KNOT_TO_MPS
+    east, north = [], []
+    for i in range(RELEASE_HEADINGS):
+        heading = i * 2.0 * math.pi / RELEASE_HEADINGS
+        fall = windlib.release_offset(altitude_ft, airspeed * math.sin(heading) + wind_mps[0],
+                                      airspeed * math.cos(heading) + wind_mps[1], *estimate_mps, terminal_mps)
+        east.append(current_mps[0] * fall.time_s - fall.east_m)
+        north.append(current_mps[1] * fall.time_s - fall.north_m)
+    return [*east, east[0]], [*north, north[0]]
+
+
 def release_offsets(altitude_ft: float, speed_kt: float, wind_mps: tuple[float, float],
                     estimate_mps: tuple[float, float], current_mps: tuple[float, float],
                     terminal_mps: float):
-    """The release point of a drop crossed on a heading, from its point (east, north m) as
-    release_point predicts it with approach_deg, per compass rad heading (arrays): a table over
-    RELEASE_HEADINGS headings, interpolated (route.route's release)."""
-    airspeed = max(speed_kt, 1.0) * KNOT_TO_MPS
-    grid = np.arange(RELEASE_HEADINGS + 1) * 2.0 * math.pi / RELEASE_HEADINGS
-    east, north = np.zeros(len(grid)), np.zeros(len(grid))
-    for i, heading in enumerate(grid[:-1]):
-        fall = windlib.release_offset(altitude_ft, airspeed * math.sin(heading) + wind_mps[0],
-                                      airspeed * math.cos(heading) + wind_mps[1], *estimate_mps, terminal_mps)
-        east[i], north[i] = current_mps[0] * fall.time_s - fall.east_m, current_mps[1] * fall.time_s - fall.north_m
-    east[-1], north[-1] = east[0], north[0]
+    """release_table per compass rad heading (arrays), interpolated (route.route's release)."""
+    return routelib.release_table(*release_table(altitude_ft, speed_kt, wind_mps, estimate_mps, current_mps,
+                                                 terminal_mps))
 
-    def offsets(headings):
-        h = np.mod(np.asarray(headings, dtype=float), 2.0 * math.pi)
-        return np.interp(h, grid, east), np.interp(h, grid, north)
-    return offsets
+
+def route_frame(state: LayerState | None):
+    """How the layer's route to new drops is computed, as of its last advance: (release,
+    drift, wind) for route.route (no wind: none, still points)."""
+    if state is None or not state.release_east_m:
+        return None, (0.0, 0.0), (0.0, 0.0)
+    return (routelib.release_table(state.release_east_m, state.release_north_m),
+            tuple(state.route_drift_mps), tuple(state.route_wind_mps))
 
 
 ROUTE_AHEAD = 8  # drops in the route when choosing the approach heading (the current one and up to 7 after it)
@@ -617,7 +630,8 @@ def ready_pose(state: LayerState | None, config: LayerConfig, tasks: list, tick:
                default: Position) -> tuple[int, Position, float | None]:
     """When, where and on which heading (deg, None: unknown) the layer is free for a new drop:
     after its open tasks (planned time, else the expected one), on the heading it crosses the
-    last of them along its route (see route.route)."""
+    last of them along its route (see route.route; in a wind as the layer flies it, see
+    route_frame: the heading is in the air)."""
     ready, where = tick, state.position if state is not None else default
     heading = state.heading_deg if state is not None else None
     tasks = sorted(tasks, key=lambda t: t.flight_key())
@@ -629,8 +643,10 @@ def ready_pose(state: LayerState | None, config: LayerConfig, tasks: list, tick:
     if last is not None:
         heading = None
         if state is not None:
+            release, moving, wind = route_frame(state)
             legs = _route(state, config, [t.position for t in tasks[:last + 1]],
-                          [None if t.planned_tick is None else float(t.planned_tick - tick) for t in tasks[:last + 1]])
+                          [None if t.planned_tick is None else float(t.planned_tick - tick) for t in tasks[:last + 1]],
+                          release=release, drift=moving, wind=wind)
             heading = math.degrees(legs[-1].heading) % 360.0
     return ready, where, heading
 
@@ -849,7 +865,14 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
         heading = math.radians(state.heading_deg)
         ge, gn = v * math.sin(heading) + wind[0], v * math.cos(heading) + wind[1]
         direction, speed = windlib.wind_from(*wind)
+        # the release points and the wind of the route to new drops (route_frame), at the drop altitude
+        east, north = release_table(config.drop_altitude_ft, state.speed_kt, wind, estimate, current,
+                                    profile.terminal_mps)
         state = state.model_copy(update={
+            "release_east_m": east,
+            "release_north_m": north,
+            "route_wind_mps": wind,
+            "route_drift_mps": (current[0] - wind[0], current[1] - wind[1]),
             "ground_speed_kt": math.hypot(ge, gn) / KNOT_TO_MPS,
             "track_deg": math.degrees(math.atan2(ge, gn)) % 360.0,
             "wind_direction_deg": direction,

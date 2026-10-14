@@ -214,3 +214,29 @@ async def test_observer_enters_the_water_after_the_fall_and_the_next_drop_is_cor
     assert tasks[second.task_id].done_tick >= first.tick  # released after the first was in the water
     # the layer is handed the latest estimate for the next release
     assert (await sim.layer_feed()).wind_estimate == second
+
+
+def test_layer_routes_new_drops_in_the_wind_it_flies() -> None:
+    """The layer's free pose and the planner's routing use the release points and the wind of
+    its last update (layer.route_frame): its heading at the last open drop is in the air."""
+    from aqua_drift import layer as layerlib
+    from aqua_drift.optimal_deployment import layer_frame
+
+    config = LayerConfig()
+    wind = WindConfig(levels=[WindLevel(altitude_ft=0, direction_deg=270, speed_kt=40)])
+    state = initial_state(config, DATUM, 0, random.Random(1))
+    task = DropTask(task_id=1, created_tick=0, source="forward", status="APPROVED", approved_tick=0,
+                    position=_offset(DATUM, 0.0, 9000.0, 300.0))
+    calm = advance(LayerFeed(tick=1, config=config, tasks=[task], datum=DATUM), state, random.Random(2))[0]
+    assert calm.release_east_m == [] and layerlib.route_frame(calm)[0] is None
+    state, _ = advance(LayerFeed(tick=1, config=config, tasks=[task], datum=DATUM, wind=wind), state,
+                       random.Random(2))
+    release, drift, flown = layerlib.route_frame(state)
+    assert len(state.release_east_m) == layerlib.RELEASE_HEADINGS + 1
+    assert flown[0] > 19.0 and abs(drift[0] + flown[0]) < 1e-9  # from the west: towards the east
+    assert layer_frame(state)["wind_mps"] == flown
+    _, _, heading = layerlib.ready_pose(state, config, [task], 1, DATUM)
+    legs = layerlib._route(state, config, [task.position], [None], release=release, drift=drift, wind=flown)
+    assert heading == pytest.approx(math.degrees(legs[-1].heading) % 360.0)
+    windless = layerlib._route(state, config, [task.position], [None])
+    assert abs(math.degrees(windless[-1].heading) % 360.0 - heading) > 1.0

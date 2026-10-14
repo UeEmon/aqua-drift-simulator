@@ -33,7 +33,7 @@ from aqua_drift.models import (
     ScenarioConfig,
     TargetState,
 )
-from aqua_drift.optimal_deployment import LayerAvailability, SensorModel
+from aqua_drift.optimal_deployment import LayerAvailability, SensorModel, layer_frame
 from aqua_drift.physics import (
     LevelNoise,
     SourceSignal,
@@ -153,6 +153,7 @@ class ScenarioRun:
             now_position=state.position if state is not None else None,
             now_heading_deg=state.heading_deg if state is not None else None,
             queue=[(t.position, None if t.planned_tick is None else float(t.planned_tick - self.tick)) for t in queue],
+            **layer_frame(state),
         )
 
     def _add_observer(self, position: Position) -> None:

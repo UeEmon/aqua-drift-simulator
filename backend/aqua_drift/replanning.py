@@ -57,6 +57,7 @@ from aqua_drift.optimal_deployment import (
     LayerAvailability,
     SensorModel,
     hypotheses,
+    layer_frame,
     plan_optimal_deployment,
 )
 from aqua_drift.physics import local_offset_m
@@ -159,6 +160,7 @@ def layer_availability(replan: ReplanFeed, kept: list[DropTask], tick: int) -> L
         now_position=state.position if state is not None else None,
         now_heading_deg=state.heading_deg if state is not None else None,
         queue=[(t.position, None if t.planned_tick is None else float(t.planned_tick - tick)) for t in queue],
+        **layer_frame(state),
     )
 
 
