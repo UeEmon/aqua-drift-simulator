@@ -11,11 +11,12 @@
   comes back). The observer is laid when the layer is within capture_radius_yd of the point,
   together with the other open drops at that point (within capture_radius_yd of it), up to
   max_per_release observers in one release, so the layer does not pass over the point again.
-* Turns: left turn is the standard (circling counter-clockwise); a right turn is taken only when
-  the route is clearly more efficient that way (shorter by more than turn_margin_s of flight).
+* Turns: left or right, whichever makes the path shorter (no standard side), always within
+  max_bank_deg.
 * ORBIT: without a task it circles the estimated target position (vector-field
   guidance onto a circle whose radius is at least 1.2 x the turn radius, so the bank limit
-  holds on the circle).
+  holds on the circle), in the direction it turns onto with the least turn when it enters
+  the orbit (kept until it leaves).
 * Scheduling: a drop's planned time is the time the layer drops it flying the shortest path. The
   layer keeps circling the estimated target until the shortest flight (along the same path the
   guidance flies) takes up the time left, then leaves and flies that path at the speed it has;
@@ -66,10 +67,10 @@ def initial_state(config: LayerConfig, datum: Position, tick: int, rng: random.R
     speed = config.speed_kt
     radius = orbit_radius_m(config, speed)
     start = _offset(datum, 0.0, radius, 0.0)  # north of the datum, tangent to the orbit
-    heading = 270.0 if preferred_side(config) < 0 else 90.0  # left turn: counter-clockwise
     return LayerState(
-        tick=tick, position=start, heading_deg=heading, speed_kt=speed, mode="ORBIT",
-        orbit_center=datum, orbit_radius_yd=radius / YD_TO_M, altitude_ft=config.cruise_altitude_ft,
+        tick=tick, position=start, heading_deg=270.0, speed_kt=speed, mode="ORBIT",
+        orbit_center=datum, orbit_radius_yd=radius / YD_TO_M, orbit_sense=-1,  # tangent, counter-clockwise
+        altitude_ft=config.cruise_altitude_ft,
     )
 
 
@@ -93,8 +94,8 @@ def dubins_turn(east: float, north: float, heading: float, radius: float,
     """Turn-then-straight path (Dubins CS) to a point at (east, north) metres from the craft
     heading `heading` (rad, clockwise from north) with turn radius `radius`.
 
-    The preferred side (default -1 = left turn) is taken unless the other side is shorter by
-    more than margin_m (the route is clearly more efficient that way).
+    The shorter side is taken (prefer: the side taken when both are as long, or when the other
+    is shorter by no more than margin_m).
     Returns (side: +1 right / -1 left / 0 none possible, turn angle rad, straight length m)."""
     paths: dict[int, tuple[float, float, float]] = {}
     for side in (1, -1):
@@ -121,11 +122,6 @@ def dubins_turn(east: float, north: float, heading: float, radius: float,
     else:
         side = other if other in paths else prefer
     return side, paths[side][1], paths[side][2]
-
-
-def preferred_side(config: LayerConfig) -> int:
-    """-1: left turn (the standard), +1: right turn."""
-    return 1 if config.preferred_turn == "right" else -1
 
 
 def flight_time_s(state: LayerState, config: LayerConfig, point: Position, speed_kt: float,
@@ -175,6 +171,7 @@ def step(
     path_kept = ([], [])  # the rest of the path after this step
     center = datum
     orbit_radius = orbit_radius_m(config, speed)
+    sense = 0
 
     same = state.mode == "TRANSIT" and state.task_id == task_id
     loops = state.loops if same else 0
@@ -206,9 +203,11 @@ def step(
         east, north, _ = local_offset_m(center, position)
         distance = math.hypot(east, north)
         bearing = math.atan2(east, north)
-        # circling in the preferred direction (left turn = counter-clockwise by default)
-        sense = float(preferred_side(config))  # -1 counter-clockwise, +1 clockwise
-        desired = bearing + sense * (math.pi / 2.0 + math.atan(2.0 * (distance - orbit_radius) / orbit_radius))
+        # -1 counter-clockwise, +1 clockwise: kept while orbiting, else the one turned onto with the least turn
+        offset = math.pi / 2.0 + math.atan(2.0 * (distance - orbit_radius) / orbit_radius)
+        sense = state.orbit_sense if state.mode == "ORBIT" and state.orbit_sense else min(
+            (-1, 1), key=lambda s: abs(_wrap(bearing + s * offset - heading)))
+        desired = bearing + sense * offset
         error = _wrap(desired - heading)
         turn = max(-omega_max * dt, min(omega_max * dt, error)) if state.straight_s <= 0.0 else 0.0
 
@@ -239,6 +238,7 @@ def step(
         task_id=task_id if mode == "TRANSIT" else None,
         orbit_center=center if mode != "TRANSIT" else None,
         orbit_radius_yd=orbit_radius / YD_TO_M if mode != "TRANSIT" else 0.0,
+        orbit_sense=int(sense) if mode != "TRANSIT" else 0,
         eta_s=eta,
         altitude_ft=state.altitude_ft,
         approach_deg=state.approach_deg,
@@ -270,7 +270,7 @@ def _guidance(east: float, north: float, heading: float, approach: float | None,
     straight on for hold_s (after a drop) and over the last straight_before_s to the point (relax:
     after the path has grown by a loop once, the loose path without the straight approach)."""
     args = (east, north, heading, approach, radius)
-    options = {"prefer": preferred_side(config), "margin_m": config.turn_margin_s * v, "step_m": v * dt,
+    options = {"step_m": v * dt,
                "segments": True, "relax": relax, **_straight(config, v, hold_s)}
     turn, length, _, step_e, step_n, sides, lengths = routelib.path_to(*args, **options)
     path = ([int(x) for x in sides], [float(x) * radius for x in lengths])
@@ -323,8 +323,7 @@ def _arrival_s(state: LayerState, config: LayerConfig, point: Position, approach
     v = max(state.speed_kt, 1.0) * KNOT_TO_MPS
     east, north, _ = local_offset_m(state.position, point)
     radius = v * v / (G * math.tan(math.radians(config.max_bank_deg)))
-    _, length, _ = routelib.path_to(east, north, math.radians(state.heading_deg), approach, radius,
-                                    preferred_side(config), config.turn_margin_s * v, loose=True,
+    _, length, _ = routelib.path_to(east, north, math.radians(state.heading_deg), approach, radius, loose=True,
                                     **_straight(config, v, state.straight_s))
     if not math.isfinite(float(length)):
         return flight_time_s(state, config, point, state.speed_kt, limit_s=900.0, approach=approach)
@@ -340,8 +339,8 @@ def _dubins_times(east: np.ndarray, north: np.ndarray, heading: np.ndarray, v: f
     if approach is not None:
         east, north, heading, approach = np.broadcast_arrays(east, north, heading, approach)
     approaches = approach
-    _, length, _ = routelib.path_to(east, north, heading, approaches, radius, preferred_side(config),
-                                    config.turn_margin_s * v, loose=True, **_straight(config, v, hold_s))
+    _, length, _ = routelib.path_to(east, north, heading, approaches, radius, loose=True,
+                                    **_straight(config, v, hold_s))
     return np.maximum(length - config.capture_radius_yd * YD_TO_M, 0.0) / v
 
 
@@ -528,10 +527,9 @@ def _route(state: LayerState, config: LayerConfig, points: list[Position],
     """The route from the current state through the points (planned drop times s from now;
     first_s, first_headings: see route.route)."""
     offsets = [local_offset_m(state.position, p) for p in points]
-    v = max(state.speed_kt, 1.0) * KNOT_TO_MPS
     return routelib.route([o[0] for o in offsets], [o[1] for o in offsets], math.radians(state.heading_deg),
-                          state.speed_kt, config.max_bank_deg, planned, preferred_side(config),
-                          config.turn_margin_s * v, capture_m=config.capture_radius_yd * YD_TO_M, first_s=first_s,
+                          state.speed_kt, config.max_bank_deg, planned,
+                          capture_m=config.capture_radius_yd * YD_TO_M, first_s=first_s,
                           first_headings=first_headings, before_s=config.straight_before_s,
                           after_s=config.straight_after_s, hold_s=state.straight_s)
 
@@ -579,10 +577,8 @@ def _approach(state: LayerState, config: LayerConfig, tasks: list, points: list[
     # on any heading (it was the last drop) the heading that path arrives on
     flown = None if state.approach_deg is None else math.radians(state.approach_deg)
     if flown is None and committed:
-        v = max(state.speed_kt, 1.0) * KNOT_TO_MPS
         _, _, final = routelib.path_to(offsets[0][0], offsets[0][1], math.radians(state.heading_deg), None,
-                                       turn_radius_m(state.speed_kt, config.max_bank_deg), preferred_side(config),
-                                       config.turn_margin_s * v)
+                                       turn_radius_m(state.speed_kt, config.max_bank_deg))
         flown = float(final) if math.isfinite(float(final)) else None
     if flown is not None:
         headings = np.append(headings, flown)
