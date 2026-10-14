@@ -2979,40 +2979,78 @@ const stream = (() => {
       if (window.console) console.error(error);
     }
   };
-  if (typeof Worker !== "undefined") {
-    // decoding, delta merge and coordinate conversion run off the rendering thread
-    const worker = new Worker("/stream-worker.js");
-    telemetry.worker = true;
-    worker.onmessage = (event) => {
-      const msg = event.data;
-      if (msg.type === "status") onStatus(msg.connected);
-      else if (msg.type === "error") setMessage(`受信エラー: ${msg.message}`);
-      else if (msg.type === "update") guard(() => handleUpdate(msg.result, msg.bytes, msg.parseMs));
-    };
-    worker.postMessage({ type: "connect", url, exaggeration: exaggeration() });
-    return { setExaggeration: (value) => worker.postMessage({ type: "exaggeration", value }) };
-  }
-  // fallback: same decoder on the main thread
-  const decoder = AquaDecoder.createDecoder();
-  decoder.setExaggeration(exaggeration());
-  function connect() {
-    const socket = new WebSocket(url);
-    socket.addEventListener("open", () => onStatus(true));
-    socket.addEventListener("message", (event) => {
-      const t0 = performance.now();
-      guard(() => {
-        const result = decoder.decode(JSON.parse(event.data));
-        handleUpdate(result, event.data.length, performance.now() - t0);
+  let scale = exaggeration();
+  let worker = null;
+  let fallback = null;
+
+  function startFallback() {
+    if (fallback) return fallback;
+    // Worker support does not guarantee its script can load (CSP, network errors, etc.).
+    // Stop it before opening the fallback so only one transport can update the display.
+    if (worker) {
+      worker.onmessage = null;
+      worker.onerror = null;
+      worker.terminate();
+      worker = null;
+    }
+    telemetry.worker = false;
+    onStatus(false);
+    const decoder = AquaDecoder.createDecoder();
+    decoder.setExaggeration(scale);
+    function connect() {
+      const socket = new WebSocket(url);
+      socket.addEventListener("open", () => onStatus(true));
+      socket.addEventListener("message", (event) => {
+        const t0 = performance.now();
+        guard(() => {
+          const result = decoder.decode(JSON.parse(event.data));
+          handleUpdate(result, event.data.length, performance.now() - t0);
+        });
       });
-    });
-    socket.addEventListener("close", () => {
-      onStatus(false);
-      setTimeout(connect, 1500);
-    });
-    socket.addEventListener("error", () => socket.close());
+      socket.addEventListener("close", () => {
+        onStatus(false);
+        setTimeout(connect, 1500);
+      });
+      socket.addEventListener("error", () => socket.close());
+    }
+    fallback = { setExaggeration: (value) => guard(() => handleUpdate({ snapshot: null, tracks: decoder.setExaggeration(value) }, 0, 0)) };
+    connect();
+    return fallback;
   }
-  connect();
-  return { setExaggeration: (value) => guard(() => handleUpdate({ snapshot: null, tracks: decoder.setExaggeration(value) }, 0, 0)) };
+
+  if (typeof Worker !== "undefined") {
+    try {
+      // decoding, delta merge and coordinate conversion run off the rendering thread
+      worker = new Worker("/stream-worker.js");
+      telemetry.worker = true;
+      worker.onmessage = (event) => {
+        const msg = event.data;
+        if (msg.type === "status") onStatus(msg.connected);
+        else if (msg.type === "error") setMessage(`受信エラー: ${msg.message}`);
+        else if (msg.type === "update") guard(() => handleUpdate(msg.result, msg.bytes, msg.parseMs));
+      };
+      worker.onerror = (event) => {
+        event.preventDefault();
+        startFallback();
+      };
+      worker.postMessage({ type: "connect", url, exaggeration: scale });
+    } catch {
+      startFallback();
+    }
+  } else {
+    startFallback();
+  }
+  return { setExaggeration: (value) => {
+    scale = value;
+    if (fallback) fallback.setExaggeration(value);
+    else {
+      try {
+        worker.postMessage({ type: "exaggeration", value });
+      } catch {
+        startFallback(); // initializes the decoder with the latest scale
+      }
+    }
+  } };
 })();
 
 window.aquaDrift = { viewer, state, declutter, applyView, centerOn, cameraInfo, renderFaults, quality, telemetry, gpu, baseMap, setBaseMap, tracks, anim, updateLayer }; // diagnostics / E2E
