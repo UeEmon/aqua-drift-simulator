@@ -204,7 +204,8 @@ class WindConfig(BaseModel):
 
 class LayerConfig(BaseModel):
     """設標者 (layer): the craft that lays additional observers. It moves over the sea surface
-    at speed_kt +- speed_spread_kt (a new speed for every leg) with bank <= max_bank_deg and,
+    at speed_kt +- speed_spread_kt (drawn when it has no drops left, kept until the drops planned
+    at it are done) with bank <= max_bank_deg and,
     without a task, circles the estimated target position. An additional observer is in the
     water only when the layer reaches its drop point. Planned drops are proposed to the
     operator; approval is automatic (default) or manual."""

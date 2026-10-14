@@ -18,7 +18,7 @@ from aqua_drift.estimation.engine import TrackingEngine
 from aqua_drift.forward_deployment import plan_forward_deployment_scheduled
 from aqua_drift.layer import advance as advance_layer
 from aqua_drift.layer import initial_state as initial_layer_state
-from aqua_drift.layer import ready_pose
+from aqua_drift.layer import plan_speed_kt, ready_pose
 from aqua_drift.models import (
     DopplerBatch,
     DropTask,
@@ -147,7 +147,7 @@ class ScenarioRun:
                                            self.config.target.initial_position)
         state = self.layer_state
         return LayerAvailability(
-            ready_s=float(ready - self.tick), position=where, speed_kt=layer.speed_kt,
+            ready_s=float(ready - self.tick), position=where, speed_kt=plan_speed_kt(state, layer),
             max_bank_deg=layer.max_bank_deg, heading_deg=heading,
             now_position=state.position if state is not None else None,
             now_heading_deg=state.heading_deg if state is not None else None,

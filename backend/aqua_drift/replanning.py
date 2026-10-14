@@ -152,7 +152,7 @@ def layer_availability(replan: ReplanFeed, kept: list[DropTask], tick: int) -> L
     ready, where, heading = layerlib.ready_pose(replan.layer_state, replan.layer, queue, tick, replan.datum)
     state = replan.layer_state
     return LayerAvailability(
-        ready_s=float(max(ready - tick, 0)), position=where, speed_kt=replan.layer.speed_kt,
+        ready_s=float(max(ready - tick, 0)), position=where, speed_kt=layerlib.plan_speed_kt(state, replan.layer),
         max_bank_deg=replan.layer.max_bank_deg, heading_deg=heading,
         max_per_release=replan.layer.max_per_release,
         now_position=state.position if state is not None else None,

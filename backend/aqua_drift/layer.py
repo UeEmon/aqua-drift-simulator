@@ -1,6 +1,8 @@
 """設標者 (layer) kinematics: the craft that lays additional observers.
 
-* moves over the sea surface at a speed drawn for every leg from speed_kt +- speed_spread_kt
+* moves over the sea surface at a speed drawn from speed_kt +- speed_spread_kt when it has no
+  drops left (back on the orbit with nothing to do). The drops planned meanwhile are planned at
+  that speed (plan_speed_kt) and flown at it, together with the waits on the orbit between them
 * turns with bank <= max_bank_deg: turn rate omega = g tan(bank) / V, turn radius V^2 / (g tan(bank))
 * TRANSIT: flies to the drop point along the shortest turn-limited (Dubins) path. When another
   drop follows, the point is crossed on the approach heading that makes the flight to this
@@ -55,6 +57,12 @@ def turn_radius_m(speed_kt: float, bank_deg: float) -> float:
 
 def orbit_radius_m(config: LayerConfig, speed_kt: float) -> float:
     return max(config.orbit_radius_yd * YD_TO_M, 1.2 * turn_radius_m(speed_kt, config.max_bank_deg))
+
+
+def plan_speed_kt(state: LayerState | None, config: LayerConfig) -> float:
+    """The speed new drops are planned at: the layer keeps the speed it has until its drops are
+    done (a new speed is drawn only when it has nothing left to do, see advance)."""
+    return state.speed_kt if state is not None else config.speed_kt
 
 
 def leg_speed_kt(config: LayerConfig, rng: random.Random) -> float:
@@ -662,8 +670,11 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
             estimate = correction_wind(feed, source, wind)
         open_tasks = [t for t in tasks if t.task_id not in completed]
         task = open_tasks[0] if open_tasks and not config.paused else None
-        target = wanted = aim = approach = None
+        target = aim = approach = None
         task_id = None
+        # the speed is drawn when the layer has nothing left to do: the drops planned at the speed
+        # it has are flown at that speed (also the legs after a wait on the orbit)
+        wanted = state.speed_kt if open_tasks else None
         datum = air(feed.datum)
         if task is not None:
             aim = positions[task.task_id]
@@ -693,8 +704,6 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
                 decision = departure(state, config, point, left, datum, approach) if near else "wait"
             if decision == "leave":
                 target, task_id = point, task.task_id
-                if timed:  # left when the flight at this speed takes up the time: keep the speed
-                    wanted = state.speed_kt
         to_drop = target is not None
         state = _climb(state, config, config.drop_altitude_ft if to_drop else config.cruise_altitude_ft)
         before = over_ground(state.position)

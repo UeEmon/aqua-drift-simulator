@@ -325,6 +325,42 @@ def test_a_leg_keeps_its_speed() -> None:
     assert state.speed_kt == pytest.approx(200.0)
 
 
+def test_drops_are_flown_at_the_speed_they_were_planned_at() -> None:
+    """The planner plans at the layer's speed (plan_speed_kt) and the layer keeps it until its
+    drops are done (also over a wait on the orbit between them); a new speed is drawn only when
+    it has nothing left to do."""
+    from aqua_drift.layer import plan_speed_kt
+    from aqua_drift.models import DropTask, LayerFeed
+
+    config = LayerConfig()
+    rng = random.Random(4)
+    state = initial_state(config, DATUM, 0, rng)
+    planned_at = plan_speed_kt(state, config)
+    tasks = [
+        DropTask(task_id=1, created_tick=0, source="forward", position=_offset(DATUM, 8000.0, 6000.0, 500.0),
+                 status="APPROVED"),
+        DropTask(task_id=2, created_tick=0, source="forward", position=_offset(DATUM, -9000.0, 4000.0, 500.0),
+                 status="APPROVED", planned_tick=900),  # a wait on the orbit before it
+    ]
+    speeds, modes = [], []
+    for tick in range(1, 1500):
+        open_tasks = [t for t in tasks if t.status == "APPROVED"]
+        state, update = advance(LayerFeed(tick=tick, config=config, tasks=open_tasks, datum=DATUM), state, rng)
+        for task in open_tasks:
+            if task.task_id in update.completed:
+                task.status = "DONE"
+        if not [t for t in tasks if t.status == "APPROVED"]:
+            break
+        speeds.append(state.speed_kt)
+        modes.append(state.mode)
+    assert all(t.status == "DONE" for t in tasks)
+    assert "ORBIT" in modes[modes.index("TRANSIT"):]  # waited on the orbit between the drops
+    assert set(speeds) == {planned_at}
+    for later in range(tick + 1, tick + 30):
+        state, _ = advance(LayerFeed(tick=later, config=config, tasks=[], datum=DATUM), state, rng)
+    assert state.mode == "ORBIT" and state.speed_kt != planned_at  # nothing left: a new speed
+
+
 def test_planner_schedules_drops_before_detection_and_after_the_layer_can_be_there() -> None:
     from aqua_drift.forward_deployment import plan_forward_deployment_scheduled
     from aqua_drift.models import (
