@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import math
 import random
+from functools import partial
 
 import numpy as np
 
@@ -710,13 +711,12 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
             aim = positions[task.task_id]
             on_way = (state.task_id == task.task_id and state.mode == "TRANSIT" and state.eta_s is not None
                       and math.isfinite(state.eta_s))
-
-            def lead(point: Position) -> Position:
-                # in the air mass a ground point moves with current - wind; on the way: met at the
-                # arrival along the path flown (the straight-line time would move the point as
-                # the path bends, and the path would never close on it)
-                return _lead(state.position, point, current[0] - wind[0], current[1] - wind[1],
-                             max(state.speed_kt, 1.0) * KNOT_TO_MPS, max(state.eta_s - 1.0, 0.0) if on_way else None)
+            # in the air mass a ground point moves with current - wind; on the way: met at the
+            # arrival along the path flown (the straight-line time would move the point as the
+            # path bends, and the path would never close on it)
+            flight_s = max(state.eta_s - 1.0, 0.0) if on_way else None
+            lead = partial(_lead, state.position, drift_e=current[0] - wind[0], drift_n=current[1] - wind[1],
+                           v=max(state.speed_kt, 1.0) * KNOT_TO_MPS, flight_s=flight_s)
             release = None
             if profile is not None:  # the headings are chosen with the release points they make
                 release = release_offsets(_release_altitude(state, config, aim), state.speed_kt, wind, estimate,
