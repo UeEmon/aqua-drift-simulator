@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import itertools
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -328,7 +329,8 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
           planned_s: list[float | None] | None = None, prefer: int = -1, margin_m: float = 0.0,
           start_s: float = 0.0, capture_m: float = 0.0, first_s: np.ndarray | None = None,
           first_headings: np.ndarray | None = None, before_s: float = 0.0, after_s: float = 0.0,
-          hold_s: float = 0.0) -> list[Leg]:
+          hold_s: float = 0.0,
+          release: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None) -> list[Leg]:
     """The route through points (east, north m from the start) in order: the approach heading,
     arrival and drop time (s) of each.
 
@@ -347,7 +349,13 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
 
     Wings level at the drops (see path_to): straight on the approach heading for before_s before
     each point and for after_s after it (hold_s: what is left of that after the last drop, from
-    the start). With before_s the last point is crossed on one of its approach headings too."""
+    the start). With before_s the last point is crossed on one of its approach headings too.
+
+    release: the release point of a drop crossed on a heading lies this far (east, north m, per
+    compass rad heading) from its point (the observer's fall: thrown forward along the heading,
+    carried by the wind): every point is then flown to its release point for the approach
+    heading of the state, so the headings are chosen with the release points they make. The
+    point of a drop on any heading (the last one): the release point on the bearing to it."""
     n = len(east)
     first = first_s is not None and n > 1
     if n == 0:
@@ -361,10 +369,9 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
     cost = np.zeros(1)
     drop = np.full(1, float(start_s))
     pose = np.array([heading])  # heading at the previous point (one start pose)
-    xs, ys = 0.0, 0.0
+    xs, ys = np.zeros(1), np.zeros(1)  # the previous point per state (its release point)
     parents, arrivals, drops, candidates = [], [], [], []
     for k in range(n):
-        dx, dy = east[k] - xs, north[k] - ys
         last = k == n - 1 and before_s <= 0.0
         straight["hold_m"] = hold_s * v if k == 0 else after_s * v
         headings = approach_headings(east, north, k)
@@ -372,12 +379,20 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
             headings = np.asarray(first_headings, dtype=float)
         candidates.append(headings)
         if last:
+            dx, dy = east[k] - xs, north[k] - ys
+            if release is not None:
+                de, dn = release(np.arctan2(dx, dy))
+                dx, dy = dx + de, dy + dn
             _, length, final = path_to(dx, dy, pose, None, radius, prefer, margin_m, loose=k == 0,
                                        capture_m=capture_m, **straight)
             final = np.where(np.isfinite(final), final, pose + math.pi)
-            length = np.where(np.isfinite(length), length, math.hypot(dx, dy) + math.pi * radius)[:, None]
+            length = np.where(np.isfinite(length), length, np.hypot(dx, dy) + math.pi * radius)[:, None]
+            here_e, here_n = np.full(1, east[k]), np.full(1, north[k])  # not used further
         else:
-            _, length, _ = path_to(np.full((len(pose), len(headings)), dx), np.full((len(pose), len(headings)), dy),
+            de, dn = release(headings) if release is not None else (np.zeros(len(headings)), np.zeros(len(headings)))
+            here_e, here_n = east[k] + de, north[k] + dn  # the release point per approach heading
+            dx, dy = here_e[None, :] - xs[:, None], here_n[None, :] - ys[:, None]
+            _, length, _ = path_to(dx, dy,
                                    np.repeat(pose[:, None], len(headings), axis=1), headings[None, :], radius,
                                    prefer, margin_m, loose=k == 0, capture_m=capture_m, **straight)
         arrive = drop[:, None] + length / v
@@ -399,7 +414,7 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
         arrivals.append(arrive[best, cols])
         drops.append(drop)
         pose = headings if not last else pose
-        xs, ys = east[k], north[k]
+        xs, ys = np.broadcast_to(here_e, cost.shape).copy(), np.broadcast_to(here_n, cost.shape).copy()
     # back along the parents
     state = int(np.argmin(cost))
     legs: list[Leg] = []
