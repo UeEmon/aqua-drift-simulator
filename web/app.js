@@ -1278,7 +1278,8 @@ $("layer-form").addEventListener("submit", (event) => {
   event.preventDefault();
   putConfig((next) => {
     next.layer.speed_kt = num("layer-speed");
-    next.layer.speed_spread_kt = num("layer-spread");
+    next.layer.straight_before_s = num("layer-straight-before");
+    next.layer.straight_after_s = num("layer-straight-after");
     next.layer.max_bank_deg = num("layer-bank");
     next.layer.orbit_radius_yd = num("layer-orbit");
     next.layer.turn_margin_s = num("layer-turn-margin");
@@ -2700,7 +2701,8 @@ function populateForms(config) {
     $("layer-enabled").checked = lay.enabled;
     $("layer-paused").checked = Boolean(lay.paused);
     $("layer-turn").value = lay.preferred_turn || "left";
-    const layValues = { "layer-speed": lay.speed_kt, "layer-spread": lay.speed_spread_kt, "layer-bank": lay.max_bank_deg,
+    const layValues = { "layer-speed": lay.speed_kt, "layer-bank": lay.max_bank_deg,
+      "layer-straight-before": lay.straight_before_s ?? 0, "layer-straight-after": lay.straight_after_s ?? 0,
       "layer-orbit": lay.orbit_radius_yd, "layer-turn-margin": lay.turn_margin_s ?? 10, "layer-timeout": lay.proposal_timeout_s,
       "layer-cruise-alt": lay.cruise_altitude_ft ?? 3000, "layer-drop-alt": lay.drop_altitude_ft ?? 1000, "layer-climb": lay.climb_rate_fpm ?? 2000,
       "layer-max-release": lay.max_per_release ?? 4 };

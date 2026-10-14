@@ -412,8 +412,9 @@
               </label>
             </div>
             <form id="layer-form" class="grid2">
-              <label>速力 (kt)<input id="layer-speed" type="number" min="1" max="600" step="1" required /></label>
-              <label>速力のばらつき ± (kt)<input id="layer-spread" type="number" min="0" max="300" step="1" required /></label>
+              <label title="計画も飛行もこの速力で一定（加減速しない）">基準速力 (kt)<input id="layer-speed" type="number" min="1" max="600" step="1" required /></label>
+              <label title="投下点の手前、通過針路でこの秒数だけ水平直線飛行する">投下前の直線飛行 (秒)<input id="layer-straight-before" type="number" min="0" max="120" step="1" required /></label>
+              <label title="投下後、この秒数だけ水平直線飛行を続けてから次へ旋回する">投下後の直線飛行 (秒)<input id="layer-straight-after" type="number" min="0" max="120" step="1" required /></label>
               <label>最大バンク (度)<input id="layer-bank" type="number" min="1" max="60" step="1" required /></label>
               <label title="旋回半径より小さい場合は旋回半径に合わせる">旋回待機の半径 (YD)<input id="layer-orbit" type="number" min="100" step="100" required /></label>
               <label title="反対方向の旋回を選ぶのは、この秒数以上早く着く場合だけ">反対旋回を選ぶ差 (秒)<input id="layer-turn-margin" type="number" min="0" max="600" step="1" required /></label>

@@ -218,22 +218,22 @@ async def test_layer_lays_the_observer_at_the_planned_time() -> None:
     done, planned, modes, _ = await _drop_time(500, 15000.0, -5000.0)
     assert abs(done - planned) <= 5
     assert modes[:100].count("ORBIT") > 90 and _left_once(modes)  # did not leave at once
-    # close point: waits on the orbit, not over the point, and flies straight in when it gets
-    # there; the orbit passes close by, so no departure arrives at the planned time and the
-    # path is not lengthened to make it (the planned time is that of the shortest flight)
+    # close point: waits on the orbit, not over the point, and flies in when it gets there,
+    # dropping on the arrival it predicted when it left (the path is not lengthened to keep the
+    # planned time)
     done, planned, modes, error = await _drop_time(400, 1500.0, 1500.0)
     assert _left_once(modes) and modes[:150].count("ORBIT") > 100
-    assert abs(error) <= 5 and done < planned
+    assert abs(error) <= 5
 
 
 def _timed_drop_error(seed: int) -> tuple[int | None, bool, float, bool]:
     """One random timed drop as the planner sets it (planned 30..290 s ahead, never before the
     layer's earliest time) with a random current. Returns (drop - planned time in s, feasible:
-    some speed of the band can get there by the planned time, drop - (departure + the
+    the reference speed can get there by the planned time, drop - (departure + the
     guidance' arrival when it left), left once: circled, then flew to the point)."""
     import numpy as np
 
-    from aqua_drift.layer import flight_time_s, speed_band
+    from aqua_drift.layer import flight_time_s
     from aqua_drift.models import DropTask, LayerFeed
     from aqua_drift.optimal_deployment import LayerAvailability
 
@@ -250,7 +250,7 @@ def _timed_drop_error(seed: int) -> tuple[int | None, bool, float, bool]:
     earliest = float(availability.earliest_s(DATUM, np.array([[east, north, 0.0]]))[0])
     planned = 60 + max(math.ceil(earliest), r.randint(30, 290))
     current = (r.uniform(-2.0, 2.0), r.uniform(-2.0, 2.0))
-    quickest = min(flight_time_s(state, config, point, sp, dt=1.0) for sp in speed_band(config))
+    quickest = flight_time_s(state, config, point, config.speed_kt, dt=1.0)
     feasible = planned - 60 >= quickest + 5
     task = DropTask(task_id=1, created_tick=60, source="forward", position=point, status="APPROVED",
                     planned_tick=planned)
@@ -273,7 +273,7 @@ def test_layer_flies_the_shortest_path_and_drops_when_it_gets_there() -> None:
     shortest flight: the layer waits on its orbit for the departure that arrives closest to it,
     then flies the guidance path at the speed it has and drops on arrival. It is on time when
     some departure from the orbit gets there then; the path and the speed are not changed to
-    make it otherwise (a point close to the orbit, a slower speed than the planner's, or a
+    make it otherwise (a point close to the orbit, or a
     point inside the turning circle at the departure: the guidance finds a shorter path a
     few seconds later)."""
     runs = list(map(_timed_drop_error, range(60)))
@@ -325,17 +325,16 @@ def test_a_leg_keeps_its_speed() -> None:
     assert state.speed_kt == pytest.approx(200.0)
 
 
-def test_drops_are_flown_at_the_speed_they_were_planned_at() -> None:
-    """The planner plans at the layer's speed (plan_speed_kt) and the layer keeps it until its
-    drops are done (also over a wait on the orbit between them); a new speed is drawn only when
-    it has nothing left to do."""
-    from aqua_drift.layer import plan_speed_kt
+def test_the_layer_flies_at_the_reference_speed() -> None:
+    """The planner plans at the reference speed and the layer flies every leg at it (also a wait
+    on the orbit between drops and the orbit when it has nothing left to do): no speed is
+    drawn."""
     from aqua_drift.models import DropTask, LayerFeed
 
     config = LayerConfig()
     rng = random.Random(4)
     state = initial_state(config, DATUM, 0, rng)
-    planned_at = plan_speed_kt(state, config)
+    planned_at = config.speed_kt
     tasks = [
         DropTask(task_id=1, created_tick=0, source="forward", position=_offset(DATUM, 8000.0, 6000.0, 500.0),
                  status="APPROVED"),
@@ -358,7 +357,7 @@ def test_drops_are_flown_at_the_speed_they_were_planned_at() -> None:
     assert set(speeds) == {planned_at}
     for later in range(tick + 1, tick + 30):
         state, _ = advance(LayerFeed(tick=later, config=config, tasks=[], datum=DATUM), state, rng)
-    assert state.mode == "ORBIT" and state.speed_kt != planned_at  # nothing left: a new speed
+    assert state.mode == "ORBIT" and state.speed_kt == planned_at
 
 
 def test_planner_schedules_drops_before_detection_and_after_the_layer_can_be_there() -> None:

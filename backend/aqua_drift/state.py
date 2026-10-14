@@ -348,9 +348,11 @@ class SimulationState:
             "layer_heading_deg": self.layer_state.heading_deg if self.layer_state is not None else None,
             "layer_queue": [t.position for t in queue],
             "layer_queue_ticks": [t.planned_tick for t in queue],
-            "layer_speed_kt": layerlib.plan_speed_kt(self.layer_state, layer),
+            "layer_speed_kt": layer.speed_kt,
             "layer_max_bank_deg": layer.max_bank_deg,
             "layer_max_per_release": layer.max_per_release,
+            "layer_straight_before_s": layer.straight_before_s,
+            "layer_straight_after_s": layer.straight_after_s,
         }
 
     def _deployment_status(self) -> DeploymentStatus:
@@ -474,7 +476,8 @@ class SimulationState:
             legs = routelib.route([o[0] for o in offsets], [o[1] for o in offsets], math.radians(heading or 0.0),
                                   layer.speed_kt, layer.max_bank_deg,
                                   [None if t.requested_tick is None else float(t.requested_tick - self.tick)
-                                   for t in order]) if layer.enabled else []
+                                   for t in order], before_s=layer.straight_before_s,
+                                  after_s=layer.straight_after_s) if layer.enabled else []
             timed = False
             for k, (task, sequence) in enumerate(zip(order, sequences, strict=True)):
                 task.sequence = sequence

@@ -1,8 +1,7 @@
 """設標者 (layer) kinematics: the craft that lays additional observers.
 
-* moves over the sea surface at a speed drawn from speed_kt +- speed_spread_kt when it has no
-  drops left (back on the orbit with nothing to do). The drops planned meanwhile are planned at
-  that speed (plan_speed_kt) and flown at it, together with the waits on the orbit between them
+* moves over the sea surface at the reference speed speed_kt, the same in the plan and in the
+  flight (a new reference speed set by the operator is taken up on the next leg)
 * turns with bank <= max_bank_deg: turn rate omega = g tan(bank) / V, turn radius V^2 / (g tan(bank))
 * TRANSIT: flies to the drop point along the shortest turn-limited (Dubins) path. When another
   drop follows, the point is crossed on the approach heading that makes the flight to this
@@ -59,24 +58,12 @@ def orbit_radius_m(config: LayerConfig, speed_kt: float) -> float:
     return max(config.orbit_radius_yd * YD_TO_M, 1.2 * turn_radius_m(speed_kt, config.max_bank_deg))
 
 
-def plan_speed_kt(state: LayerState | None, config: LayerConfig) -> float:
-    """The speed new drops are planned at: the layer keeps the speed it has until its drops are
-    done (a new speed is drawn only when it has nothing left to do, see advance)."""
-    return state.speed_kt if state is not None else config.speed_kt
-
-
-def leg_speed_kt(config: LayerConfig, rng: random.Random) -> float:
-    low = max(config.speed_kt - config.speed_spread_kt, 1.0)
-    high = max(config.speed_kt + config.speed_spread_kt, low)
-    return rng.uniform(low, high)
-
-
 def _wrap(angle: float) -> float:
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
 def initial_state(config: LayerConfig, datum: Position, tick: int, rng: random.Random) -> LayerState:
-    speed = leg_speed_kt(config, rng)
+    speed = config.speed_kt
     radius = orbit_radius_m(config, speed)
     start = _offset(datum, 0.0, radius, 0.0)  # north of the datum, tangent to the orbit
     heading = 270.0 if preferred_side(config) < 0 else 90.0  # left turn: counter-clockwise
@@ -99,12 +86,6 @@ def eta_to(state: LayerState, config: LayerConfig, point: Position) -> float:
     if distance < 2.0 * v / omega and error > math.pi / 2:
         extra = math.pi * (v / omega) / v  # loop around first
     return distance / v + error / omega + extra
-
-
-def speed_band(config: LayerConfig, count: int = 5) -> list[float]:
-    low = max(config.speed_kt - config.speed_spread_kt, 1.0)
-    high = config.speed_kt + config.speed_spread_kt
-    return [low + (high - low) * k / (count - 1) for k in range(count)] if high > low else [low]
 
 
 def dubins_turn(east: float, north: float, heading: float, radius: float,
@@ -176,17 +157,13 @@ def step(
     """Advance the layer by dt seconds. Returns (new state, arrived at the drop point).
 
     approach: heading (compass rad) to cross the drop point on (None: any heading).
-    wanted_speed_kt: the speed of a new leg (within the band; None: drawn). A leg keeps its speed.
+    wanted_speed_kt: the speed of a new leg (None: the reference speed). A leg keeps its speed.
 
     target given -> TRANSIT to it; otherwise ORBIT around the datum (estimated target position)."""
     mode = "TRANSIT" if target is not None else "ORBIT"
     speed = state.speed_kt
     if mode != state.mode or task_id != state.task_id:
-        if wanted_speed_kt is not None:
-            low = max(config.speed_kt - config.speed_spread_kt, 1.0)
-            speed = min(max(wanted_speed_kt, low), config.speed_kt + config.speed_spread_kt)
-        else:
-            speed = leg_speed_kt(config, rng)  # a new leg: new speed within +- spread
+        speed = wanted_speed_kt if wanted_speed_kt is not None else config.speed_kt
     v = speed * KNOT_TO_MPS
     omega_max = G * math.tan(math.radians(config.max_bank_deg)) / v
     radius_turn = v / omega_max
@@ -199,6 +176,8 @@ def step(
     center = datum
     orbit_radius = orbit_radius_m(config, speed)
 
+    same = state.mode == "TRANSIT" and state.task_id == task_id
+    loops = state.loops if same else 0
     if mode == "TRANSIT":
         east, north, _ = local_offset_m(position, target)
         distance = math.hypot(east, north)
@@ -211,7 +190,8 @@ def step(
             flown = state.path_sides if state.mode == "TRANSIT" and state.task_id == task_id else []
             turn, path_east, path_north, length, path = _guidance(
                 east, north, heading, approach, radius_turn, config, v, dt,
-                (flown, state.path_lengths_m) if flown and speed == state.speed_kt else None)
+                (flown, state.path_lengths_m) if flown and speed == state.speed_kt else None,
+                state.straight_s, loops >= 1)
             if not math.isfinite(length):
                 turn = 0.0  # inside both turning circles: fly on first
                 eta = distance / v + math.pi / omega_max
@@ -219,6 +199,8 @@ def step(
                 eta = length / v
                 path_step = (path_east, path_north)
                 path_kept = path
+                if same and state.eta_s is not None and eta > state.eta_s + 0.5 * math.pi / omega_max:
+                    loops += 1  # the path grew by a loop
     else:
         # vector field onto a clockwise circle around the centre
         east, north, _ = local_offset_m(center, position)
@@ -228,7 +210,7 @@ def step(
         sense = float(preferred_side(config))  # -1 counter-clockwise, +1 clockwise
         desired = bearing + sense * (math.pi / 2.0 + math.atan(2.0 * (distance - orbit_radius) / orbit_radius))
         error = _wrap(desired - heading)
-        turn = max(-omega_max * dt, min(omega_max * dt, error))
+        turn = max(-omega_max * dt, min(omega_max * dt, error)) if state.straight_s <= 0.0 else 0.0
 
     new_heading = heading + turn
     if path_step is not None:  # along the path (it can change from one turn to the other within the step)
@@ -263,6 +245,8 @@ def step(
         approach_key=state.approach_key,
         path_sides=path_kept[0],
         path_lengths_m=path_kept[1],
+        straight_s=max(state.straight_s - dt, 0.0),
+        loops=loops,
     ), arrived
 
 
@@ -270,7 +254,8 @@ GUIDANCE_SLACK_M = 5.0  # a fresh plan up to this much longer than the path bein
 
 
 def _guidance(east: float, north: float, heading: float, approach: float | None, radius: float,
-              config: LayerConfig, v: float, dt: float, flown: tuple[list[int], list[float]] | None
+              config: LayerConfig, v: float, dt: float, flown: tuple[list[int], list[float]] | None,
+              hold_s: float = 0.0, relax: bool = False
               ) -> tuple[float, float, float, float, tuple[list[int], list[float]]]:
     """(turn rad, east m, north m: the motion over this step along the path; path length m;
     the rest of the path after this step) to the point.
@@ -281,10 +266,12 @@ def _guidance(east: float, north: float, heading: float, approach: float | None,
     is exact along the path, but at the joins of its segments a tiny error can make the exact
     plan jump to another, longer path (a degenerate turn-turn path, or a last turn that has
     become a whisker too tight: a loop). Close to the point, when the fresh plan is a loop and
-    no path is kept, the loose path (see route.path_to) instead."""
+    no path is kept, the loose path (see route.path_to) instead. Wings level at the drops:
+    straight on for hold_s (after a drop) and over the last straight_before_s to the point (relax:
+    after the path has grown by a loop once, the loose path without the straight approach)."""
     args = (east, north, heading, approach, radius)
     options = {"prefer": preferred_side(config), "margin_m": config.turn_margin_s * v, "step_m": v * dt,
-               "segments": True}
+               "segments": True, "relax": relax, **_straight(config, v, hold_s)}
     turn, length, _, step_e, step_n, sides, lengths = routelib.path_to(*args, **options)
     path = ([int(x) for x in sides], [float(x) * radius for x in lengths])
     kept = False
@@ -322,6 +309,14 @@ def loop_s(speed_kt: float, config: LayerConfig) -> float:
     return 2.0 * math.pi * v / (G * math.tan(math.radians(config.max_bank_deg)))
 
 
+def _straight(config: LayerConfig, v: float, hold_s: float | np.ndarray = 0.0) -> dict:
+    """route.path_to's straight parts: wings level over the last straight_before_s to a drop
+    (the observer is released up to the capture radius before the point) and for hold_s (what
+    is left of straight_after_s after a drop) from the craft."""
+    before = config.straight_before_s * v + config.capture_radius_yd * YD_TO_M if config.straight_before_s > 0 else 0.0
+    return {"before_m": before, "hold_m": np.asarray(hold_s, dtype=float) * v}
+
+
 def _arrival_s(state: LayerState, config: LayerConfig, point: Position, approach: float | None = None) -> float:
     """Flight time at the current speed along the guidance path (coarse simulation when the
     point is inside both turning circles)."""
@@ -329,14 +324,16 @@ def _arrival_s(state: LayerState, config: LayerConfig, point: Position, approach
     east, north, _ = local_offset_m(state.position, point)
     radius = v * v / (G * math.tan(math.radians(config.max_bank_deg)))
     _, length, _ = routelib.path_to(east, north, math.radians(state.heading_deg), approach, radius,
-                                    preferred_side(config), config.turn_margin_s * v, loose=True)
+                                    preferred_side(config), config.turn_margin_s * v, loose=True,
+                                    **_straight(config, v, state.straight_s))
     if not math.isfinite(float(length)):
         return flight_time_s(state, config, point, state.speed_kt, limit_s=900.0, approach=approach)
     return max(float(length) - config.capture_radius_yd * YD_TO_M, 0.0) / v
 
 
 def _dubins_times(east: np.ndarray, north: np.ndarray, heading: np.ndarray, v: float,
-                  config: LayerConfig, approach: float | np.ndarray | None = None) -> np.ndarray:
+                  config: LayerConfig, approach: float | np.ndarray | None = None,
+                  hold_s: float | np.ndarray = 0.0) -> np.ndarray:
     """The guidance path for arrays of relative positions/headings: flight time (s) to within
     the capture radius at speed v (m/s); inf where the point is inside both turning circles."""
     radius = v * v / (G * math.tan(math.radians(config.max_bank_deg)))
@@ -344,7 +341,7 @@ def _dubins_times(east: np.ndarray, north: np.ndarray, heading: np.ndarray, v: f
         east, north, heading, approach = np.broadcast_arrays(east, north, heading, approach)
     approaches = approach
     _, length, _ = routelib.path_to(east, north, heading, approaches, radius, preferred_side(config),
-                                    config.turn_margin_s * v, loose=True)
+                                    config.turn_margin_s * v, loose=True, **_straight(config, v, hold_s))
     return np.maximum(length - config.capture_radius_yd * YD_TO_M, 0.0) / v
 
 
@@ -355,7 +352,8 @@ def _leg_times(state: LayerState, config: LayerConfig, point: Position, headings
     east, north, _ = local_offset_m(state.position, point)
     headings = np.asarray(headings, dtype=float)
     return _dubins_times(np.full(len(headings), east), np.full(len(headings), north),
-                         np.full(len(headings), math.radians(state.heading_deg)), v, config, headings)
+                         np.full(len(headings), math.radians(state.heading_deg)), v, config, headings,
+                         state.straight_s)
 
 
 def departure(state: LayerState, config: LayerConfig, point: Position, left: float,
@@ -380,9 +378,9 @@ def departure(state: LayerState, config: LayerConfig, point: Position, left: flo
     for _ in range(window):
         probe, _ = step(probe, config, None, None, datum, rng, wanted_speed_kt=state.speed_kt)
         e, n, _ = local_offset_m(probe.position, point)
-        poses.append((e, n, math.radians(probe.heading_deg)))
-    e, n, h = (np.array(x) for x in zip(*poses, strict=True))
-    error = np.arange(1, window + 1) + _dubins_times(e, n, h, v, config, approach) - left
+        poses.append((e, n, math.radians(probe.heading_deg), probe.straight_s))
+    e, n, h, hold = (np.array(x) for x in zip(*poses, strict=True))
+    error = np.arange(1, window + 1) + _dubins_times(e, n, h, v, config, approach, hold) - left
     error = np.where(np.isfinite(error), np.abs(error), np.inf)
     return "leave" if abs(now - left) <= float(np.min(error)) + DEPART_TIE_S else "wait"
 
@@ -534,7 +532,8 @@ def _route(state: LayerState, config: LayerConfig, points: list[Position],
     return routelib.route([o[0] for o in offsets], [o[1] for o in offsets], math.radians(state.heading_deg),
                           state.speed_kt, config.max_bank_deg, planned, preferred_side(config),
                           config.turn_margin_s * v, capture_m=config.capture_radius_yd * YD_TO_M, first_s=first_s,
-                          first_headings=first_headings)
+                          first_headings=first_headings, before_s=config.straight_before_s,
+                          after_s=config.straight_after_s, hold_s=state.straight_s)
 
 
 def ready_pose(state: LayerState | None, config: LayerConfig, tasks: list, tick: int,
@@ -566,7 +565,7 @@ def _approach(state: LayerState, config: LayerConfig, tasks: list, points: list[
     drops stay the same. A new following drop on the way: chosen again among the headings that
     do not make the current drop later (or further off its planned time) than the heading flown."""
     key = ">".join(str(t.task_id) for t in tasks)
-    if len(tasks) == 1:
+    if len(tasks) == 1 and config.straight_before_s <= 0.0:  # any heading (with a straight approach: chosen)
         if state.approach_deg is None and state.approach_key == key:
             return state
         return state.model_copy(update={"approach_deg": None, "approach_key": key, "path_sides": [],
@@ -672,9 +671,6 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
         task = open_tasks[0] if open_tasks and not config.paused else None
         target = aim = approach = None
         task_id = None
-        # the speed is drawn when the layer has nothing left to do: the drops planned at the speed
-        # it has are flown at that speed (also the legs after a wait on the orbit)
-        wanted = state.speed_kt if open_tasks else None
         datum = air(feed.datum)
         if task is not None:
             aim = positions[task.task_id]
@@ -699,16 +695,14 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
             approach = None if state.approach_deg is None else math.radians(state.approach_deg)
             decision = "leave"
             if timed and not committed:
-                fastest = config.speed_kt + config.speed_spread_kt
-                near = eta_to(state.model_copy(update={"speed_kt": fastest}), config, point) <= left + 600
+                near = eta_to(state, config, point) <= left + 600
                 decision = departure(state, config, point, left, datum, approach) if near else "wait"
             if decision == "leave":
                 target, task_id = point, task.task_id
         to_drop = target is not None
         state = _climb(state, config, config.drop_altitude_ft if to_drop else config.cruise_altitude_ft)
         before = over_ground(state.position)
-        state, arrived = step(state, config, target, task_id, datum, rng, wanted_speed_kt=wanted,
-                              approach=approach)
+        state, arrived = step(state, config, target, task_id, datum, rng, approach=approach)
         offset[0] += wind[0]
         offset[1] += wind[1]
         if profile is not None and target is not None:
@@ -717,6 +711,13 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
             # radius early)
             arrived = _passes(before, over_ground(state.position), aim, config.capture_radius_yd * YD_TO_M)
         if arrived and task is not None:  # dropped when it gets there, early or late
+            # wings level on past the point for straight_after_s (dropped up to the capture
+            # radius before it)
+            pe, pn, _ = local_offset_m(state.position, target)
+            heading = math.radians(state.heading_deg)
+            ahead = max(pe * math.sin(heading) + pn * math.cos(heading), 0.0) / max(state.speed_kt * KNOT_TO_MPS, 1.0)
+            if config.straight_after_s > 0.0:
+                state = state.model_copy(update={"straight_s": config.straight_after_s + ahead})
             # with the open drops at the same point (one release, no second pass over it)
             for released in release_group(task, open_tasks, positions, config):
                 if profile is None:
