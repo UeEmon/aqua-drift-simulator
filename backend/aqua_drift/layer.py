@@ -326,7 +326,7 @@ def _arrival_s(state: LayerState, config: LayerConfig, point: Position, approach
     east, north, _ = local_offset_m(state.position, point)
     radius = v * v / (G * math.tan(math.radians(config.max_bank_deg)))
     _, length, _ = routelib.path_to(east, north, math.radians(state.heading_deg), approach, radius, loose=True,
-                                    **_straight(config, v, state.straight_s))
+                                    capture_m=config.capture_radius_yd * YD_TO_M, **_straight(config, v, state.straight_s))
     if not math.isfinite(float(length)):
         return flight_time_s(state, config, point, state.speed_kt, limit_s=900.0, approach=approach)
     return max(float(length) - config.capture_radius_yd * YD_TO_M, 0.0) / v
@@ -342,7 +342,7 @@ def _dubins_times(east: np.ndarray, north: np.ndarray, heading: np.ndarray, v: f
         east, north, heading, approach = np.broadcast_arrays(east, north, heading, approach)
     approaches = approach
     _, length, _ = routelib.path_to(east, north, heading, approaches, radius, loose=True,
-                                    **_straight(config, v, hold_s))
+                                    capture_m=config.capture_radius_yd * YD_TO_M, **_straight(config, v, hold_s))
     return np.maximum(length - config.capture_radius_yd * YD_TO_M, 0.0) / v
 
 
@@ -400,7 +400,7 @@ def _departure_errors(state: LayerState, config: LayerConfig, point: Position, l
                       approaches: np.ndarray, datum_drift_mps: tuple[float, float] = (0.0, 0.0),
                       release=None) -> tuple[np.ndarray, np.ndarray] | None:
     """Per approach heading (compass rad, nan: any): how close to the planned time (|s|) the
-    best departure over the next round of the orbit arrives, and when that departure is (s from
+    best departure, now or over the next round of the orbit, arrives, and when that departure is (s from
     now) (see departure; release: to the release point on each heading). None: the planned time is more than a round of the orbit
     beyond the longest flight (no departure to look at yet)."""
     v = max(state.speed_kt, 1.0) * KNOT_TO_MPS
@@ -412,7 +412,8 @@ def _departure_errors(state: LayerState, config: LayerConfig, point: Position, l
         return None
     probe = state
     rng = random.Random(0)
-    poses = []
+    e, n, _ = local_offset_m(state.position, point)
+    poses = [(e, n, math.radians(state.heading_deg), state.straight_s)]  # leaving now (see departure)
     for k in range(window):
         centre = _shift(datum, datum_drift_mps[0] * (k + 1), datum_drift_mps[1] * (k + 1))
         probe, _ = step(probe, config, None, None, centre, rng, wanted_speed_kt=state.speed_kt)
@@ -425,10 +426,10 @@ def _departure_errors(state: LayerState, config: LayerConfig, point: Position, l
     times = _dubins_times(e + de, n + dn, h, v, config, approaches, hold)
     if free.any():  # any heading: the guidance' turn-then-straight path
         times = np.where(free, _dubins_times(e, n, h, v, config, None, hold), times)
-    error = np.arange(1, window + 1)[:, None] + times - left
+    error = np.arange(0, window + 1)[:, None] + times - left
     error = np.where(np.isfinite(error), np.abs(error), np.inf)
     best = np.argmin(error, axis=0)
-    return error[best, np.arange(error.shape[1])], best + 1.0
+    return error[best, np.arange(error.shape[1])], best.astype(float)
 
 
 PATH_STEP_S = 5.0  # sampling of the planned flight path (about 500 m at 200 kt)
