@@ -21,6 +21,7 @@
 
 ## ドキュメント
 
+- [docs/system-architecture.md](docs/system-architecture.md) – **システム構成**（コンテナ、backend / frontend、API、データの流れ、永続化、Docker 構成、CI）
 - [docs/system-requirements.md](docs/system-requirements.md) – **動作環境の要件**（サーバー・ブラウザ・GPU・ストレージ・ネットワーク）
 - [docs/requirements.md](docs/requirements.md) – 要求事項と項目ごとのトレーサビリティ
 - [docs/estimation-methods.md](docs/estimation-methods.md) – カルマンフィルタの解説、代替手法、採用した手法
