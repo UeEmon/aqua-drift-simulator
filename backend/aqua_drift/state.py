@@ -353,6 +353,12 @@ class SimulationState:
             "layer_max_per_release": layer.max_per_release,
             "layer_straight_before_s": layer.straight_before_s,
             "layer_straight_after_s": layer.straight_after_s,
+            **({} if self.layer_state is None else {
+                "layer_release_east_m": self.layer_state.release_east_m,
+                "layer_release_north_m": self.layer_state.release_north_m,
+                "layer_wind_mps": self.layer_state.route_wind_mps,
+                "layer_drift_mps": self.layer_state.route_drift_mps,
+            }),
         }
 
     def _deployment_status(self) -> DeploymentStatus:

@@ -360,6 +360,19 @@ def crab(tracks, speed_mps: float, wind_mps: tuple[float, float]):
     return np.mod(np.arctan2(ground * ue - wind_mps[0], ground * un - wind_mps[1]), TWO_PI)
 
 
+def release_table(east_m, north_m) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]:
+    """route's release from a table of the release point's offset from the drop point (east,
+    north m) over headings evenly spaced round the compass, the first repeated at the end
+    (interpolated between)."""
+    east, north = np.asarray(east_m, dtype=float), np.asarray(north_m, dtype=float)
+    grid = np.arange(len(east)) * TWO_PI / max(len(east) - 1, 1)
+
+    def offsets(headings):
+        h = np.mod(np.asarray(headings, dtype=float), TWO_PI)
+        return np.interp(h, grid, east), np.interp(h, grid, north)
+    return offsets
+
+
 @dataclass
 class Leg:
     approach: float | None  # compass rad, None: any heading
@@ -532,7 +545,10 @@ def schedule(east: list[float], north: list[float], heading: float | None, speed
              wanted_s: list[float], start_s: float = 0.0,
              prefix: tuple[list[float], list[float], list[float | None]] | None = None,
              orders: list[list[int]] | None = None, before_s: float = 0.0,
-             after_s: float = 0.0) -> tuple[list[int], list[float]]:
+             after_s: float = 0.0,
+             release: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None,
+             drift: tuple[float, float] = (0.0, 0.0),
+             wind: tuple[float, float] = (0.0, 0.0)) -> tuple[list[int], list[float]]:
     """Order and drop times for the drops of one plan: wanted_s are the optimal drop times
     (s from now; the layer is free at start_s at the origin on `heading`, None: unknown).
 
@@ -540,8 +556,9 @@ def schedule(east: list[float], north: list[float], heading: float | None, speed
     total delay after the wanted times, then the earliest end. A drop is at its wanted time, or
     when the layer can be there after the previous drop (route along the order), whichever is
     later. `orders`: only these orders (e.g. along a line, either way). before_s, after_s: wings
-    level at the drops (see route). Returns (order: indices into
-    the inputs, drop times in that order)."""
+    level at the drops (see route). release, drift, wind: the observer's fall and the wind, as
+    the layer flies (see route). Returns (order: indices into the inputs, drop times in that
+    order)."""
     n = len(east)
     if n == 0:
         return [], []
@@ -554,7 +571,8 @@ def schedule(east: list[float], north: list[float], heading: float | None, speed
         pe, pn, ps = prefix or ([], [], [])
         h = heading if heading is not None else _bearing(*((pe[0], pn[0]) if pe else (east[order[0]], north[order[0]])))
         legs = route([*pe, *(east[i] for i in order)], [*pn, *(north[i] for i in order)], h, speed_kt, bank_deg,
-                     [*ps, *(wanted_s[i] for i in order)], start_s=start_s, before_s=before_s, after_s=after_s)
+                     [*ps, *(wanted_s[i] for i in order)], start_s=start_s, before_s=before_s, after_s=after_s,
+                     release=release, drift=drift, wind=wind)
         drops = [leg.drop_s for leg in legs[len(pe):]]
         delay = sum(max(t - wanted_s[i], 0.0) for t, i in zip(drops, order, strict=True)) + sum(
             max(leg.drop_s - s, 0.0) for leg, s in zip(legs, ps) if s is not None)

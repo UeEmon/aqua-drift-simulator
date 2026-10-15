@@ -9,7 +9,16 @@ from aqua_drift.deployment import _offset
 from aqua_drift.layer import advance, initial_state
 from aqua_drift.models import DropTask, LayerConfig, LayerFeed, Position
 from aqua_drift.physics import local_offset_m
-from aqua_drift.route import WORDS, dubins_words, motion, path_to, route, schedule, turn_radius_m
+from aqua_drift.route import (
+    WORDS,
+    dubins_words,
+    motion,
+    path_to,
+    release_table,
+    route,
+    schedule,
+    turn_radius_m,
+)
 
 DATUM = Position(latitude=35.0, longitude=140.0, depth_ft=0.0)
 
@@ -228,3 +237,22 @@ def test_layer_drops_wings_level() -> None:
     assert done[3] - done[1] < 2 * 450.0 / (200.0 * 0.5144444444444445) + 5  # the line in one pass
     for tick in done.values():
         assert all(abs(banks.get(t, 0.0)) < 1e-6 for t in range(tick - 4, min(tick + 5, max(banks) + 1)))
+
+
+def test_schedule_routes_with_the_observers_fall_and_the_wind() -> None:
+    """The planner's drop times are the layer's: route with the same release points and wind."""
+    speed, bank = 200.0, 15.0
+    table = release_table([150.0 * math.sin(math.radians(5 * i)) for i in range(73)],
+                          [150.0 * math.cos(math.radians(5 * i)) for i in range(73)])
+    de, dn = table(np.array([math.radians(42.5)]))
+    assert abs(de[0] - 150.0 * math.sin(math.radians(42.5))) < 1.0
+    assert abs(dn[0] - 150.0 * math.cos(math.radians(42.5))) < 1.0
+    east, north = [0.0, 3000.0], [9000.0, 9000.0]
+    wind, drift = (-15.0, 10.0), (15.0, -10.0)
+    _, times = schedule(east, north, 0.0, speed, bank, [0.0, 0.0], orders=[[0, 1]], before_s=2.0, after_s=5.0,
+                        release=table, drift=drift, wind=wind)
+    legs = route(east, north, 0.0, speed, bank, [0.0, 0.0], before_s=2.0, after_s=5.0, release=table,
+                 drift=drift, wind=wind)
+    assert times == [leg.drop_s for leg in legs]
+    _, still = schedule(east, north, 0.0, speed, bank, [0.0, 0.0], orders=[[0, 1]], before_s=2.0, after_s=5.0)
+    assert still != times

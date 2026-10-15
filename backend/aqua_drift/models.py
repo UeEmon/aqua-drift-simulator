@@ -643,6 +643,11 @@ class DeploymentFeed(BaseModel):
     layer_max_per_release: int = 1  # observers one drop can release at once (LayerConfig.max_per_release)
     layer_straight_before_s: float = 0.0  # LayerConfig.straight_before_s
     layer_straight_after_s: float = 0.0  # LayerConfig.straight_after_s
+    # the observer's fall and the wind as the layer routes new drops (LayerState.release_east_m ...)
+    layer_release_east_m: list[float] = Field(default_factory=list)
+    layer_release_north_m: list[float] = Field(default_factory=list)
+    layer_wind_mps: tuple[float, float] = (0.0, 0.0)
+    layer_drift_mps: tuple[float, float] = (0.0, 0.0)
     source_frequency_hz: float = 400.0  # operator's (recognized) source frequency
     sound_speed_mps: float = 1500.0
     frequency_sigma_hz: float = 0.03
@@ -734,6 +739,9 @@ class LayerState(BaseModel):
     # None: any heading) and the drops it was chosen for ("task>next")
     approach_deg: float | None = None
     approach_key: str = ""
+    # in a wind: the track over the ground that approach is chosen to make good (the approach
+    # follows the wind at the altitude flown; None: no wind, or a heading chosen as flown)
+    approach_track_deg: float | None = None
     # the Dubins path being flown to the current drop point (turn sides +1 right / -1 left / 0
     # straight and the remaining lengths in metres): followed as it is when a fresh plan comes out
     # longer (small errors at the joins of the path can make the exact plan jump to a detour)
@@ -757,6 +765,14 @@ class LayerState(BaseModel):
     correction_source: str = "none"
     correction_wind_direction_deg: float | None = None  # from
     correction_wind_speed_kt: float | None = None
+    # how the route to new drops is computed (layer.route_frame), as of the last update: the
+    # release point's offset from the drop point (east, north m) over headings round the compass
+    # (empty: no wind, the drop point itself), the wind at the flight altitude and the drift of a
+    # drop point in the air mass (current - wind), east, north m/s
+    release_east_m: list[float] = Field(default_factory=list)
+    release_north_m: list[float] = Field(default_factory=list)
+    route_wind_mps: tuple[float, float] = (0.0, 0.0)
+    route_drift_mps: tuple[float, float] = (0.0, 0.0)
 
 
 class DropRelease(BaseModel):
