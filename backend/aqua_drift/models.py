@@ -739,6 +739,9 @@ class LayerState(BaseModel):
     # None: any heading) and the drops it was chosen for ("task>next")
     approach_deg: float | None = None
     approach_key: str = ""
+    # in a wind: the track over the ground that approach is chosen to make good (the approach
+    # follows the wind at the altitude flown; None: no wind, or a heading chosen as flown)
+    approach_track_deg: float | None = None
     # the Dubins path being flown to the current drop point (turn sides +1 right / -1 left / 0
     # straight and the remaining lengths in metres): followed as it is when a fresh plan comes out
     # longer (small errors at the joins of the path can make the exact plan jump to a detour)

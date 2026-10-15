@@ -243,6 +243,7 @@ def step(
         eta_s=eta,
         altitude_ft=state.altitude_ft,
         approach_deg=state.approach_deg,
+        approach_track_deg=state.approach_track_deg,
         approach_key=state.approach_key,
         path_sides=path_kept[0],
         path_lengths_m=path_kept[1],
@@ -353,8 +354,10 @@ def _meet(state: LayerState, config: LayerConfig, point: Position, lead) -> Posi
     second ago."""
     approach = None if state.approach_deg is None else math.radians(state.approach_deg)
     met = lead(point)
+    # at the point itself (the release, abeam of it), not at the capture radius before it
+    capture_s = config.capture_radius_yd * YD_TO_M / max(state.speed_kt * KNOT_TO_MPS, 1.0)
     for _ in range(routelib.MEET_STEPS + 1):
-        t = _arrival_s(state, config, met, approach)
+        t = _arrival_s(state, config, met, approach) + capture_s
         if not math.isfinite(t):
             break
         met = lead(point, flight_s=t)
@@ -672,15 +675,15 @@ def _approach(state: LayerState, config: LayerConfig, tasks: list, points: list[
     if len(tasks) == 1 and config.straight_before_s <= 0.0:  # any heading (with a straight approach: chosen)
         if state.approach_deg is None and state.approach_key == key:
             return state
-        return state.model_copy(update={"approach_deg": None, "approach_key": key, "path_sides": [],
-                                        "path_lengths_m": []})
+        return state.model_copy(update={"approach_deg": None, "approach_track_deg": None, "approach_key": key,
+                                        "path_sides": [], "path_lengths_m": []})
     if committed and state.approach_key == key:
         return state
     planned = [None if t.planned_tick is None else float(t.planned_tick - tick) for t in tasks]
     offsets = [local_offset_m(state.position, p) for p in points]
     met = points[0] if met is None else met
-    headings = routelib.crab(routelib.approach_headings([o[0] for o in offsets], [o[1] for o in offsets], 0),
-                             max(state.speed_kt, 1.0) * KNOT_TO_MPS, wind)
+    tracks = routelib.approach_headings([o[0] for o in offsets], [o[1] for o in offsets], 0)
+    headings = routelib.crab(tracks, max(state.speed_kt, 1.0) * KNOT_TO_MPS, wind)
     lead_e, lead_n, _ = local_offset_m(state.position, met)
     # the heading flown stays a candidate (the last one): the approach, or on the way to a point
     # on any heading (it was the last drop) the heading that path arrives on
@@ -692,6 +695,8 @@ def _approach(state: LayerState, config: LayerConfig, tasks: list, points: list[
         flown = float(final) if math.isfinite(float(final)) else None
     if flown is not None:
         headings = np.append(headings, flown)
+        tracks = np.append(tracks, math.nan if state.approach_track_deg is None or state.approach_deg is None
+                           else math.radians(state.approach_track_deg))
     # on the way the drop is not delayed: the path flown arrives in eta_s, and a new approach
     # heading may not make it later
     first = None
@@ -705,7 +710,7 @@ def _approach(state: LayerState, config: LayerConfig, tasks: list, points: list[
     # as costly (waiting for a planned time): the approach chosen before for these drops stays
     keep = flown if flown is not None and state.approach_key == key else None
     legs = _route(state, config, points, planned, first, headings, release, keep, drift, wind)
-    approach = math.degrees(legs[0].approach) % 360.0
+    best = int(np.argmin(np.abs(np.mod(headings - legs[0].approach + math.pi, 2.0 * math.pi) - math.pi)))
     if (len(tasks) == 1 and planned[0] is not None and not committed and datum is not None
             and legs[0].drop_s > legs[0].arrive_s):
         # waiting: every heading is in time; take one that can leave the orbit on time
@@ -716,11 +721,13 @@ def _approach(state: LayerState, config: LayerConfig, tasks: list, points: list[
             # second, it moves on to a shorter flight once that can be on time)
             close = error <= np.min(error) + DEPART_TIE_S
             best = int(np.argmax(np.where(close, leave, -np.inf)))
-            approach = math.degrees(float(headings[best])) % 360.0
+    approach = math.degrees(float(headings[best])) % 360.0
+    # the track it makes good (kept: the heading follows the wind, see advance)
+    track = math.degrees(float(tracks[best])) % 360.0 if math.isfinite(float(tracks[best])) else None
     if approach == state.approach_deg:
-        return state.model_copy(update={"approach_key": key})
-    return state.model_copy(update={"approach_deg": approach, "approach_key": key, "path_sides": [],
-                                    "path_lengths_m": []})
+        return state.model_copy(update={"approach_key": key, "approach_track_deg": track})
+    return state.model_copy(update={"approach_deg": approach, "approach_track_deg": track, "approach_key": key,
+                                    "path_sides": [], "path_lengths_m": []})
 
 
 # where the wind of the release correction comes from (LayerState.correction_source)
@@ -812,6 +819,12 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
             moving = (current[0] - wind[0], current[1] - wind[1]) if profile is not None else (0.0, 0.0)
             state = _approach(state, config, [task, *ahead], [air(aim), *(air(positions[t.task_id]) for t in ahead)],
                               tick, committed, release, datum, wind, moving, met)
+            if profile is not None and state.approach_track_deg is not None and state.approach_deg is not None:
+                # the track chosen, made good in the wind at the altitude flown now (it changes on
+                # the climb or descent to the drop altitude)
+                crabbed = float(routelib.crab(np.array([math.radians(state.approach_track_deg)]),
+                                              max(state.speed_kt, 1.0) * KNOT_TO_MPS, wind)[0])
+                state = state.model_copy(update={"approach_deg": math.degrees(crabbed) % 360.0})
             if profile is not None:  # the release point on the approach heading just chosen
                 aim, _ = release_point(over_ground(state.position), state.altitude_ft, state.speed_kt, config,
                                        aim, wind, estimate, current, profile.terminal_mps, state.approach_deg)

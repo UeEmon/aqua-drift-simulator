@@ -1,6 +1,7 @@
 import math
 import random
 
+import numpy as np
 import pytest
 from pydantic import ValidationError
 
@@ -240,3 +241,27 @@ def test_layer_routes_new_drops_in_the_wind_it_flies() -> None:
     assert heading == pytest.approx(math.degrees(legs[-1].heading) % 360.0)
     windless = layerlib._route(state, config, [task.position], [None])
     assert abs(math.degrees(windless[-1].heading) % 360.0 - heading) > 1.0
+
+
+def test_approach_keeps_its_track_in_the_wind_flown() -> None:
+    """In a wind the approach is a track over the ground; the heading follows the wind at the
+    altitude flown (the wind correction angle is not the one of the altitude it was chosen at)."""
+    from aqua_drift import route as routelib
+
+    config = LayerConfig()
+    wind = WindConfig(levels=[WindLevel(altitude_ft=0, direction_deg=200, speed_kt=10),
+                              WindLevel(altitude_ft=6000, direction_deg=320, speed_kt=50)])
+    profile = windlib.WindProfile(wind)
+    state = initial_state(config, DATUM, 0, random.Random(1))
+    tasks = [DropTask(task_id=k + 1, created_tick=0, source="forward", status="APPROVED", approved_tick=0,
+                      position=_offset(DATUM, 450.0 * k, 9000.0, 300.0)) for k in range(3)]
+    rng = random.Random(2)
+    for tick in range(1, 61):
+        altitude = state.altitude_ft  # the heading is set before the climb of this second
+        state, _ = advance(LayerFeed(tick=tick, config=config, tasks=tasks, datum=DATUM, wind=wind), state, rng)
+        if state.approach_track_deg is None:
+            continue
+        flown = profile.at(altitude)
+        heading = routelib.crab(np.array([math.radians(state.approach_track_deg)]), state.speed_kt * KT, flown)
+        assert state.approach_deg == pytest.approx(math.degrees(float(heading[0])) % 360.0, abs=1e-6)
+    assert state.approach_track_deg is not None
