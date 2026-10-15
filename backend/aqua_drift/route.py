@@ -43,9 +43,10 @@ ORDER_LIMIT = 5  # drops of one plan ordered by trying every order (more: by dro
 KEEP_TIE_S = 1e-3
 # a moving point is met where it is when the layer gets there: fixed-point steps from the
 # straight-line meeting (each cuts the error ~6x at 30 kt of wind) ...
-MEET_STEPS = 2
-# ... and a leg still this far off after them has no shortest path that meets the point (the
-# path jumps from going round to turning straight in): it costs a turn round more
+MEET_STEPS = 4
+# ... and a leg still this far off after them: the shortest path jumps between going round and
+# turning straight in as the point moves. Early there (the layer gets there before the point): met
+# then on a path stretched to it; late: no path meets it, it costs a turn round more
 MEET_MISS_S = 5.0
 
 # Dubins words: (first turn, middle, last turn) with +1 right / -1 left / 0 straight
@@ -326,12 +327,14 @@ def intercept_s(east, north, drift: tuple[float, float], speed_mps: float):
     return (b + np.sqrt(np.maximum(b * b - 4.0 * a * c, 0.0))) / (-2.0 * a)
 
 
-def _leg_to(east, north, xs, ys, pose, headings, drift, radius, options, t):
+def _leg_to(east, north, xs, ys, pose, headings, drift, radius, options, t, final=False):
     """Length (m) of the shortest path from the previous points (xs, ys on pose) to the points
-    (east, north at the start, moving at drift) crossed on headings, where they are at t."""
+    (east, north at the start, moving at drift) crossed on headings, where they are at t
+    (final: also the heading it gets there on)."""
     with np.errstate(invalid="ignore"):  # inf * 0 after an excluded heading (an inf time)
         east, north = east + drift[0] * t - xs, north + drift[1] * t - ys
-    return path_to(east, north, pose, headings, radius, **options)[1]
+    _, length, heading = path_to(east, north, pose, headings, radius, **options)
+    return (length, heading) if final else length
 
 
 def _last_leg_to(east, north, xs, ys, pose, drift, radius, release, options, t):
@@ -484,6 +487,8 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
             else:
                 when = start[:, 0]
             length, final = last_leg(when)
+            if moving:  # early there: met on a path stretched to it (see MEET_MISS_S)
+                length = np.where(start[:, 0] + length / v - when < -MEET_MISS_S, v * (when - start[:, 0]), length)
             final = np.where(np.isfinite(final), final, pose + math.pi)
             length = length[:, None]
             here_e, here_n = np.full(1, east[k]), np.full(1, north[k])  # not used further
@@ -501,8 +506,14 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
                     length = leg(when)
                     when = np.where(np.isfinite(length), start + length / v, when)
             length = leg(when)
-            if moving:  # no shortest path meets it: a turn round more
-                length = np.where(np.abs(start + length / v - when) > MEET_MISS_S, length + TWO_PI * radius, length)
+            if moving:  # see MEET_MISS_S
+                late = start + length / v - when
+                length = np.where(late < -MEET_MISS_S, v * (when - start), length)
+                length = np.where(late > MEET_MISS_S, length + TWO_PI * radius, length)
+            if k == 0:  # flown as the guidance flies it: close to the point a turn-then-straight
+                # path may cross it up to LOOP_TOLERANCE off the approach, and the next leg starts there
+                crossed = leg(when, final=True)[1]
+                crossed = np.where(np.isfinite(crossed), crossed, headings[None, :])
         arrive = drop[:, None] + length / v
         if k == 0 and first:  # on its way: dropped on arrival
             arrive = drop[:, None] + np.asarray(first_s, dtype=float)[None, :]
@@ -524,7 +535,8 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
         parents.append(best)
         arrivals.append(arrive[best, cols])
         drops.append(drop)
-        pose = headings if not last else pose
+        if not last:
+            pose = crossed[best, cols] if k == 0 else headings
         if not last:  # the release point where it is at the drop
             here_e = base_e + drift[0] * np.where(np.isfinite(drop), drop - start_s, 0.0)
             here_n = base_n + drift[1] * np.where(np.isfinite(drop), drop - start_s, 0.0)

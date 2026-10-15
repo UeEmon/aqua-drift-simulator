@@ -249,6 +249,8 @@ def step(
         path_lengths_m=path_kept[1],
         straight_s=max(state.straight_s - dt, 0.0),
         loops=loops,
+        release_wind_task_id=state.release_wind_task_id,
+        release_wind_mps=state.release_wind_mps,
     ), arrived
 
 
@@ -304,6 +306,10 @@ def drift(position: Position, east_kt: float, north_kt: float, dt: float = 1.0) 
 LOOKAHEAD_S = 400  # longest stretch of the orbit over which the layer looks for the best departure
 DEPART_TIE_S = 2.0  # a later departure must be this much closer to the planned time to wait for it
 APPROACH_TOLERANCE_S = 5.0  # on the way, a new approach heading may make the drop this much later
+# a new wind estimate (the splash of the drop before) moves the release point by up to some 100 m
+# across; within this of the release the layer could not turn for it and would go round once
+# more, so the correction wind it is flying for is kept
+RELEASE_LOCK_S = 60.0
 
 
 def loop_s(speed_kt: float, config: LayerConfig) -> float:
@@ -806,9 +812,19 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
             # in the air mass a ground point moves with current - wind; waiting for a planned time:
             # met at that time, else at the arrival along the guidance path (see the meeting below)
             left = task.planned_tick - tick if task.planned_tick is not None else 0
-            flight_s = max(state.eta_s - 1.0, 0.0) if on_way else (float(left) if left > 0 else None)
+            # (just after a drop, wings level, it cannot wait for a planned time: met at the arrival)
+            waits = left > 0 and state.straight_s <= 0.0
+            flight_s = max(state.eta_s - 1.0, 0.0) if on_way else (float(left) if waits else None)
             lead = partial(_lead, state.position, drift_e=current[0] - wind[0], drift_n=current[1] - wind[1],
                            v=max(state.speed_kt, 1.0) * KNOT_TO_MPS, flight_s=flight_s)
+            if profile is not None and source != NO_CORRECTION and on_way and state.eta_s <= RELEASE_LOCK_S:
+                # close to the release: the correction it is flown for stays (see RELEASE_LOCK_S);
+                # before the first estimate that is the wind at the altitude flown
+                if state.release_wind_task_id != task.task_id:
+                    state = state.model_copy(update={
+                        "release_wind_task_id": task.task_id,
+                        "release_wind_mps": estimate if source == ESTIMATED_WIND else None})
+                estimate = state.release_wind_mps if state.release_wind_mps is not None else wind
             release = None
             if profile is not None:  # the headings are chosen with the release points they make
                 release = release_offsets(_release_altitude(state, config, aim), state.speed_kt, wind, estimate,

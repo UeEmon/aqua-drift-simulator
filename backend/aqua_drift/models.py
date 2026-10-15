@@ -750,6 +750,11 @@ class LayerState(BaseModel):
     # wings level after a drop: seconds of straight flight left (LayerConfig.straight_after_s)
     straight_s: float = 0.0
     loops: int = 0  # times the path to the current drop point has grown by a loop
+    # the correction wind (east, north m/s towards) kept for the release of the drop task
+    # release_wind_task_id from RELEASE_LOCK_S before it (a new estimate arriving then would move
+    # the release point further than the layer can turn for)
+    release_wind_task_id: int | None = None
+    release_wind_mps: tuple[float, float] | None = None
     # planned flight path ahead (飛行予定経路): [latitude, longitude] from the current position
     # through the open drop points in order, along the turn-limited guidance path
     planned_path: list[tuple[float, float]] = Field(default_factory=list)
