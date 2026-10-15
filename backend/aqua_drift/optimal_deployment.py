@@ -57,8 +57,10 @@ counts from the earliest time the layer (設標者) can be there (its free time,
 turn). For every chosen observer the optimal drop time is as late as possible without losing
 information -- just before the target (earliest over the hypotheses, less a lead time and a
 position-uncertainty margin) comes within the detection range -- and never before the layer can
-be there. A later drop keeps the observer's 3 h observing time and its slot for when they are
-useful.
+be there. The drop time is the release (投下): the observer is in the water only after its fall
+from the release altitude to the sea surface, so the drop is that fall time earlier (the release
+altitude as the layer will have it: see LayerAvailability.fall_s). A later drop keeps the
+observer's 3 h observing time and its slot for when they are useful.
 
 Line laying (detection range shorter than the layer's turn radius, `line_laying`): the layer cannot
 fly between observers a few hundred metres apart without a loop each, so a plan is one line along
@@ -80,6 +82,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from aqua_drift import route as routelib
+from aqua_drift import wind as windlib
 from aqua_drift.deployment import _offset
 from aqua_drift.models import ForwardDeploymentConfig, Position, TrackEstimate
 from aqua_drift.physics import local_offset_m
@@ -363,6 +366,36 @@ class LayerAvailability:
     now_position: Position | None = None
     now_heading_deg: float | None = None
     queue: list[tuple[Position, float | None]] = field(default_factory=list)
+    # the observer's free fall from the release altitude to the sea surface (terminal velocity
+    # m/s; None: no fall, in the water at the drop) and the layer's altitudes (LayerConfig): its
+    # altitude when free (ready_s), the cruise altitude it orbits at and the drop altitude it
+    # descends to on the way to a drop point at climb_rate_fpm
+    fall_terminal_mps: float | None = None
+    altitude_ft: float = 1000.0
+    cruise_altitude_ft: float = 3000.0
+    drop_altitude_ft: float = 1000.0
+    climb_rate_fpm: float = 2000.0
+
+    def release_altitude_ft(self, earliest: np.ndarray, drop_s: np.ndarray) -> np.ndarray:
+        """Altitude (Ft) of a release at drop_s (s from now) at points the layer can reach at
+        earliest: it waits in its orbit (climbing towards the cruise altitude) until it leaves,
+        then descends towards the drop altitude over the flight from where it is free
+        (earliest - ready_s), as layer.release_point predicts it."""
+        rate = self.climb_rate_fpm / 60.0
+        wait = np.maximum(drop_s - earliest, 0.0)
+        start = self.altitude_ft + np.clip(self.cruise_altitude_ft - self.altitude_ft, -rate * wait, rate * wait)
+        flight = np.maximum(earliest - self.ready_s, 0.0)
+        return start + np.clip(self.drop_altitude_ft - start, -rate * flight, rate * flight)
+
+    def fall_s(self, earliest: np.ndarray, drop_s: np.ndarray) -> np.ndarray:
+        """Fall time (s) of an observer released at drop_s (see release_altitude_ft) to the sea
+        surface (0 without a fall). Starting at the airspeed relative to the air (exact in a uniform
+        wind; the wind's change with altitude changes the fall time little)."""
+        if self.fall_terminal_mps is None:
+            return np.zeros(len(earliest))
+        airspeed = max(self.speed_kt, 1.0) * KNOT_TO_MPS
+        return np.array([windlib.fall(float(a), airspeed, 0.0, None, self.fall_terminal_mps).time_s
+                         for a in self.release_altitude_ft(earliest, drop_s)])
     # in a wind, how the layer routes its drops (layer.route_frame): the release point's offset
     # from the drop point over headings round the compass (empty: the drop point), the wind at
     # its altitude and the drift of a drop point in the air mass (east, north m/s)
@@ -402,12 +435,14 @@ def drop_times(
     lead_s: float,
     position_sigma_m: float,
     speed: float,
+    fall_s=None,  # (earliest, drop_s) -> fall time s (LayerAvailability.fall_s; None: no fall)
 ) -> np.ndarray:
-    """Optimal drop time of each chosen observer (s from now): as late as possible without
-    losing information -- just before the target (earliest over the hypotheses, less a
-    position-uncertainty margin) comes within the detection range -- but not before the layer
-    can be there. A later drop keeps the observer's 3 h observing time and its slot for when
-    they are useful and lets the plan use the latest estimate."""
+    """Optimal drop (release) time of each chosen observer (s from now): as late as possible
+    without losing information -- the observer in the water just before the target (earliest
+    over the hypotheses, less a position-uncertainty margin) comes within the detection range,
+    so released its fall time before that -- but not before the layer can be there. A later
+    drop keeps the observer's 3 h observing time and its slot for when they are useful and lets
+    the plan use the latest estimate."""
     enter = np.full(len(chosen_points), np.inf)
     for pos in trajectories:
         r = np.linalg.norm(pos[None, :, :] - chosen_points[:, None, :], axis=2)  # (K,T)
@@ -415,7 +450,14 @@ def drop_times(
         first = np.where(inside.any(axis=1), inside.argmax(axis=1) * FINE_S, np.inf)
         enter = np.minimum(enter, first)
     margin = lead_s + 2.0 * position_sigma_m / max(speed, 0.1)
-    return np.maximum(earliest, np.where(np.isfinite(enter), enter - margin, earliest))
+    splash = np.where(np.isfinite(enter), enter - margin, earliest)  # in the water by then
+    times = np.maximum(earliest, splash)
+    if fall_s is not None:
+        # the fall time depends on the release altitude, which depends on the drop time (how long
+        # the layer waits at the cruise altitude): a few fixed-point steps
+        for _ in range(3):
+            times = np.maximum(earliest, splash - fall_s(earliest, times))
+    return times
 
 
 def _prior(estimate: TrackEstimate) -> np.ndarray:
@@ -652,6 +694,7 @@ def plan_optimal_deployment(
         times = drop_times(
             grid[chosen], earliest[chosen], [h.pos for h in hyps], r_max, float(config.drop_lead_s),
             estimate.uncertainty.horizontal_major_yd * YD_TO_M, speed,
+            layer.fall_s if layer is not None else None,
         )
     else:
         times = earliest[chosen]
@@ -731,6 +774,11 @@ def availability_from_feed(feed) -> LayerAvailability | None:
         now_heading_deg=feed.layer_heading_deg,
         queue=[(p, None if t is None else float(t - feed.tick))
                for p, t in zip(feed.layer_queue, feed.layer_queue_ticks, strict=True)],
+        fall_terminal_mps=feed.layer_fall_terminal_mps,
+        altitude_ft=feed.layer_ready_altitude_ft,
+        cruise_altitude_ft=feed.layer_cruise_altitude_ft,
+        drop_altitude_ft=feed.layer_drop_altitude_ft,
+        climb_rate_fpm=feed.layer_climb_rate_fpm,
         release_east_m=list(feed.layer_release_east_m), release_north_m=list(feed.layer_release_north_m),
         wind_mps=tuple(feed.layer_wind_mps), drift_mps=tuple(feed.layer_drift_mps),
     )

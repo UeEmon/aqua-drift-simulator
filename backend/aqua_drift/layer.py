@@ -629,6 +629,14 @@ def _route(state: LayerState, config: LayerConfig, points: list[Position],
                           keep=keep, drift=drift, wind=wind)
 
 
+def ready_altitude_ft(state: LayerState | None, config: LayerConfig, queued: bool) -> float:
+    """The layer's altitude when it is free for a new drop: at the drop altitude after its open
+    drops, else where it is now (the cruise altitude before it has a state)."""
+    if queued:
+        return config.drop_altitude_ft
+    return state.altitude_ft if state is not None else config.cruise_altitude_ft
+
+
 def ready_pose(state: LayerState | None, config: LayerConfig, tasks: list, tick: int,
                default: Position) -> tuple[int, Position, float | None]:
     """When, where and on which heading (deg, None: unknown) the layer is free for a new drop:
