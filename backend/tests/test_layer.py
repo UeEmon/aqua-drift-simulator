@@ -401,34 +401,33 @@ def test_planner_schedules_drops_before_detection_and_after_the_layer_can_be_the
     assert min(early) <= min(planned)
 
 
-def test_left_turn_is_the_standard_and_right_only_when_clearly_shorter() -> None:
+def test_turn_takes_the_shorter_side_either_way() -> None:
     from aqua_drift.layer import dubins_turn
 
     r = 4000.0
-    # point dead astern: both sides equal -> left (standard)
-    assert dubins_turn(0.0, -20000.0, 0.0, r)[0] == -1
-    # point slightly to the right: right is shorter, but by less than the margin -> still left
-    side_small, _, _ = dubins_turn(300.0, -20000.0, 0.0, r, margin_m=10 * 200 * 0.5144)
-    assert side_small == -1
-    # point well to the right and ahead: right turn is far shorter -> right
-    assert dubins_turn(9000.0, 3000.0, 0.0, r, margin_m=10 * 200 * 0.5144)[0] == 1
-    # a right-turn standard mirrors it
-    assert dubins_turn(0.0, -20000.0, 0.0, r, prefer=1)[0] == 1
-    assert dubins_turn(-9000.0, 3000.0, 0.0, r, prefer=1, margin_m=1000.0)[0] == -1
+    # point slightly to the right (behind): right is shorter, however little -> right
+    assert dubins_turn(300.0, -20000.0, 0.0, r)[0] == 1
+    # point slightly to the left -> left; well to the right and ahead -> right
+    assert dubins_turn(-300.0, -20000.0, 0.0, r)[0] == -1
+    assert dubins_turn(9000.0, 3000.0, 0.0, r)[0] == 1
+    # the layer's route config has no standard turn side any more
+    assert not hasattr(LayerConfig(), "preferred_turn") and not hasattr(LayerConfig(), "turn_margin_s")
 
 
-def test_orbit_is_flown_counter_clockwise_with_left_bank_by_default() -> None:
+def test_orbit_is_flown_in_the_direction_turned_onto_within_the_bank_limit() -> None:
     rng = random.Random(8)
-    for turn, sign in (("left", -1), ("right", 1)):
-        config = LayerConfig(preferred_turn=turn)
-        state = initial_state(config, DATUM, 0, rng)
+    config = LayerConfig()
+    start = initial_state(config, DATUM, 0, rng)
+    # tangent heading west north of the centre: counter-clockwise (left); heading east: clockwise (right)
+    for heading, sign in ((270.0, -1), (90.0, 1)):
+        state = start.model_copy(update={"heading_deg": heading, "orbit_sense": 0, "mode": "TRANSIT"})
         banks = []
         for _ in range(900):
             state, _ = step(state, config, None, None, DATUM, rng)
             banks.append(state.bank_deg)
-        settled = banks[-300:]
-        assert all(sign * b > 0 for b in settled), turn  # steady turn in the preferred sense
-        assert max(abs(b) for b in banks) <= 15.0 + 1e-6
+        assert state.orbit_sense == sign
+        assert all(sign * b > 0 for b in banks[-300:]), heading  # steady turn in that sense
+        assert max(abs(b) for b in banks) <= config.max_bank_deg + 1e-6
 
 
 @pytest.mark.asyncio

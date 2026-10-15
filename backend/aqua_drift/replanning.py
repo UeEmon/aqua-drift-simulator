@@ -57,6 +57,7 @@ from aqua_drift.optimal_deployment import (
     LayerAvailability,
     SensorModel,
     hypotheses,
+    layer_frame,
     plan_optimal_deployment,
 )
 from aqua_drift.physics import local_offset_m
@@ -163,6 +164,7 @@ def layer_availability(replan: ReplanFeed, kept: list[DropTask], tick: int) -> L
         altitude_ft=layerlib.ready_altitude_ft(state, replan.layer, bool(queue)),
         cruise_altitude_ft=replan.layer.cruise_altitude_ft, drop_altitude_ft=replan.layer.drop_altitude_ft,
         climb_rate_fpm=replan.layer.climb_rate_fpm,
+        **layer_frame(state),
     )
 
 

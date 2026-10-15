@@ -396,6 +396,13 @@ class LayerAvailability:
         airspeed = max(self.speed_kt, 1.0) * KNOT_TO_MPS
         return np.array([windlib.fall(float(a), airspeed, 0.0, None, self.fall_terminal_mps).time_s
                          for a in self.release_altitude_ft(earliest, drop_s)])
+    # in a wind, how the layer routes its drops (layer.route_frame): the release point's offset
+    # from the drop point over headings round the compass (empty: the drop point), the wind at
+    # its altitude and the drift of a drop point in the air mass (east, north m/s)
+    release_east_m: list[float] = field(default_factory=list)
+    release_north_m: list[float] = field(default_factory=list)
+    wind_mps: tuple[float, float] = (0.0, 0.0)
+    drift_mps: tuple[float, float] = (0.0, 0.0)
 
     def turn_radius_m(self) -> float:
         v = self.speed_kt * KNOT_TO_MPS
@@ -719,6 +726,8 @@ def plan_optimal_deployment(
             None if heading is None else math.radians(heading), layer.speed_kt,
             layer.max_bank_deg, group_times, start_s=0.0 if queued else layer.ready_s, prefix=prefix,
             orders=line_orders, before_s=layer.straight_before_s, after_s=layer.straight_after_s,
+            release=routelib.release_table(layer.release_east_m, layer.release_north_m) if layer.release_east_m else None,
+            drift=layer.drift_mps, wind=layer.wind_mps,
         )
     else:
         group_times = [group_times[g] for g in order]
@@ -739,6 +748,14 @@ def plan_optimal_deployment(
         f"drop in {[round(t) for t in report.drop_times_s]} s"
     )
     return positions, reason, report
+
+
+def layer_frame(state) -> dict:
+    """LayerAvailability's release / wind fields from a LayerState (None: none)."""
+    if state is None:
+        return {}
+    return {"release_east_m": list(state.release_east_m), "release_north_m": list(state.release_north_m),
+            "wind_mps": tuple(state.route_wind_mps), "drift_mps": tuple(state.route_drift_mps)}
 
 
 def availability_from_feed(feed) -> LayerAvailability | None:
@@ -762,6 +779,8 @@ def availability_from_feed(feed) -> LayerAvailability | None:
         cruise_altitude_ft=feed.layer_cruise_altitude_ft,
         drop_altitude_ft=feed.layer_drop_altitude_ft,
         climb_rate_fpm=feed.layer_climb_rate_fpm,
+        release_east_m=list(feed.layer_release_east_m), release_north_m=list(feed.layer_release_north_m),
+        wind_mps=tuple(feed.layer_wind_mps), drift_mps=tuple(feed.layer_drift_mps),
     )
 
 

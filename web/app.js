@@ -1090,7 +1090,7 @@ function updateLayer(deployment) {
     ["飛行高度の風", layer.wind_speed_kt != null ? `${fmt(layer.wind_direction_deg, 0)}°・${fmt(layer.wind_speed_kt, 1)} kt` : "--"],
     ["投下修正の風", correctionWind(layer, (status.wind_estimates || []).slice(-1)[0], lay.wind_correction !== false).text],
     ["バンク", `${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）`],
-    ["基準旋回", `${lay.preferred_turn === "right" ? "右" : "左"}旋回（反対旋回は ${fmt(lay.turn_margin_s ?? 10, 0)} 秒以上早い場合）`],
+    ["旋回方向", `左右とも（経路の短い側、最大バンク ${fmt(lay.max_bank_deg ?? 15, 0)}°）${layer.orbit_sense ? `・待機旋回は${layer.orbit_sense < 0 ? "反時計回り" : "時計回り"}` : ""}`],
     ["実施中", layer.task_id != null ? `#${layer.task_id}・到着 ${layer.eta_s != null ? `${clockAt((layer.tick || 0) + layer.eta_s)}（あと ${fmt(layer.eta_s, 0)} s）` : "--"}` : "なし"],
     ["次の設標", next ? `#${next.task_id}・${next.planned_tick != null ? `計画 ${clockAt(next.planned_tick)}（あと ${Math.max(0, next.planned_tick - (layer.tick || 0))} s）` : "すぐ"}` : "なし"],
     ["設標", paused ? "一時停止中" : "実施"],
@@ -1268,12 +1268,6 @@ $("layer-paused").addEventListener("change", () => {
     .then(() => setMessage(paused ? "設標を一時停止しました（目標推定位置の周囲で旋回待機）。" : "設標を再開しました。"))
     .catch((error) => setMessage(`設定エラー: ${error.message}`));
 });
-$("layer-turn").addEventListener("change", () => {
-  const turn = $("layer-turn").value;
-  putConfig((next) => { next.layer.preferred_turn = turn; })
-    .then(() => setMessage(`設標者の基準旋回を${turn === "right" ? "右" : "左"}旋回にしました。`))
-    .catch((error) => setMessage(`設定エラー: ${error.message}`));
-});
 $("layer-form").addEventListener("submit", (event) => {
   event.preventDefault();
   putConfig((next) => {
@@ -1282,7 +1276,6 @@ $("layer-form").addEventListener("submit", (event) => {
     next.layer.straight_after_s = num("layer-straight-after");
     next.layer.max_bank_deg = num("layer-bank");
     next.layer.orbit_radius_yd = num("layer-orbit");
-    next.layer.turn_margin_s = num("layer-turn-margin");
     next.layer.proposal_timeout_s = num("layer-timeout");
     next.layer.cruise_altitude_ft = num("layer-cruise-alt");
     next.layer.drop_altitude_ft = num("layer-drop-alt");
@@ -2700,10 +2693,9 @@ function populateForms(config) {
   if (lay) {
     $("layer-enabled").checked = lay.enabled;
     $("layer-paused").checked = Boolean(lay.paused);
-    $("layer-turn").value = lay.preferred_turn || "left";
     const layValues = { "layer-speed": lay.speed_kt, "layer-bank": lay.max_bank_deg,
       "layer-straight-before": lay.straight_before_s ?? 0, "layer-straight-after": lay.straight_after_s ?? 0,
-      "layer-orbit": lay.orbit_radius_yd, "layer-turn-margin": lay.turn_margin_s ?? 10, "layer-timeout": lay.proposal_timeout_s,
+      "layer-orbit": lay.orbit_radius_yd, "layer-timeout": lay.proposal_timeout_s,
       "layer-cruise-alt": lay.cruise_altitude_ft ?? 3000, "layer-drop-alt": lay.drop_altitude_ft ?? 1000, "layer-climb": lay.climb_rate_fpm ?? 2000,
       "layer-max-release": lay.max_per_release ?? 4 };
     for (const [id, value] of Object.entries(layValues)) $(id).value = value;

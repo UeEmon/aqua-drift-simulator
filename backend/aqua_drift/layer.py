@@ -11,11 +11,12 @@
   comes back). The observer is laid when the layer is within capture_radius_yd of the point,
   together with the other open drops at that point (within capture_radius_yd of it), up to
   max_per_release observers in one release, so the layer does not pass over the point again.
-* Turns: left turn is the standard (circling counter-clockwise); a right turn is taken only when
-  the route is clearly more efficient that way (shorter by more than turn_margin_s of flight).
+* Turns: left or right, whichever makes the path shorter (no standard side), always within
+  max_bank_deg.
 * ORBIT: without a task it circles the estimated target position (vector-field
   guidance onto a circle whose radius is at least 1.2 x the turn radius, so the bank limit
-  holds on the circle).
+  holds on the circle), in the direction it turns onto with the least turn when it enters
+  the orbit (kept until it leaves).
 * Scheduling: a drop's planned time is the time the layer drops it flying the shortest path. The
   layer keeps circling the estimated target until the shortest flight (along the same path the
   guidance flies) takes up the time left, then leaves and flies that path at the speed it has;
@@ -35,6 +36,7 @@ from __future__ import annotations
 
 import math
 import random
+from functools import partial
 
 import numpy as np
 
@@ -66,10 +68,10 @@ def initial_state(config: LayerConfig, datum: Position, tick: int, rng: random.R
     speed = config.speed_kt
     radius = orbit_radius_m(config, speed)
     start = _offset(datum, 0.0, radius, 0.0)  # north of the datum, tangent to the orbit
-    heading = 270.0 if preferred_side(config) < 0 else 90.0  # left turn: counter-clockwise
     return LayerState(
-        tick=tick, position=start, heading_deg=heading, speed_kt=speed, mode="ORBIT",
-        orbit_center=datum, orbit_radius_yd=radius / YD_TO_M, altitude_ft=config.cruise_altitude_ft,
+        tick=tick, position=start, heading_deg=270.0, speed_kt=speed, mode="ORBIT",
+        orbit_center=datum, orbit_radius_yd=radius / YD_TO_M, orbit_sense=-1,  # tangent, counter-clockwise
+        altitude_ft=config.cruise_altitude_ft,
     )
 
 
@@ -93,8 +95,8 @@ def dubins_turn(east: float, north: float, heading: float, radius: float,
     """Turn-then-straight path (Dubins CS) to a point at (east, north) metres from the craft
     heading `heading` (rad, clockwise from north) with turn radius `radius`.
 
-    The preferred side (default -1 = left turn) is taken unless the other side is shorter by
-    more than margin_m (the route is clearly more efficient that way).
+    The shorter side is taken (prefer: the side taken when both are as long, or when the other
+    is shorter by no more than margin_m).
     Returns (side: +1 right / -1 left / 0 none possible, turn angle rad, straight length m)."""
     paths: dict[int, tuple[float, float, float]] = {}
     for side in (1, -1):
@@ -121,11 +123,6 @@ def dubins_turn(east: float, north: float, heading: float, radius: float,
     else:
         side = other if other in paths else prefer
     return side, paths[side][1], paths[side][2]
-
-
-def preferred_side(config: LayerConfig) -> int:
-    """-1: left turn (the standard), +1: right turn."""
-    return 1 if config.preferred_turn == "right" else -1
 
 
 def flight_time_s(state: LayerState, config: LayerConfig, point: Position, speed_kt: float,
@@ -175,6 +172,7 @@ def step(
     path_kept = ([], [])  # the rest of the path after this step
     center = datum
     orbit_radius = orbit_radius_m(config, speed)
+    sense = 0
 
     same = state.mode == "TRANSIT" and state.task_id == task_id
     loops = state.loops if same else 0
@@ -206,9 +204,11 @@ def step(
         east, north, _ = local_offset_m(center, position)
         distance = math.hypot(east, north)
         bearing = math.atan2(east, north)
-        # circling in the preferred direction (left turn = counter-clockwise by default)
-        sense = float(preferred_side(config))  # -1 counter-clockwise, +1 clockwise
-        desired = bearing + sense * (math.pi / 2.0 + math.atan(2.0 * (distance - orbit_radius) / orbit_radius))
+        # -1 counter-clockwise, +1 clockwise: kept while orbiting, else the one turned onto with the least turn
+        offset = math.pi / 2.0 + math.atan(2.0 * (distance - orbit_radius) / orbit_radius)
+        sense = state.orbit_sense if state.mode == "ORBIT" and state.orbit_sense else min(
+            (-1, 1), key=lambda s: abs(_wrap(bearing + s * offset - heading)))
+        desired = bearing + sense * offset
         error = _wrap(desired - heading)
         turn = max(-omega_max * dt, min(omega_max * dt, error)) if state.straight_s <= 0.0 else 0.0
 
@@ -239,9 +239,11 @@ def step(
         task_id=task_id if mode == "TRANSIT" else None,
         orbit_center=center if mode != "TRANSIT" else None,
         orbit_radius_yd=orbit_radius / YD_TO_M if mode != "TRANSIT" else 0.0,
+        orbit_sense=int(sense) if mode != "TRANSIT" else 0,
         eta_s=eta,
         altitude_ft=state.altitude_ft,
         approach_deg=state.approach_deg,
+        approach_track_deg=state.approach_track_deg,
         approach_key=state.approach_key,
         path_sides=path_kept[0],
         path_lengths_m=path_kept[1],
@@ -270,7 +272,7 @@ def _guidance(east: float, north: float, heading: float, approach: float | None,
     straight on for hold_s (after a drop) and over the last straight_before_s to the point (relax:
     after the path has grown by a loop once, the loose path without the straight approach)."""
     args = (east, north, heading, approach, radius)
-    options = {"prefer": preferred_side(config), "margin_m": config.turn_margin_s * v, "step_m": v * dt,
+    options = {"step_m": v * dt,
                "segments": True, "relax": relax, **_straight(config, v, hold_s)}
     turn, length, _, step_e, step_n, sides, lengths = routelib.path_to(*args, **options)
     path = ([int(x) for x in sides], [float(x) * radius for x in lengths])
@@ -323,8 +325,7 @@ def _arrival_s(state: LayerState, config: LayerConfig, point: Position, approach
     v = max(state.speed_kt, 1.0) * KNOT_TO_MPS
     east, north, _ = local_offset_m(state.position, point)
     radius = v * v / (G * math.tan(math.radians(config.max_bank_deg)))
-    _, length, _ = routelib.path_to(east, north, math.radians(state.heading_deg), approach, radius,
-                                    preferred_side(config), config.turn_margin_s * v, loose=True,
+    _, length, _ = routelib.path_to(east, north, math.radians(state.heading_deg), approach, radius, loose=True,
                                     **_straight(config, v, state.straight_s))
     if not math.isfinite(float(length)):
         return flight_time_s(state, config, point, state.speed_kt, limit_s=900.0, approach=approach)
@@ -340,49 +341,94 @@ def _dubins_times(east: np.ndarray, north: np.ndarray, heading: np.ndarray, v: f
     if approach is not None:
         east, north, heading, approach = np.broadcast_arrays(east, north, heading, approach)
     approaches = approach
-    _, length, _ = routelib.path_to(east, north, heading, approaches, radius, preferred_side(config),
-                                    config.turn_margin_s * v, loose=True, **_straight(config, v, hold_s))
+    _, length, _ = routelib.path_to(east, north, heading, approaches, radius, loose=True,
+                                    **_straight(config, v, hold_s))
     return np.maximum(length - config.capture_radius_yd * YD_TO_M, 0.0) / v
 
 
-def _leg_times(state: LayerState, config: LayerConfig, point: Position, headings: np.ndarray) -> np.ndarray:
+def _meet(state: LayerState, config: LayerConfig, point: Position, lead) -> Position:
+    """Where a drop point moving in the air mass (lead(point, flight_s=t): where it is in t s) is
+    met when the layer sets out to it: at the arrival along the guidance path (a few
+    fixed-point steps from the straight-line meeting, see route.route; the straight-line time
+    would move the point as the path bends). On the way it is met at the arrival predicted a
+    second ago."""
+    approach = None if state.approach_deg is None else math.radians(state.approach_deg)
+    met = lead(point)
+    # at the point itself (the release, abeam of it), not at the capture radius before it
+    capture_s = config.capture_radius_yd * YD_TO_M / max(state.speed_kt * KNOT_TO_MPS, 1.0)
+    for _ in range(routelib.MEET_STEPS + 1):
+        t = _arrival_s(state, config, met, approach) + capture_s
+        if not math.isfinite(t):
+            break
+        met = lead(point, flight_s=t)
+    return met
+
+
+def _leg_times(state: LayerState, config: LayerConfig, point: Position, headings: np.ndarray,
+               release=None) -> np.ndarray:
     """Flight time (s) to the point per approach heading (compass rad) along the guidance path
-    at the current speed."""
+    at the current speed (release: to its release point on each heading, see route.route)."""
     v = max(state.speed_kt, 1.0) * KNOT_TO_MPS
     east, north, _ = local_offset_m(state.position, point)
     headings = np.asarray(headings, dtype=float)
-    return _dubins_times(np.full(len(headings), east), np.full(len(headings), north),
+    de, dn = release(headings) if release is not None else (0.0, 0.0)
+    return _dubins_times(np.full(len(headings), east) + de, np.full(len(headings), north) + dn,
                          np.full(len(headings), math.radians(state.heading_deg)), v, config, headings,
                          state.straight_s)
 
 
 def departure(state: LayerState, config: LayerConfig, point: Position, left: float,
-              datum: Position, approach: float | None = None) -> str:
+              datum: Position, approach: float | None = None,
+              datum_drift_mps: tuple[float, float] = (0.0, 0.0)) -> str:
     """'leave' or 'wait' on the orbit at the current speed. For each departure time over the
     next round of the orbit (1 s steps, at most LOOKAHEAD_S s) the shortest flight to the
     point (the guidance path) gives an arrival; the layer leaves now when now is the departure
     that arrives closest to the planned time, or within DEPART_TIE_S of it (flying towards the
     point on the orbit only puts off a departure that is late anyway). Once on its way the
-    layer flies that path: the planned time is not kept by changing it."""
+    layer flies that path: the planned time is not kept by changing it. datum_drift_mps: how the
+    orbit centre moves in the frame of the positions (in the air mass a ground point moves
+    with the wind's opposite), so the orbit ahead is flown round where the centre will be."""
     now = _arrival_s(state, config, point, approach)
+    best = _departure_errors(state, config, point, left, datum, np.array([np.nan if approach is None else approach]),
+                             datum_drift_mps)
+    if best is None:
+        return "wait"
+    return "leave" if abs(now - left) <= float(best[0][0]) + DEPART_TIE_S else "wait"
+
+
+def _departure_errors(state: LayerState, config: LayerConfig, point: Position, left: float, datum: Position,
+                      approaches: np.ndarray, datum_drift_mps: tuple[float, float] = (0.0, 0.0),
+                      release=None) -> tuple[np.ndarray, np.ndarray] | None:
+    """Per approach heading (compass rad, nan: any): how close to the planned time (|s|) the
+    best departure over the next round of the orbit arrives, and when that departure is (s from
+    now) (see departure; release: to the release point on each heading). None: the planned time is more than a round of the orbit
+    beyond the longest flight (no departure to look at yet)."""
     v = max(state.speed_kt, 1.0) * KNOT_TO_MPS
     radius = orbit_radius_m(config, state.speed_kt)
     window = min(math.ceil(2.0 * math.pi * radius / v), LOOKAHEAD_S)
     east, north, _ = local_offset_m(datum, point)
     longest = (math.hypot(east, north) + 2.0 * radius) / v + loop_s(state.speed_kt, config) + 60.0
     if left - window > longest:
-        return "wait"
+        return None
     probe = state
     rng = random.Random(0)
     poses = []
-    for _ in range(window):
-        probe, _ = step(probe, config, None, None, datum, rng, wanted_speed_kt=state.speed_kt)
+    for k in range(window):
+        centre = _shift(datum, datum_drift_mps[0] * (k + 1), datum_drift_mps[1] * (k + 1))
+        probe, _ = step(probe, config, None, None, centre, rng, wanted_speed_kt=state.speed_kt)
         e, n, _ = local_offset_m(probe.position, point)
         poses.append((e, n, math.radians(probe.heading_deg), probe.straight_s))
-    e, n, h, hold = (np.array(x) for x in zip(*poses, strict=True))
-    error = np.arange(1, window + 1) + _dubins_times(e, n, h, v, config, approach, hold) - left
+    e, n, h, hold = (np.array(x)[:, None] for x in zip(*poses, strict=True))
+    approaches = np.asarray(approaches, dtype=float)[None, :]
+    de, dn = release(approaches) if release is not None else (0.0, 0.0)
+    free = np.isnan(approaches)
+    times = _dubins_times(e + de, n + dn, h, v, config, approaches, hold)
+    if free.any():  # any heading: the guidance' turn-then-straight path
+        times = np.where(free, _dubins_times(e, n, h, v, config, None, hold), times)
+    error = np.arange(1, window + 1)[:, None] + times - left
     error = np.where(np.isfinite(error), np.abs(error), np.inf)
-    return "leave" if abs(now - left) <= float(np.min(error)) + DEPART_TIE_S else "wait"
+    best = np.argmin(error, axis=0)
+    return error[best, np.arange(error.shape[1])], best + 1.0
 
 
 PATH_STEP_S = 5.0  # sampling of the planned flight path (about 500 m at 200 kt)
@@ -487,6 +533,15 @@ def _climb(state: LayerState, config: LayerConfig, wanted_ft: float, dt: float =
     return state if altitude == state.altitude_ft else state.model_copy(update={"altitude_ft": altitude})
 
 
+def _release_altitude(state: LayerState, config: LayerConfig, point: Position) -> float:
+    """The altitude the layer releases at over the point (as release_point predicts it from the
+    straight-line time at its airspeed)."""
+    east, north, _ = local_offset_m(state.position, point)
+    eta = math.hypot(east, north) / max(state.speed_kt * KNOT_TO_MPS, 1.0)
+    change = config.climb_rate_fpm / 60.0 * eta
+    return state.altitude_ft + max(-change, min(change, config.drop_altitude_ft - state.altitude_ft))
+
+
 def release_point(layer_position: Position, altitude_ft: float, speed_kt: float, config: LayerConfig,
                   point: Position, wind_mps: tuple[float, float], estimate_mps: tuple[float, float],
                   current_mps: tuple[float, float], terminal_mps: float,
@@ -519,21 +574,59 @@ def release_point(layer_position: Position, altitude_ft: float, speed_kt: float,
     return release, t
 
 
+RELEASE_HEADINGS = 72  # headings of the release offset table (every 5 degrees, interpolated between)
+
+
+def release_table(altitude_ft: float, speed_kt: float, wind_mps: tuple[float, float],
+                  estimate_mps: tuple[float, float], current_mps: tuple[float, float],
+                  terminal_mps: float) -> tuple[list[float], list[float]]:
+    """The release point of a drop crossed on a heading, from its point (east, north m) as
+    release_point predicts it with approach_deg: a table over RELEASE_HEADINGS headings round
+    the compass, the first repeated at the end (route.release_table)."""
+    airspeed = max(speed_kt, 1.0) * KNOT_TO_MPS
+    east, north = [], []
+    for i in range(RELEASE_HEADINGS):
+        heading = i * 2.0 * math.pi / RELEASE_HEADINGS
+        fall = windlib.release_offset(altitude_ft, airspeed * math.sin(heading) + wind_mps[0],
+                                      airspeed * math.cos(heading) + wind_mps[1], *estimate_mps, terminal_mps)
+        east.append(current_mps[0] * fall.time_s - fall.east_m)
+        north.append(current_mps[1] * fall.time_s - fall.north_m)
+    return [*east, east[0]], [*north, north[0]]
+
+
+def release_offsets(altitude_ft: float, speed_kt: float, wind_mps: tuple[float, float],
+                    estimate_mps: tuple[float, float], current_mps: tuple[float, float],
+                    terminal_mps: float):
+    """release_table per compass rad heading (arrays), interpolated (route.route's release)."""
+    return routelib.release_table(*release_table(altitude_ft, speed_kt, wind_mps, estimate_mps, current_mps,
+                                                 terminal_mps))
+
+
+def route_frame(state: LayerState | None):
+    """How the layer's route to new drops is computed, as of its last advance: (release,
+    drift, wind) for route.route (no wind: none, still points)."""
+    if state is None or not state.release_east_m:
+        return None, (0.0, 0.0), (0.0, 0.0)
+    return (routelib.release_table(state.release_east_m, state.release_north_m),
+            tuple(state.route_drift_mps), tuple(state.route_wind_mps))
+
+
 ROUTE_AHEAD = 8  # drops in the route when choosing the approach heading (the current one and up to 7 after it)
 
 
 def _route(state: LayerState, config: LayerConfig, points: list[Position],
            planned: list[float | None], first_s: np.ndarray | None = None,
-           first_headings: np.ndarray | None = None) -> list[routelib.Leg]:
+           first_headings: np.ndarray | None = None, release=None, keep: float | None = None,
+           drift: tuple[float, float] = (0.0, 0.0), wind: tuple[float, float] = (0.0, 0.0)) -> list[routelib.Leg]:
     """The route from the current state through the points (planned drop times s from now;
-    first_s, first_headings: see route.route)."""
+    first_s, first_headings, release, keep, drift, wind: see route.route)."""
     offsets = [local_offset_m(state.position, p) for p in points]
-    v = max(state.speed_kt, 1.0) * KNOT_TO_MPS
     return routelib.route([o[0] for o in offsets], [o[1] for o in offsets], math.radians(state.heading_deg),
-                          state.speed_kt, config.max_bank_deg, planned, preferred_side(config),
-                          config.turn_margin_s * v, capture_m=config.capture_radius_yd * YD_TO_M, first_s=first_s,
+                          state.speed_kt, config.max_bank_deg, planned,
+                          capture_m=config.capture_radius_yd * YD_TO_M, first_s=first_s,
                           first_headings=first_headings, before_s=config.straight_before_s,
-                          after_s=config.straight_after_s, hold_s=state.straight_s)
+                          after_s=config.straight_after_s, hold_s=state.straight_s, release=release,
+                          keep=keep, drift=drift, wind=wind)
 
 
 def ready_altitude_ft(state: LayerState | None, config: LayerConfig, queued: bool) -> float:
@@ -548,7 +641,8 @@ def ready_pose(state: LayerState | None, config: LayerConfig, tasks: list, tick:
                default: Position) -> tuple[int, Position, float | None]:
     """When, where and on which heading (deg, None: unknown) the layer is free for a new drop:
     after its open tasks (planned time, else the expected one), on the heading it crosses the
-    last of them along its route (see route.route)."""
+    last of them along its route (see route.route; in a wind as the layer flies it, see
+    route_frame: the heading is in the air)."""
     ready, where = tick, state.position if state is not None else default
     heading = state.heading_deg if state is not None else None
     tasks = sorted(tasks, key=lambda t: t.flight_key())
@@ -560,56 +654,88 @@ def ready_pose(state: LayerState | None, config: LayerConfig, tasks: list, tick:
     if last is not None:
         heading = None
         if state is not None:
+            release, moving, wind = route_frame(state)
             legs = _route(state, config, [t.position for t in tasks[:last + 1]],
-                          [None if t.planned_tick is None else float(t.planned_tick - tick) for t in tasks[:last + 1]])
+                          [None if t.planned_tick is None else float(t.planned_tick - tick) for t in tasks[:last + 1]],
+                          release=release, drift=moving, wind=wind)
             heading = math.degrees(legs[-1].heading) % 360.0
     return ready, where, heading
 
 
 def _approach(state: LayerState, config: LayerConfig, tasks: list, points: list[Position], tick: int,
-              committed: bool) -> LayerState:
+              committed: bool, release=None, datum: Position | None = None,
+              wind: tuple[float, float] = (0.0, 0.0), drift: tuple[float, float] = (0.0, 0.0),
+              met: Position | None = None) -> LayerState:
     """The heading to cross the current drop point on, lined up for the following drops (see
     route.route). Chosen again every second until the layer is on its way, then kept while the
     drops stay the same. A new following drop on the way: chosen again among the headings that
-    do not make the current drop later (or further off its planned time) than the heading flown."""
+    do not make the current drop later (or further off its planned time) than the heading flown.
+    release: the points are the drop points and each is flown to its release point on the
+    heading it is crossed on (see route.route). A single drop waiting on the orbit for its
+    planned time (datum: the orbit centre, see departure): the heading with a departure that
+    arrives closest to the planned time (the latest such departure).
+
+    In a wind (the layer's frame is the air mass) the points are where they are now and move at
+    drift; the approaches compared are tracks over the ground flown on the heading that makes
+    them good (see route.route); met: where the current drop is met (the guidance' lead), for
+    the flight along the guidance path."""
     key = ">".join(str(t.task_id) for t in tasks)
     if len(tasks) == 1 and config.straight_before_s <= 0.0:  # any heading (with a straight approach: chosen)
         if state.approach_deg is None and state.approach_key == key:
             return state
-        return state.model_copy(update={"approach_deg": None, "approach_key": key, "path_sides": [],
-                                        "path_lengths_m": []})
+        return state.model_copy(update={"approach_deg": None, "approach_track_deg": None, "approach_key": key,
+                                        "path_sides": [], "path_lengths_m": []})
     if committed and state.approach_key == key:
         return state
     planned = [None if t.planned_tick is None else float(t.planned_tick - tick) for t in tasks]
     offsets = [local_offset_m(state.position, p) for p in points]
-    headings = routelib.approach_headings([o[0] for o in offsets], [o[1] for o in offsets], 0)
+    met = points[0] if met is None else met
+    tracks = routelib.approach_headings([o[0] for o in offsets], [o[1] for o in offsets], 0)
+    headings = routelib.crab(tracks, max(state.speed_kt, 1.0) * KNOT_TO_MPS, wind)
+    lead_e, lead_n, _ = local_offset_m(state.position, met)
     # the heading flown stays a candidate (the last one): the approach, or on the way to a point
     # on any heading (it was the last drop) the heading that path arrives on
     flown = None if state.approach_deg is None else math.radians(state.approach_deg)
     if flown is None and committed:
-        v = max(state.speed_kt, 1.0) * KNOT_TO_MPS
-        _, _, final = routelib.path_to(offsets[0][0], offsets[0][1], math.radians(state.heading_deg), None,
-                                       turn_radius_m(state.speed_kt, config.max_bank_deg), preferred_side(config),
-                                       config.turn_margin_s * v)
+        de, dn = release(math.radians(state.heading_deg)) if release is not None else (0.0, 0.0)
+        _, _, final = routelib.path_to(lead_e + de, lead_n + dn, math.radians(state.heading_deg), None,
+                                       turn_radius_m(state.speed_kt, config.max_bank_deg))
         flown = float(final) if math.isfinite(float(final)) else None
     if flown is not None:
         headings = np.append(headings, flown)
+        tracks = np.append(tracks, math.nan if state.approach_track_deg is None or state.approach_deg is None
+                           else math.radians(state.approach_track_deg))
     # on the way the drop is not delayed: the path flown arrives in eta_s, and a new approach
     # heading may not make it later
     first = None
     if committed and state.eta_s is not None and math.isfinite(state.eta_s):
-        first = _leg_times(state, config, points[0], headings)
+        first = _leg_times(state, config, met, headings, release)
         kept = np.where(first > state.eta_s + APPROACH_TOLERANCE_S, np.inf, first)
         if flown is not None:  # the heading flown: as the guidance flies it
             kept[-1] = state.eta_s
         if np.isfinite(kept).any():
             first = kept
-    legs = _route(state, config, points, planned, first, headings)
-    approach = math.degrees(legs[0].approach) % 360.0
+    # as costly (waiting for a planned time): the approach chosen before for these drops stays
+    keep = flown if flown is not None and state.approach_key == key else None
+    legs = _route(state, config, points, planned, first, headings, release, keep, drift, wind)
+    best = int(np.argmin(np.abs(np.mod(headings - legs[0].approach + math.pi, 2.0 * math.pi) - math.pi)))
+    if (len(tasks) == 1 and planned[0] is not None and not committed and datum is not None
+            and legs[0].drop_s > legs[0].arrive_s):
+        # waiting: every heading is in time; take one that can leave the orbit on time
+        found = _departure_errors(state, config, met, planned[0], datum, headings, (-wind[0], -wind[1]), release)
+        if found is not None and np.isfinite(found[0]).any():
+            error, leave = found
+            # about as close: the latest departure (the shortest flight; chosen again every
+            # second, it moves on to a shorter flight once that can be on time)
+            close = error <= np.min(error) + DEPART_TIE_S
+            best = int(np.argmax(np.where(close, leave, -np.inf)))
+    approach = math.degrees(float(headings[best])) % 360.0
+    # the track it makes good (kept: the heading follows the wind, see advance)
+    track = math.degrees(float(tracks[best])) % 360.0 if math.isfinite(float(tracks[best])) else None
     if approach == state.approach_deg:
-        return state.model_copy(update={"approach_key": key})
-    return state.model_copy(update={"approach_deg": approach, "approach_key": key, "path_sides": [],
-                                    "path_lengths_m": []})
+        return state.model_copy(update={"approach_key": key, "approach_track_deg": track})
+    return state.model_copy(update={"approach_deg": approach, "approach_track_deg": track, "approach_key": key,
+                                    "path_sides": [], "path_lengths_m": []})
 
 
 # where the wind of the release correction comes from (LayerState.correction_source)
@@ -682,29 +808,43 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
         datum = air(feed.datum)
         if task is not None:
             aim = positions[task.task_id]
-            if profile is not None:
-                aim, _ = release_point(over_ground(state.position), state.altitude_ft, state.speed_kt, config,
-                                       aim, wind, estimate, current, profile.terminal_mps,
-                                       state.approach_deg if state.task_id == task.task_id else None)
-            point = air(aim)
-            if profile is not None:  # in the air mass a ground point moves with current - wind
-                # on the way: met at the arrival along the path flown (the straight-line time
-                # would move the point as the path bends, and the path would never close on it)
-                on_way = (state.task_id == task.task_id and state.mode == "TRANSIT" and state.eta_s is not None
-                          and math.isfinite(state.eta_s))
-                point = _lead(state.position, point, current[0] - wind[0], current[1] - wind[1],
-                              max(state.speed_kt, 1.0) * KNOT_TO_MPS, max(state.eta_s - 1.0, 0.0) if on_way else None)
+            on_way = (state.task_id == task.task_id and state.mode == "TRANSIT" and state.eta_s is not None
+                      and math.isfinite(state.eta_s))
+            # in the air mass a ground point moves with current - wind; waiting for a planned time:
+            # met at that time, else at the arrival along the guidance path (see the meeting below)
+            left = task.planned_tick - tick if task.planned_tick is not None else 0
+            flight_s = max(state.eta_s - 1.0, 0.0) if on_way else (float(left) if left > 0 else None)
+            lead = partial(_lead, state.position, drift_e=current[0] - wind[0], drift_n=current[1] - wind[1],
+                           v=max(state.speed_kt, 1.0) * KNOT_TO_MPS, flight_s=flight_s)
+            release = None
+            if profile is not None:  # the headings are chosen with the release points they make
+                release = release_offsets(_release_altitude(state, config, aim), state.speed_kt, wind, estimate,
+                                          current, profile.terminal_mps)
             timed = task.planned_tick is not None
-            left = task.planned_tick - tick if timed else 0
             committed = state.task_id == task.task_id and state.mode == "TRANSIT"
             ahead = open_tasks[1:ROUTE_AHEAD]
-            state = _approach(state, config, [task, *ahead], [point, *(air(positions[t.task_id]) for t in ahead)],
-                              tick, committed)
+            met = lead(air(aim)) if profile is not None else air(aim)
+            moving = (current[0] - wind[0], current[1] - wind[1]) if profile is not None else (0.0, 0.0)
+            state = _approach(state, config, [task, *ahead], [air(aim), *(air(positions[t.task_id]) for t in ahead)],
+                              tick, committed, release, datum, wind, moving, met)
+            if profile is not None and state.approach_track_deg is not None and state.approach_deg is not None:
+                # the track chosen, made good in the wind at the altitude flown now (it changes on
+                # the climb or descent to the drop altitude)
+                crabbed = float(routelib.crab(np.array([math.radians(state.approach_track_deg)]),
+                                              max(state.speed_kt, 1.0) * KNOT_TO_MPS, wind)[0])
+                state = state.model_copy(update={"approach_deg": math.degrees(crabbed) % 360.0})
+            if profile is not None:  # the release point on the approach heading just chosen
+                aim, _ = release_point(over_ground(state.position), state.altitude_ft, state.speed_kt, config,
+                                       aim, wind, estimate, current, profile.terminal_mps, state.approach_deg)
+            point = lead(air(aim)) if profile is not None else air(aim)
+            if profile is not None and flight_s is None and (current[0] != wind[0] or current[1] != wind[1]):
+                point = _meet(state, config, air(aim), lead)
             approach = None if state.approach_deg is None else math.radians(state.approach_deg)
             decision = "leave"
             if timed and not committed:
                 near = eta_to(state, config, point) <= left + 600
-                decision = departure(state, config, point, left, datum, approach) if near else "wait"
+                decision = (departure(state, config, point, left, datum, approach, (-wind[0], -wind[1]))
+                            if near else "wait")
             if decision == "leave":
                 target, task_id = point, task.task_id
         to_drop = target is not None
@@ -746,7 +886,14 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
         heading = math.radians(state.heading_deg)
         ge, gn = v * math.sin(heading) + wind[0], v * math.cos(heading) + wind[1]
         direction, speed = windlib.wind_from(*wind)
+        # the release points and the wind of the route to new drops (route_frame), at the drop altitude
+        east, north = release_table(config.drop_altitude_ft, state.speed_kt, wind, estimate, current,
+                                    profile.terminal_mps)
         state = state.model_copy(update={
+            "release_east_m": east,
+            "release_north_m": north,
+            "route_wind_mps": wind,
+            "route_drift_mps": (current[0] - wind[0], current[1] - wind[1]),
             "ground_speed_kt": math.hypot(ge, gn) / KNOT_TO_MPS,
             "track_deg": math.degrees(math.atan2(ge, gn)) % 360.0,
             "wind_direction_deg": direction,
@@ -772,8 +919,15 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
     # layer can wait for it on its orbit, else the arrival
     eta: dict[int, float] = {}
     remaining = [t for t in tasks if t.task_id not in completed]
+    release = None
+    if profile is not None and remaining:
+        release = release_offsets(_release_altitude(state, config, positions[remaining[0].task_id]), state.speed_kt,
+                                  wind, estimate, current, profile.terminal_mps)
+    # the points in the air mass now (the state is back over the ground: the same offsets)
     legs = _route(state, config, [positions[t.task_id] for t in remaining],
-                  [None if t.planned_tick is None else float(t.planned_tick - feed.tick) for t in remaining])
+                  [None if t.planned_tick is None else float(t.planned_tick - feed.tick) for t in remaining],
+                  release=release, drift=(current[0] - wind[0], current[1] - wind[1]) if profile is not None else (0.0, 0.0),
+                  wind=wind if profile is not None else (0.0, 0.0))
     shift = 0.0
     for task, leg in zip(remaining, legs, strict=True):
         drop = leg.drop_s + shift

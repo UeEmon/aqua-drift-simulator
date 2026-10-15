@@ -221,8 +221,6 @@ class LayerConfig(BaseModel):
     # them there, so the layer does not come back to the same point)
     max_per_release: int = Field(default=4, ge=1, le=8)
     proposal_timeout_s: int = Field(default=600, ge=10, le=7200)  # unanswered proposals expire
-    preferred_turn: str = Field(default="left", pattern="^(left|right)$")  # standard turn direction
-    turn_margin_s: float = Field(default=10.0, ge=0, le=600)  # other side only if this much quicker
     # wings level at a drop: straight on the approach heading for this long before the drop point
     # and after it (aqua_drift.route.path_to); two drops on one line are one straight flight
     straight_before_s: float = Field(default=2.0, ge=0, le=120)
@@ -652,6 +650,11 @@ class DeploymentFeed(BaseModel):
     layer_cruise_altitude_ft: float = 3000.0
     layer_drop_altitude_ft: float = 1000.0
     layer_climb_rate_fpm: float = 2000.0
+    # the observer's fall and the wind as the layer routes new drops (LayerState.release_east_m ...)
+    layer_release_east_m: list[float] = Field(default_factory=list)
+    layer_release_north_m: list[float] = Field(default_factory=list)
+    layer_wind_mps: tuple[float, float] = (0.0, 0.0)
+    layer_drift_mps: tuple[float, float] = (0.0, 0.0)
     source_frequency_hz: float = 400.0  # operator's (recognized) source frequency
     sound_speed_mps: float = 1500.0
     frequency_sigma_hz: float = 0.03
@@ -735,11 +738,17 @@ class LayerState(BaseModel):
     task_id: int | None = None
     orbit_center: Position | None = None
     orbit_radius_yd: float = 0.0
+    # direction of the orbit: -1 counter-clockwise (left turn), +1 clockwise (right turn), 0 not
+    # orbiting (chosen on entering the orbit: the one the layer turns onto with the least turn)
+    orbit_sense: int = 0
     eta_s: float | None = None
     # heading the layer crosses its current drop point on (lined up for the next drop point;
     # None: any heading) and the drops it was chosen for ("task>next")
     approach_deg: float | None = None
     approach_key: str = ""
+    # in a wind: the track over the ground that approach is chosen to make good (the approach
+    # follows the wind at the altitude flown; None: no wind, or a heading chosen as flown)
+    approach_track_deg: float | None = None
     # the Dubins path being flown to the current drop point (turn sides +1 right / -1 left / 0
     # straight and the remaining lengths in metres): followed as it is when a fresh plan comes out
     # longer (small errors at the joins of the path can make the exact plan jump to a detour)
@@ -763,6 +772,14 @@ class LayerState(BaseModel):
     correction_source: str = "none"
     correction_wind_direction_deg: float | None = None  # from
     correction_wind_speed_kt: float | None = None
+    # how the route to new drops is computed (layer.route_frame), as of the last update: the
+    # release point's offset from the drop point (east, north m) over headings round the compass
+    # (empty: no wind, the drop point itself), the wind at the flight altitude and the drift of a
+    # drop point in the air mass (current - wind), east, north m/s
+    release_east_m: list[float] = Field(default_factory=list)
+    release_north_m: list[float] = Field(default_factory=list)
+    route_wind_mps: tuple[float, float] = (0.0, 0.0)
+    route_drift_mps: tuple[float, float] = (0.0, 0.0)
 
 
 class DropRelease(BaseModel):
