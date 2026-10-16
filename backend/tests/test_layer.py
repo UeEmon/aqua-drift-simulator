@@ -535,3 +535,17 @@ async def test_layer_reaches_a_drop_point_drifting_in_the_wind() -> None:
         if manual[0].status == "DONE":
             break
     assert manual[0].status == "DONE"
+
+
+def test_arrival_after_a_drop_flies_straight_on_to_the_next_point_on_the_line() -> None:
+    # just after a drop (wings level for straight_after_s) the next release point lies a few
+    # hundred metres ahead, a few tens of metres off the track: the guidance flies straight on to
+    # it (within half the capture radius), so the arrival must not be a loop
+    from aqua_drift.layer import _arrival_s
+
+    config = LayerConfig()
+    state = initial_state(config, DATUM, 0, random.Random(1))
+    state = state.model_copy(update={"heading_deg": 0.0, "straight_s": config.straight_after_s})
+    point = _offset(state.position, -40.0, 350.0, 0.0)
+    v = state.speed_kt * 0.514444
+    assert _arrival_s(state, config, point, 0.0) < 350.0 / v + 2.0
