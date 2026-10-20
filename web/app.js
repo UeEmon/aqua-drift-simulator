@@ -811,11 +811,18 @@ function updateObservers(records, batch, config) {
         ),
         range: null,
         detecting: null,
+        // where it is on the sea surface (the marker is drawn at its depth x the exaggeration,
+        // which a perspective view shifts towards the screen centre): a ring and a stem down to it
+        surface: gpu.points.add({ pixelSize: 6, color: Cesium.Color.TRANSPARENT, outlineColor: COLORS.observer, outlineWidth: 1.5 }),
+        stem: gpu.lines.add({ positions: [], width: 1, material: colorMaterial(COLORS.observer.withAlpha(0.45)) }),
       };
       state.observers.set(id, item);
     }
     const position = cartOf(observer.position);
     item.marker.set(position);
+    const top = Cesium.Cartesian3.fromDegrees(observer.position.longitude, observer.position.latitude, 0);
+    item.surface.position = top;
+    item.stem.positions = [top, position];
     const isDetecting = detecting.has(id);
     if (item.detecting !== isDetecting) {
       item.marker.point.color = isDetecting ? COLORS.detecting : COLORS.observer;
@@ -844,6 +851,8 @@ function updateObservers(records, batch, config) {
   for (const [id, item] of state.observers) {
     if (active.has(id) || item.detecting === "inactive") continue;
     item.marker.point.color = COLORS.inactive; // evicted / expired: drift history stays visible
+    item.surface.outlineColor = COLORS.inactive;
+    item.stem.material = colorMaterial(COLORS.inactive.withAlpha(0.45));
     item.detecting = "inactive";
     if (item.range) item.range.show = false;
   }
@@ -1039,10 +1048,11 @@ function updateLayer(deployment) {
     for (const [index, t] of open.entries()) {
       const proposed = t.status === "PROPOSED";
       const color = proposed ? COLORS.proposed : t.cancel_suggestion ? COLORS.cancel : COLORS.drop;
-      gpu.taskPoints.add({ position: cartOf(t.position), pixelSize: 10, color: color.withAlpha(proposed ? 0.15 : 0.6), outlineColor: color, outlineWidth: 2 });
+      // on the sea surface (where the observer enters the water; its depth is in the label)
+      gpu.taskPoints.add({ position: surface(t.position), pixelSize: 10, color: color.withAlpha(proposed ? 0.15 : 0.6), outlineColor: color, outlineWidth: 2 });
       // the label goes with the release point (投下点, △) once it is computed, else the drop point
       gpu.taskLabels.add({
-        position: t.release_position ? surface(t.release_position) : cartOf(t.position),
+        position: surface(t.release_position || t.position),
         text: `${open.length > 1 ? `${index + 1}番目 ` : ""}${proposed ? "提案 " : ""}#${t.task_id}（${Math.round(t.position.depth_ft)} Ft）`
           + (t.planned_tick != null ? `計画 ${clockAt(t.planned_tick)}` : "すぐ") + (proposed ? " 了承待ち" : "")
           + (t.cancel_suggestion ? " 中止を提案" : ""),
