@@ -12,6 +12,7 @@ from aqua_drift.models import (
     ObserverState,
     Position,
     ScenarioConfig,
+    TargetMotionConfig,
     TargetState,
     TonalObservation,
     Velocity,
@@ -114,6 +115,25 @@ def initial_target(config: ScenarioConfig) -> TargetState:
     )
 
 
+def commanded_motion(target: TargetMotionConfig, tick: int, start_tick: int) -> tuple[float, float, float]:
+    """Commanded (HDG, through-water speed, depth) at `tick`: per quantity, the latest schedule
+    leg due by then that sets it, unless a live command (command_tick) came after that leg;
+    otherwise the configured desired value."""
+    values = [target.desired_hdg_deg, target.desired_through_water_speed_kt, target.desired_depth_ft]
+    due = [None, None, None]
+    for leg in sorted(target.maneuver_schedule, key=lambda item: item.at_s):
+        at = start_tick + leg.at_s
+        if at > tick:
+            break
+        for index, value in enumerate((leg.hdg_deg, leg.speed_kt, leg.depth_ft)):
+            if value is not None:
+                due[index] = (at, value)
+    for index, item in enumerate(due):
+        if item is not None and (target.command_tick is None or item[0] > target.command_tick):
+            values[index] = item[1]
+    return values[0], values[1], values[2]
+
+
 def advance_target(
     config: ScenarioConfig,
     state: TargetState,
@@ -121,15 +141,17 @@ def advance_target(
     current_velocity: Velocity | None = None,
 ) -> TargetState:
     target = config.target
-    heading = clamp_heading(state.hdg_deg, target.desired_hdg_deg, target.hdg_rate_deg_per_sec * seconds)
+    tick = state.tick + int(seconds)
+    desired_hdg, desired_speed, desired_depth = commanded_motion(target, tick, state.start_tick)
+    heading = clamp_heading(state.hdg_deg, desired_hdg, target.hdg_rate_deg_per_sec * seconds)
     speed = clamp_rate(
         state.through_water_speed_kt,
-        target.desired_through_water_speed_kt,
+        desired_speed,
         target.speed_rate_kt_per_sec * seconds,
     )
     depth = clamp_rate(
         state.position.depth_ft,
-        target.desired_depth_ft,
+        desired_depth,
         target.depth_rate_ft_per_sec * seconds,
     )
     vertical = (depth - state.position.depth_ft) / seconds if seconds else 0.0
@@ -139,7 +161,7 @@ def advance_target(
     position = move_position(state.position, ground, seconds)
     ground_speed, cog = speed_and_course(ground)
     return TargetState(
-        tick=state.tick + int(seconds),
+        tick=tick,
         position=position,
         hdg_deg=heading,
         cog_deg=cog,
@@ -147,6 +169,7 @@ def advance_target(
         ground_speed_kt=ground_speed,
         through_water_velocity=through_water,
         ground_velocity=ground,
+        start_tick=state.start_tick,
     )
 
 

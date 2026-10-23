@@ -41,6 +41,17 @@ class Velocity(BaseModel):
 # --------------------------------------------------------------------------- configuration
 
 
+class ManeuverLeg(BaseModel):
+    """One entry of the target's maneuver schedule: at `at_s` seconds after the run start the
+    commanded HDG / through-water speed / depth change to the values given (None: unchanged).
+    The change itself follows the configured rates, as a live command does."""
+
+    at_s: int = Field(ge=0, le=10800)
+    hdg_deg: float | None = Field(default=None, ge=0, lt=360)
+    speed_kt: float | None = Field(default=None, ge=0)
+    depth_ft: float | None = Field(default=None, ge=0)
+
+
 class TargetMotionConfig(BaseModel):
     """Target truth. Base motion is constant HDG / constant through-water speed."""
 
@@ -53,6 +64,15 @@ class TargetMotionConfig(BaseModel):
     hdg_rate_deg_per_sec: float = Field(default=1.0, gt=0)
     speed_rate_kt_per_sec: float = Field(default=0.1, gt=0)
     depth_rate_ft_per_sec: float = Field(default=2.0, gt=0)
+    # maneuver schedule (予定表), sorted by time. A live command (desired_* edited while running)
+    # sets command_tick; legs due before it are superseded by the command, later legs apply.
+    maneuver_schedule: list[ManeuverLeg] = Field(default_factory=list, max_length=50)
+    command_tick: int | None = Field(default=None, ge=0)
+
+    @field_validator("maneuver_schedule")
+    @classmethod
+    def sort_schedule(cls, value: list[ManeuverLeg]) -> list[ManeuverLeg]:
+        return sorted(value, key=lambda leg: leg.at_s)
 
 
 class CurrentFieldConfig(BaseModel):
@@ -377,6 +397,17 @@ class EstimatorConfig(BaseModel):
     maneuver_timing_chi2: float = Field(default=25.0, gt=0)  # kink detection threshold
     maneuver_timing_min_slope_hz_s: float = Field(default=0.003, ge=0)  # smallest df/dt step
     maneuver_timing_sigma_s: float = Field(default=0.3, ge=0)  # added onset-time error
+    # predicted presence regions (予測存在圏): the particles moved ahead with their own ground
+    # velocity for these horizons; recomputed at most every prediction_interval_s
+    prediction_horizons_s: list[int] = Field(default_factory=lambda: [600, 1200, 1800], max_length=6)
+    prediction_interval_s: int = Field(default=5, ge=1, le=600)
+
+    @field_validator("prediction_horizons_s")
+    @classmethod
+    def validate_horizons(cls, value: list[int]) -> list[int]:
+        if any(h <= 0 or h > 7200 for h in value):
+            raise ValueError("prediction horizons must be within 1 .. 7200 s")
+        return sorted(set(value))
 
 
 class ScenarioConfig(BaseModel):
@@ -460,6 +491,7 @@ class TargetState(BaseModel):
     ground_speed_kt: float = Field(ge=0)
     through_water_velocity: Velocity
     ground_velocity: Velocity
+    start_tick: int = Field(default=0, ge=0)  # run start: the maneuver schedule counts from here
 
 
 class ObserverState(BaseModel):
@@ -897,6 +929,14 @@ class PresenceRegion(BaseModel):
     disconnected: bool = False
 
 
+class PredictedRegion(BaseModel):
+    """Presence region predicted `horizon_s` ahead of the estimate (horizontal outlines only)."""
+
+    horizon_s: int
+    tick: int  # the time the region is predicted for
+    region: PresenceRegion
+
+
 class Uncertainty(BaseModel):
     horizontal_major_yd: float
     horizontal_minor_yd: float
@@ -974,6 +1014,7 @@ class TrackEstimate(BaseModel):
     source_bias_hz: float | None = None
     uncertainty: Uncertainty | None = None
     presence_region: PresenceRegion
+    predicted_regions: list[PredictedRegion] = Field(default_factory=list)
     track: list[TrackPoint] = Field(default_factory=list)
     relative: list[RelativeKinematics] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
