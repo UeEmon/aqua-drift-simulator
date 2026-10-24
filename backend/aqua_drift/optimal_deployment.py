@@ -103,6 +103,7 @@ LINE_ACROSS = 0.5  # line laying: candidate lines along the track up to this x R
 # filled up to max_per_drop while each observer still helps this much
 LINE_MIN_GAIN = 0.02
 LINE_CYCLE_MARGIN_S = 60.0  # added to the layer's loop between two passes
+LINE_CONTINUE_DEG = 5.0  # line laying: the layer's pass continues a line within this of the track
 CHUNK = 256  # candidates evaluated at once (bounds the memory of a plan)
 
 
@@ -415,23 +416,32 @@ class LayerAvailability:
         v = self.speed_kt * KNOT_TO_MPS
         return v * v / (9.80665 * math.tan(math.radians(self.max_bank_deg)))
 
-    def earliest_s(self, origin: Position, points: np.ndarray) -> np.ndarray:
-        """Earliest drop time (s from now) at each point (water-frame metres from origin):
-        free time + straight flight + the turn towards the point at the bank limit (a full
-        loop more when the point is close behind)."""
+    def earliest_s(self, origin: Position, points: np.ndarray,
+                   approaches: list[float] | None = None) -> np.ndarray:
+        """Earliest drop time (s from now) at each point (water-frame metres from origin): free
+        time + the shortest path the guidance flies (aqua_drift.route.path_to: the straight
+        flight after the last drop, the Dubins path and the straight approach at the drop), crossing
+        the point on one of `approaches` (rad; None: any heading). A point close to the craft but
+        off its line is inside its turning circle and needs a loop (~4 min at 200 kt): a turn and a
+        straight line towards it, as estimated before, was several minutes too early there."""
         start = np.array(local_offset_m(origin, self.position)[0:2])
         v = self.speed_kt * KNOT_TO_MPS
-        omega = 9.80665 * math.tan(math.radians(self.max_bank_deg)) / v
-        radius = v / omega
+        radius = self.turn_radius_m()
         delta = points[:, 0:2] - start[None, :]
-        distance = np.linalg.norm(delta, axis=1)
-        if self.heading_deg is None:
-            turn = np.full(len(points), 0.5 * math.pi / omega)
-        else:
-            bearing = np.arctan2(delta[:, 0], delta[:, 1])
-            error = np.abs((bearing - math.radians(self.heading_deg) + math.pi) % (2 * math.pi) - math.pi)
-            turn = error / omega + np.where((distance < 2 * radius) & (error > 0.5 * math.pi), math.pi / omega, 0.0)
-        return self.ready_s + distance / v + turn
+        n = len(points)
+        if self.heading_deg is None or n == 0:  # unknown heading: an average half turn
+            omega = v / radius
+            return self.ready_s + np.linalg.norm(delta, axis=1) / v + 0.5 * math.pi / omega
+        heading = np.full(n, math.radians(self.heading_deg))
+        hold = self.straight_after_s * v if self.queue else 0.0  # free right after its last drop
+        length = np.full(n, np.inf)
+        for approach in (approaches if approaches is not None else [None]):
+            _, trial, _ = routelib.path_to(
+                delta[:, 0], delta[:, 1], heading, None if approach is None else np.full(n, approach), radius,
+                before_m=self.straight_before_s * v, hold_m=hold)
+            length = np.minimum(length, trial)
+        loop = 2.0 * math.pi * radius + np.linalg.norm(delta, axis=1)  # no path found: a loop and the way there
+        return self.ready_s + np.where(np.isfinite(length), length, loop) / v
 
 
 def drop_times(
@@ -576,6 +586,20 @@ def plan_optimal_deployment(
         across = np.arange(-half, half + 1e-9, 0.25 * r_max)
     depths = np.array(sorted(set(config.depth_options_ft))) * FT_TO_M
     spots = np.array([[ux * a + uy * x, uy * a - ux * x, i] for a in along for i, x in enumerate(across)])
+    if lines and layer is not None and layer.heading_deg is not None:
+        # the layer's own pass, when it flies along the track: a line straight on from where it is
+        # free continues that pass (no loop); one beside it needs a loop first, which delays the next
+        # line by the loop -- a cost the information criterion does not see -- so then the line is
+        # this continuation (the bearings resolve the mirror of a line on the track)
+        hl = math.radians(layer.heading_deg)
+        if abs((hl - heading + math.pi) % (2 * math.pi) - math.pi) < math.radians(LINE_CONTINUE_DEG):
+            le, ln, _ = local_offset_m(origin, layer.position)
+            lx, ly = math.sin(hl), math.cos(hl)
+            ahead = le * ux + ln * uy  # where the layer is along the track
+            ray = [[le + lx * d, ln + ly * d, len(across)] for d in along
+                   if 0.25 * r_max <= ahead + d * (lx * ux + ly * uy) <= max(travel, 0.5 * r_max)]
+            if ray:
+                spots = np.array(ray)
     fine = np.concatenate([h.pos[:, 0:2] for h in hyps])
     near = np.array([np.min(np.linalg.norm(fine - s[0:2], axis=1)) for s in spots]) <= r_max
     spots = spots[near]
@@ -586,7 +610,16 @@ def plan_optimal_deployment(
         return [], "optimal: no candidate within detection range of the predicted track", None
 
     # an observer only measures once it is in the water: from the layer's earliest arrival
-    earliest = layer.earliest_s(origin, grid) if layer is not None else np.zeros(len(grid))
+    if layer is None:
+        earliest = np.zeros(len(grid))
+    elif lines:  # a line is crossed along the track, either way
+        earliest = layer.earliest_s(origin, grid, [heading, heading + math.pi])
+        continuing = lane == len(across)  # the layer's own pass: along its heading
+        if continuing.any():
+            hl = math.radians(layer.heading_deg)
+            earliest[continuing] = layer.earliest_s(origin, grid[continuing], [hl])
+    else:
+        earliest = layer.earliest_s(origin, grid)
     if lines:
         # the information counts from when the layer can be on the track (not only after the lead
         # time: a short-range field must be laid close ahead, where the estimate is still good) and

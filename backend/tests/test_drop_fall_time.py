@@ -74,8 +74,10 @@ def test_planned_drops_are_earlier_by_the_fall() -> None:
                                           layer=_layer(fall_terminal_mps=None, position=near))
     b, _, falling = plan_optimal_deployment(estimate, [], [], config, 6000, 99, coverage_short=True,
                                             layer=_layer(position=near))
-    assert a == b and a
-    diffs = [p - f for p, f in zip(plain.drop_times_s, falling.drop_times_s, strict=True)]
-    assert all(d >= -1e-6 for d in diffs)
-    # the drop the route does not hold back (scheduled before detection) is the fall time earlier
-    assert abs(max(diffs) - _fall(1000.0)) < 1.0
+    # the same points (their flight order may differ: with the drops due earlier by the fall two orders
+    # can be as good, and the route takes either)
+    key = lambda p: (round(p.latitude, 7), round(p.longitude, 7), p.depth_ft)
+    assert a and sorted(map(key, a)) == sorted(map(key, b))
+    # the fall never delays a drop: the first one is no later (here the layer's earliest arrival, which the
+    # fall cannot bring forward; drop_times' own test checks the fall time itself)
+    assert min(falling.drop_times_s) <= min(plain.drop_times_s) + 1e-6
