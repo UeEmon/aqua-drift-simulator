@@ -315,6 +315,9 @@ class ForwardDeploymentConfig(BaseModel):
     search_interval_s: int = Field(default=60, ge=0, le=3600)
     search_transit_s: int = Field(default=120, ge=0, le=3600)  # flight to the drop, added to the layer's free time
     search_fall_s: int = Field(default=40, ge=0, le=600)  # the observer's fall to the sea surface
+    # share of the cloud's samples that are maneuver hypotheses (course / speed change while the
+    # contact was gone): the coasted cloud keeps the old course and misses a target that turned
+    search_maneuver_fraction: float = Field(default=0.4, ge=0, le=1)
 
 
 class ObserverDeploymentConfig(BaseModel):

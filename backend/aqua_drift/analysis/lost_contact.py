@@ -50,6 +50,10 @@ def run_one(scenario: str, seed: int, range_yd: float, seconds: int, particles: 
     config.layer.random_seed = 31 + 101 * seed
     if variant == "nosearch":  # no re-detection search drops (aqua_drift.search_deployment)
         config.forward.search_enabled = False
+    if variant.startswith("fwd:"):  # "fwd:key=value,key=value" overrides forward-deployment settings
+        for item in variant[4:].split(","):
+            key, value = item.split("=", 1)
+            setattr(config.forward, key, json.loads(value))
     if variant == "off":  # the lost-contact handling of the estimator switched off
         e = config.estimator
         e.lost_debounce_s = 1
@@ -61,7 +65,7 @@ def run_one(scenario: str, seed: int, range_yd: float, seconds: int, particles: 
             key, value = item.split("=", 1)
             setattr(config.estimator, key, json.loads(value))
     run = ScenarioRun(config, 4, forward=True)
-    if variant not in ("current", "nosearch", "off") and not variant.startswith("est:"):
+    if variant not in ("current", "nosearch", "off") and not variant.startswith(("est:", "fwd:")):
         from aqua_drift.analysis import lost_contact_proto
         lost_contact_proto.install(run, variant)
     events = {tick: rest for tick, *rest in SCENARIOS[scenario]}

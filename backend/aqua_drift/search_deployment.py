@@ -41,15 +41,43 @@ def cloud_from_particles(x: np.ndarray, w: np.ndarray, centre: np.ndarray, count
     }
 
 
-def search_points(cloud: dict[str, list[float]], t_drop_s: float, radius_m: float, pd: float,
-                  max_drops: int, rng: np.random.Generator) -> tuple[np.ndarray, float]:
-    """Greedy disc cover. Returns (drop points east/north relative to the cloud's centre, the
-    share of the cloud's mass they cover). A drop point is where the target is expected at the
-    time of the drop: cloud position + through-water velocity x t_drop."""
+def predicted_positions(cloud: dict[str, list[float]], t_drop_s: float, maneuver_fraction: float,
+                        gap_s: float, rng: np.random.Generator) -> np.ndarray:
+    """Where the cloud's samples are expected at the time of the drop (east/north, m).
+
+    A sample goes on with its through-water velocity v: position + v x t_drop. The coasted cloud
+    keeps (nearly) the course held before the contact was lost, so it is wrong when the target
+    maneuvered meanwhile. A share maneuver_fraction of the samples therefore is a maneuver
+    hypothesis: at a time u x gap_s after the last detection the target turned by a random angle
+    and changed its speed by a random factor (0.5 .. 1.5), so it moved v' instead of v for
+    (1 - u) x gap_s + t_drop_s: position + (v' - v) x that time."""
     east = np.asarray(cloud["east_m"], dtype=float)
     north = np.asarray(cloud["north_m"], dtype=float)
-    predicted = np.stack([east + np.asarray(cloud["vel_east_mps"]) * t_drop_s,
-                          north + np.asarray(cloud["vel_north_mps"]) * t_drop_s], axis=1)
+    ve = np.asarray(cloud["vel_east_mps"], dtype=float)
+    vn = np.asarray(cloud["vel_north_mps"], dtype=float)
+    n = len(east)
+    moved = np.zeros(n, dtype=bool)
+    if maneuver_fraction > 0.0:
+        moved = rng.random(n) < maneuver_fraction
+    turn = rng.uniform(-np.pi, np.pi, n)
+    factor = rng.uniform(0.5, 1.5, n)
+    ve2 = factor * (ve * np.cos(turn) + vn * np.sin(turn))
+    vn2 = factor * (-ve * np.sin(turn) + vn * np.cos(turn))
+    duration = (1.0 - rng.random(n)) * gap_s + t_drop_s
+    dve = np.where(moved, ve2 - ve, 0.0)
+    dvn = np.where(moved, vn2 - vn, 0.0)
+    return np.stack([east + ve * t_drop_s + dve * duration,
+                     north + vn * t_drop_s + dvn * duration], axis=1)
+
+
+def search_points(cloud: dict[str, list[float]], t_drop_s: float, radius_m: float, pd: float,
+                  max_drops: int, rng: np.random.Generator, maneuver_fraction: float = 0.0,
+                  gap_s: float = 0.0) -> tuple[np.ndarray, float]:
+    """Greedy disc cover. Returns (drop points east/north relative to the cloud's centre, the
+    share of the cloud's mass they cover). A drop point is where the target is expected at the
+    time of the drop: cloud position + through-water velocity x t_drop, with a share
+    maneuver_fraction of the samples being maneuver hypotheses (predicted_positions)."""
+    predicted = predicted_positions(cloud, t_drop_s, maneuver_fraction, gap_s, rng)
     n = len(predicted)
     if n == 0 or max_drops <= 0:
         return np.empty((0, 2)), 0.0
@@ -90,9 +118,10 @@ def plan_search_drops(estimate: TrackEstimate | None, config: ForwardDeploymentC
         return [], "no free observer"
     t_drop = ready_in_s + config.search_transit_s + config.search_fall_s
     rng = np.random.default_rng(estimate.tick)
+    gap = float((estimate.metadata or {}).get("seconds_since_detection") or 0.0)
     points, covered = search_points(
         cloud, t_drop, config.search_radius_fraction * max_slant_range_yd * YD_TO_M,
-        config.search_pd, count, rng,
+        config.search_pd, count, rng, config.search_maneuver_fraction, gap,
     )
     if not len(points):
         return [], "no point covers the cloud"

@@ -18,7 +18,12 @@ from aqua_drift.models import (
 from aqua_drift.physics import local_offset_m
 from aqua_drift.replanning import basis_for, plan_search_replacement
 from aqua_drift.scenario import ScenarioRun
-from aqua_drift.search_deployment import cloud_from_particles, plan_search_drops, search_points
+from aqua_drift.search_deployment import (
+    cloud_from_particles,
+    plan_search_drops,
+    predicted_positions,
+    search_points,
+)
 
 ORIGIN = Position(latitude=35.0, longitude=140.0, depth_ft=400.0)
 R_MAX_YD = 1000
@@ -146,3 +151,28 @@ def test_closed_loop_lays_search_drops_after_a_lost_contact() -> None:
     assert all(t.status in ("APPROVED", "DONE") and t.basis is None for t in search)
     assert "search after lost contact" in search[0].reason
     assert not any(t.source == "forward" for t in run.tasks)
+
+
+def test_maneuver_hypotheses_spread_the_cloud_off_the_old_course() -> None:
+    """A cloud that keeps its course east misses a target that turned while the contact was gone:
+    with maneuver hypotheses the predicted positions leave the old course line and one disc covers
+    less of the cloud."""
+    x = np.zeros((300, 7))
+    x[:, 3] = 4.0  # 4 m/s east through the water
+    cloud = cloud_from_particles(x, np.full(300, 1 / 300), np.zeros(2), 300, np.random.default_rng(0))
+    straight = predicted_positions(cloud, 300.0, 0.0, 400.0, np.random.default_rng(1))
+    assert np.allclose(straight[:, 1], 0.0) and np.allclose(straight[:, 0], 1200.0)
+    mixed = predicted_positions(cloud, 300.0, 0.5, 400.0, np.random.default_rng(1))
+    off_course = np.abs(mixed[:, 1]) > 100.0
+    assert 0.3 < off_course.mean() < 0.7  # about the share that are hypotheses
+    _, covered_straight = search_points(cloud, 300.0, 0.8 * R_MAX_M, 1.0, 1, np.random.default_rng(1))
+    _, covered_mixed = search_points(cloud, 300.0, 0.8 * R_MAX_M, 1.0, 1, np.random.default_rng(1),
+                                     0.5, 400.0)
+    assert covered_straight > 0.99 and covered_mixed < 0.7
+
+
+def test_no_maneuver_hypotheses_when_disabled_or_when_the_cloud_is_still() -> None:
+    cloud = ring_cloud()  # zero velocity: a hypothesis changes nothing
+    a = predicted_positions(cloud, 100.0, 0.0, 300.0, np.random.default_rng(1))
+    b = predicted_positions(cloud, 100.0, 0.8, 300.0, np.random.default_rng(1))
+    assert np.allclose(a, b)
