@@ -6,7 +6,8 @@ The first message of a connection carries everything; later messages carry only 
   has (`from` tick) and the points after it, as compact arrays; a full replacement (`reset`)
   when the beginning changed (server-side thinning, new run);
 * presence region: shared by both estimate modes, sent when it changed, at most every
-  `region_interval_s` (unless the run / probability changed);
+  `region_interval_s` (unless the run / probability changed); the predicted presence regions
+  (outlines only) likewise;
 * config, CPA, current estimate, deployment status, archive list, Lloyd's mirror depth, the
   layer's planned flight path: only when changed;
 * observers, Doppler truth, bearings, relative kinematics: compact arrays.
@@ -87,6 +88,21 @@ def compact_region(region: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def compact_predicted(predicted: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "h": item["horizon_s"],
+            "t": item["tick"],
+            "c": [
+                {"m": round(c["probability_mass_pct"], 1),
+                 "poly": [[round(x, 5), round(y, 5)] for x, y in c["polygon"]]}
+                for c in item["region"]["components"]
+            ],
+        }
+        for item in predicted
+    ]
+
+
 def track_diff(sent: list[TrackRow], new: list[TrackRow]) -> dict[str, Any] | None:
     """None if unchanged; {"reset": True, "pts": all} when the beginning changed or points were
     removed at the end; otherwise {"keep": n, "pts": tail}: keep the first n points the client
@@ -115,6 +131,8 @@ class WireEncoder:
         self.region_hash: str | None = None
         self.region_key: tuple[Any, ...] | None = None
         self.region_sent_at = -1e9
+        self.predicted_hash: str | None = None
+        self.predicted_sent_at = -1e9
         self.run_key: tuple[Any, ...] | None = None
 
     def _changed(self, name: str, value: Any) -> bool:
@@ -131,6 +149,7 @@ class WireEncoder:
             self.run_key = run_key
             self.tracks.clear()
             self.region_hash = None
+            self.predicted_hash = None
         message: dict[str, Any] = {
             "v": PROTOCOL_VERSION,
             "t": data["tick"],
@@ -215,10 +234,13 @@ class WireEncoder:
 
         estimates = []
         region = None
+        predicted = None
         for estimate in data["estimates"]:
             mode = estimate["mode"]
             region = region or estimate["presence_region"]
-            body = {k: v for k, v in estimate.items() if k not in ("track", "presence_region", "relative")}
+            predicted = predicted if predicted is not None else estimate.get("predicted_regions", [])
+            body = {k: v for k, v in estimate.items()
+                    if k not in ("track", "presence_region", "predicted_regions", "relative")}
             body["rel"] = [
                 [r["observer_id"], round(r["relative_speed_kt"], 2), round(r["slant_range_yd"], 1),
                  r["detected"]]
@@ -247,4 +269,11 @@ class WireEncoder:
         elif self.region_hash is not None:
             message["rgn"] = None  # region cleared (no estimate)
             self.region_hash = None
+        compact_pred = compact_predicted(predicted or [])
+        digest = _digest(compact_pred)
+        due = now - self.predicted_sent_at >= self.region_interval_s
+        if digest != self.predicted_hash and (due or self.predicted_hash is None or not compact_pred):
+            message["prg"] = compact_pred
+            self.predicted_hash = digest
+            self.predicted_sent_at = now
         return _rounded(message)

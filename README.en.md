@@ -42,16 +42,24 @@ Documentation:
 - **Estimation bar**: start / stop the estimator (a start begins a new run from the current time)
 - **推定と真値**: estimate vs truth side by side (value, truth, error, 1σ), error-over-time charts,
   relative speed / range / bearing per observer, CPA (estimate vs truth), current field
-- **目標設定**: target initial position, depth, HDG and speed → restart; live maneuver commands
+- **目標設定**: target initial position, depth, HDG and speed → restart; live maneuver commands;
+  the **maneuver schedule** (HDG / speed / depth changes at set times after the run start, so the
+  same maneuver can be replayed; a live command given after a leg's time overrides the legs before it)
 - **観測・推定条件**: max slant range, bearing σ / interval, bearing use on/off, frequency bias,
   current field, probability %, recompute window, particles
-- **表示・観測者**: layer toggles (truth, both tracks, presence region, bearing lines, error line)
-  and observer placement
+- **表示・観測者**: layer toggles (truth, both tracks, presence region, **predicted presence
+  regions**, bearing lines, error line) and observer placement. The predicted regions move the
+  estimate's particles ahead with their own ground velocity (estimated course / speed + fitted
+  current) for 10, 20 and 30 min, without a maneuver (`estimator.prediction_horizons_s`)
 
 - **View toolbar (map, top right)**: oblique / top-down (vertical) / horizontal side view
   (direction selectable), orthographic top view, **centre on truth (default centre target)**,
   centre on estimate, **follow** on/off (default **on, following the truth**) with the follow target truth / estimate
-  (the target is kept at the view centre every frame; altitude, depression and heading are kept), FPS overlay
+  (the target is kept at the view centre every frame; altitude, depression and heading are kept), FPS overlay,
+  **ruler** (click two points: distance in YD / NM and true bearing) and **range rings** (around the
+  estimate or the truth, moving with it, or a clicked point; radius blank = max slant range), clear
+- **Scale bar (map, top left, below the camera readout)**: 1 / 2 / 5 × 10ⁿ YD (NM from 1 NM) at the
+  view centre
 - **Clock**: times are shown as clock time (HH:MM:SS, browser local time) = system time of tick 0 +
   tick. The clock container schedules each tick from the system time, so at 1x the simulation
   time stays on the system time; drop times are entered as HH:MM:SS

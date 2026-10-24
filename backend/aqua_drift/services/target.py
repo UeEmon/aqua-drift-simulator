@@ -1,5 +1,6 @@
-"""Target container: constant HDG / through-water speed / depth base motion, changed only by
-parameter edits and limited by the configured rates (deg/s, kt/s, Ft/s); moved by the current."""
+"""Target container: constant HDG / through-water speed / depth base motion, changed by
+parameter edits and by the maneuver schedule (seconds after the run start), limited by the
+configured rates (deg/s, kt/s, Ft/s); moved by the current."""
 from __future__ import annotations
 
 import asyncio
@@ -27,6 +28,7 @@ async def run() -> None:
             if state is None:
                 state = initial_target(config)
                 state.tick = tick
+                state.start_tick = tick  # the maneuver schedule counts from the run start
                 last_tick = tick - 1
             if tick > last_tick:
                 elapsed = max(1, tick - last_tick)

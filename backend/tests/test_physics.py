@@ -156,3 +156,47 @@ def test_doppler_frequency_sign() -> None:
     observation, truth = doppler_observation(config, target, ahead)
     assert observation.observed_frequency_hz > config.source.source_frequency_hz  # closing
     assert truth.relative_radial_speed_kt == pytest.approx(8.0, abs=0.05)
+
+
+def test_maneuver_schedule_changes_command_at_its_time() -> None:
+    from aqua_drift.models import ManeuverLeg
+
+    config = ScenarioConfig()
+    config.target.hdg_rate_deg_per_sec = 1.0
+    config.target.maneuver_schedule = [
+        ManeuverLeg(at_s=20, speed_kt=10.0),
+        ManeuverLeg(at_s=10, hdg_deg=180.0),  # any order
+    ]
+    state = initial_target(config).model_copy(update={"tick": 100, "start_tick": 100})
+    for _ in range(10):
+        state = advance_target(config, state, 1.0, Velocity())
+    assert state.hdg_deg == pytest.approx(91.0)  # turn starts with the tick the leg is due
+    for _ in range(10):
+        state = advance_target(config, state, 1.0, Velocity())
+    assert state.hdg_deg == pytest.approx(101.0)
+    assert state.through_water_speed_kt == pytest.approx(8.1)  # speed leg due at 20 s
+    assert state.start_tick == 100
+
+
+def test_maneuver_schedule_is_sorted_on_load() -> None:
+    from aqua_drift.models import TargetMotionConfig
+
+    target = TargetMotionConfig.model_validate(
+        {"maneuver_schedule": [{"at_s": 300, "depth_ft": 800}, {"at_s": 60, "hdg_deg": 0}]}
+    )
+    assert [leg.at_s for leg in target.maneuver_schedule] == [60, 300]
+
+
+def test_live_command_supersedes_legs_due_before_it() -> None:
+    from aqua_drift.models import ManeuverLeg
+    from aqua_drift.physics import commanded_motion
+
+    target = ScenarioConfig().target
+    target.maneuver_schedule = [ManeuverLeg(at_s=10, hdg_deg=180.0), ManeuverLeg(at_s=60, hdg_deg=270.0)]
+    target.desired_hdg_deg = 45.0
+    assert commanded_motion(target, 5, 0)[0] == 45.0  # before the first leg: the configured value
+    assert commanded_motion(target, 30, 0)[0] == 180.0
+    target.command_tick = 30  # live command at 30 s: the 10 s leg no longer applies
+    assert commanded_motion(target, 40, 0)[0] == 45.0
+    assert commanded_motion(target, 60, 0)[0] == 270.0  # a later leg still does
+    assert commanded_motion(target, 40, 0)[1:] == (target.desired_through_water_speed_kt, target.desired_depth_ft)

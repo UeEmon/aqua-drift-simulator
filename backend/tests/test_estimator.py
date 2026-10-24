@@ -193,3 +193,25 @@ def test_forward_deployment_keeps_target_in_detection() -> None:
     assert detecting >= 1
     assert output.estimates[0].observability_status.startswith("TRACKING")
     assert run.error(output)["horizontal_error_yd"] < 300
+
+
+def test_predicted_regions_move_ahead_with_the_track() -> None:
+    config = _config(prediction_horizons_s=[1200, 600])
+    run = ScenarioRun(config, 4)
+    output = run.run(900)
+    estimate = output.estimates[0]
+    predicted = estimate.predicted_regions
+    assert [p.horizon_s for p in predicted] == [600, 1200]
+    assert all(p.tick == estimate.tick + p.horizon_s for p in predicted)
+    now = estimate.presence_region.components[0].centroid
+    shifts = []
+    for p in predicted:
+        component = max(p.region.components, key=lambda c: c.probability_mass_pct)
+        assert component.polygon and not component.voxels
+        north = (component.centroid.latitude - now.latitude) * 60.0 * 2025.4
+        east = (component.centroid.longitude - now.longitude) * 60.0 * 2025.4 * math.cos(math.radians(now.latitude))
+        shifts.append((east, north))
+        # the target heads east at 8 kt through water (+ the current): about 8.5 kt over ground
+        expected = estimate.ground_speed_kt * 2025.4 * p.horizon_s / 3600.0
+        assert math.hypot(east, north) == pytest.approx(expected, rel=0.25)
+    assert shifts[1][0] > shifts[0][0] > 0

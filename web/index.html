@@ -17,6 +17,7 @@
             <span><i class="sw online"></i>推定（過去航跡非更新）</span>
             <span><i class="sw smoothed"></i>推定（過去航跡更新）</span>
             <span><i class="sw region"></i>推定存在圏</span>
+            <span><i class="sw predicted"></i>予測存在圏（推定の針路・速力で先へ進めた存在圏）</span>
             <span><i class="sw observer"></i>観測者（探知中は緑）</span>
             <span><i class="sw bearing"></i>方位観測（探知中は実線・失探知は破線）</span>
             <span><i class="sw drop"></i>前程配置の投入点</span>
@@ -28,6 +29,7 @@
             <span><i class="sw current-force"></i>外力（潮流）</span>
           </div>
           <pre id="camera-hud" aria-label="視点カメラ情報"></pre>
+          <div id="scale-bar" aria-label="縮尺" title="視点中心付近の縮尺（斜視では奥ほど縮む）" hidden><span class="scale-line"></span><span class="scale-text"></span></div>
         </div>
         <div id="view-toolbar" role="toolbar" aria-label="視点">
           <div class="vt-row">
@@ -70,6 +72,18 @@
             <label title="描画・受信の計測値を表示"><input id="show-perf" type="checkbox" />性能</label>
             <label><input id="show-fps" type="checkbox" />FPS</label>
           </div>
+          <div class="vt-row">
+            <button type="button" id="tool-ruler" class="vt" aria-pressed="false" title="地図を 2 点クリックして距離と方位を測る（右クリック・Esc で測りかけを取り消し、もう一度押して終了）">定規</button>
+            <button type="button" id="tool-ring" class="vt" title="選んだ中心に距離環を追加（中心が推定位置・真値のときは一緒に動く）">距離環</button>
+            <select id="ring-center" aria-label="距離環の中心" title="距離環の中心">
+              <option value="estimate">中心：推定位置</option>
+              <option value="truth">中心：真値</option>
+              <option value="click">中心：地図をクリック</option>
+            </select>
+            <input id="ring-radius" type="number" min="10" step="100" aria-label="距離環の半径 (YD)" title="距離環の半径 (YD)。空欄で上限斜距離" placeholder="半径 YD" />
+            <button type="button" id="tool-clear" class="vt" title="定規と距離環をすべて消す">消去</button>
+          </div>
+          <p id="tool-hint" class="vt-hint" hidden></p>
         </div>
         <div id="right-huds">
           <div id="force-info" class="map-panel" aria-label="風・外力" hidden><table><tbody></tbody></table></div>
@@ -245,6 +259,24 @@
               <label>深度変化率 (Ft/秒)<input id="depth-rate" type="number" min="0.01" step="0.01" required /></label>
               <button type="submit" class="span2">運動指令を反映</button>
             </form>
+          </section>
+
+          <section>
+            <h2>機動予定表（開始からの時間で変針・変速・変深）</h2>
+            <p class="summary" id="schedule-status">--</p>
+            <div class="table-wrap">
+              <table id="schedule-table">
+                <colgroup><col style="width:30%" /><col style="width:20%" /><col style="width:20%" /><col style="width:20%" /><col style="width:10%" /></colgroup>
+                <thead><tr><th>開始から<br /><small>時刻・状態</small></th><th>針路 (度)</th><th>速力 (kt)</th><th>深度 (Ft)</th><th></th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="button-row">
+              <button type="button" id="schedule-add" class="mini">行を追加</button>
+              <button type="button" id="schedule-clear" class="mini ghost">すべて削除</button>
+            </div>
+            <button type="button" id="schedule-apply">予定表を反映</button>
+            <p class="note">時間は目標の開始（再スタート）からの経過で「分:秒」「時:分:秒」または秒数です。空欄の項目はその行では変えません。変化は上の運動指令の変化率に従います。予定の時刻を過ぎてから運動指令を反映すると、それまでの予定より運動指令が優先され、それ以降の予定は予定どおり実行されます。</p>
           </section>
 
           <section>
@@ -484,6 +516,7 @@
             <label class="check"><input id="show-smoothed" type="checkbox" checked />推定（過去航跡更新）</label>
             <label class="check"><input id="show-region" type="checkbox" checked />推定存在圏</label>
             <label class="check"><input id="show-voxels" type="checkbox" checked />存在圏ボクセル</label>
+            <label class="check" title="推定の針路・速力と推定した潮流で粒子を先へ進めた存在圏（機動は仮定しない）。時間は「観測・推定」の条件と同じ確率"><input id="show-predicted" type="checkbox" checked />予測存在圏（10・20・30 分後）</label>
             <label>ボクセルの描き方
               <select id="voxel-style">
                 <option value="box" selected>立体（密度の高い順、品質に応じ最大400個）</option>

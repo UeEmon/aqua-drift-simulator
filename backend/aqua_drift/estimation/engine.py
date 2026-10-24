@@ -31,6 +31,7 @@ from aqua_drift.models import (
     EstimatorOutput,
     EstimatorSettings,
     LloydDepthEstimate,
+    PredictedRegion,
     PresenceRegion,
     RelativeKinematics,
     TrackEstimate,
@@ -118,6 +119,8 @@ class TrackingEngine:
         self.timing = self._new_timing()
         self.timing_applied = 0
         self.timing_rejected = 0
+        self.predicted: list[PredictedRegion] = []
+        self.predicted_key: tuple | None = None
 
     # ------------------------------------------------------------------ settings
     def _timing_args(self) -> tuple:
@@ -533,6 +536,29 @@ class TrackingEngine:
             residual_kt=fit.residual_mps / KNOT_TO_MPS,
         )
 
+    def _predicted_regions(self, x: np.ndarray, ground: np.ndarray, w: np.ndarray) -> list[PredictedRegion]:
+        """Presence regions ahead: each particle dead-reckoned with its own ground velocity
+        (through-water velocity + fitted current at its present position), depth kept within
+        the surface and the maximum target depth. No maneuver is assumed, so the spread grows
+        only with the velocity uncertainty. Outlines only (no voxels)."""
+        e = self.settings.estimator
+        key = (self.tick // e.prediction_interval_s, tuple(e.prediction_horizons_s),
+               self.settings.presence_probability_pct, self.reinitializations)
+        if key == self.predicted_key:
+            return self.predicted
+        max_depth_m = e.max_target_depth_ft * FT_TO_M
+        results = []
+        for horizon in sorted(set(e.prediction_horizons_s)):
+            ahead = x[:, 0:3] + ground * horizon
+            ahead[:, 2] = np.clip(ahead[:, 2], 0.0, max_depth_m)
+            region = presence_region(self.frame, ahead, w, self.settings.presence_probability_pct)
+            for component in region.components:
+                component.voxels = []
+            results.append(PredictedRegion(horizon_s=horizon, tick=self.tick + horizon, region=region))
+        self.predicted = results
+        self.predicted_key = key
+        return results
+
     def output(self) -> EstimatorOutput:
         e = self.settings.estimator
         cpa = self.cpa.results(
@@ -612,6 +638,7 @@ class TrackingEngine:
         region = presence_region(
             self.frame, x[:, 0:3], w, self.settings.presence_probability_pct
         )
+        predicted = self._predicted_regions(x, ground, w)
         relative: list[RelativeKinematics] = []
         for row in self.last_rows:
             rel = ground - row.velocity
@@ -668,6 +695,7 @@ class TrackingEngine:
             "source_bias_hz": float(mean[6]),
             "uncertainty": uncertainty,
             "presence_region": region,
+            "predicted_regions": predicted,
             "relative": relative,
         }
         live = self._track_point()

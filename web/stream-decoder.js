@@ -52,6 +52,7 @@
       archived: [],
       lloyd: null,
       region: null,
+      predicted: [], // predicted presence regions
       est: {}, // mode -> rows
       truth: [], // [tick, lat, lon, depth]
       observers: {}, // id -> rows
@@ -104,6 +105,14 @@
       if ("rgn" in message) {
         st.region = message.rgn ? expandRegion(message.rgn) : null;
         regionChanged = true;
+      }
+      // predicted presence regions (outlines only), sent like the region when they changed
+      if ("prg" in message) {
+        st.predicted = (message.prg || []).map((p) => ({
+          horizon_s: p.h,
+          tick: p.t,
+          components: p.c.map((c) => ({ probability_mass_pct: c.m, polygon: c.poly })),
+        }));
       }
 
       // truth track (accumulated client-side)
@@ -184,6 +193,7 @@
         deployment: { ...st.deployment, layer: st.layer },
         archived_observer_ids: st.archived,
         lloyd: st.lloyd,
+        predicted_regions: st.predicted || [],
       };
       return { snapshot, region: regionChanged ? st.region : undefined, regionChanged, tracks: updates };
     }

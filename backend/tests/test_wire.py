@@ -74,3 +74,38 @@ def test_layer_planned_path_sent_only_when_changed() -> None:
     # where the path leads changed (a drop added): sent at once
     assert len(encoder.encode(snapshot(7, path[2:] + [(35.5, 140.5)]), 7.0)["lpp"]) == 149
     assert encoder.encode(snapshot(8, []), 8.0)["lpp"] == []
+
+
+def test_predicted_regions_sent_only_when_changed() -> None:
+    from aqua_drift.models import (
+        EstimateMode,
+        Position,
+        PredictedRegion,
+        PresenceRegion,
+        RegionComponent,
+        ScenarioConfig,
+        Snapshot,
+        TrackEstimate,
+    )
+    from aqua_drift.wire import WireEncoder
+
+    def snapshot(tick: int, lon: float) -> Snapshot:
+        component = RegionComponent(
+            probability_mass_pct=90.0, centroid=Position(latitude=35.0, longitude=lon, depth_ft=500),
+            polygon=[[lon, 35.0], [lon + 0.01, 35.0], [lon, 35.01]], min_depth_ft=450, max_depth_ft=550,
+            voxels=[],
+        )
+        predicted = [PredictedRegion(horizon_s=600, tick=tick + 600,
+                                     region=PresenceRegion(probability_pct=90.0, components=[component]))]
+        estimate = TrackEstimate(mode=EstimateMode.ONLINE, tick=tick, observability_status="TRACKING",
+                                 presence_region=PresenceRegion(probability_pct=90.0), predicted_regions=predicted)
+        return Snapshot(tick=tick, config=ScenarioConfig(), target=None, observers=[], doppler=None,
+                        estimates=[estimate], cpa=[], current_estimate=None, archived_observer_ids=[])
+
+    encoder = WireEncoder(region_interval_s=3.0)
+    first = encoder.encode(snapshot(1, 140.0), now=0.0)
+    assert first["prg"][0]["h"] == 600 and first["prg"][0]["c"][0]["poly"][0] == [140.0, 35.0]
+    assert "predicted_regions" not in first["est"][0]
+    assert "prg" not in encoder.encode(snapshot(2, 140.0), now=1.0)  # unchanged
+    assert "prg" not in encoder.encode(snapshot(3, 140.1), now=2.0)  # changed, but not yet due
+    assert encoder.encode(snapshot(4, 140.1), now=3.5)["prg"][0]["c"][0]["poly"][0] == [140.1, 35.0]

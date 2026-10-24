@@ -119,6 +119,8 @@ const COLORS = {
   flightWind: Cesium.Color.fromCssColorString("#a0e7ff"), // wind at the layer's flight altitude
   dropWind: Cesium.Color.fromCssColorString("#d59bff"), // mean wind used to correct the release points
   current: Cesium.Color.fromCssColorString("#3d8bff"), // external force (current) from observer drift
+  predicted: Cesium.Color.fromCssColorString("#ff9cec"), // predicted presence regions (予測存在圏)
+  tool: Cesium.Color.fromCssColorString("#fffb8f"), // ruler and range rings
 };
 
 // GPU-batched primitive collections: one draw call per collection instead of one per entity
@@ -137,6 +139,11 @@ const gpu = {
   releaseLines: scene.primitives.add(new Cesium.PolylineCollection()), // release point -> drop / entry point
   vectors: scene.primitives.add(new Cesium.PolylineCollection()), // wind and external-force arrows
   vectorLabels: scene.primitives.add(new Cesium.LabelCollection()),
+  predictedLines: scene.primitives.add(new Cesium.PolylineCollection()), // predicted presence regions
+  predictedLabels: scene.primitives.add(new Cesium.LabelCollection()),
+  toolLines: scene.primitives.add(new Cesium.PolylineCollection()), // ruler and range rings
+  toolPoints: scene.primitives.add(new Cesium.PointPrimitiveCollection()),
+  toolLabels: scene.primitives.add(new Cesium.LabelCollection()),
   region: { current: null, pending: null },
   regionOutline: { current: null, pending: null },
   voxels: { current: null, pending: null },
@@ -190,9 +197,10 @@ function ranked(label, priority) {
 }
 const declutter = {
   enabled: true,
-  collections: [[gpu.labels, 50], [gpu.taskLabels, 60], [gpu.vectorLabels, 45], [gpu.dropLabels, 35], [gpu.regionLabels, 30]],
+  collections: [[gpu.labels, 50], [gpu.taskLabels, 60], [gpu.vectorLabels, 45], [gpu.dropLabels, 35], [gpu.regionLabels, 30],
+    [gpu.predictedLabels, 20], [gpu.toolLabels, 90]],
   symbols: [gpu.points, gpu.drops, gpu.taskPoints], // symbols a label should rather not cover
-  panels: "#legend, #camera-hud, #view-toolbar, #right-huds > *, #layer-info, #perf-hud, #status-strip, .map-alert, .cesium-viewer-toolbar",
+  panels: "#legend, #camera-hud, #scale-bar, #view-toolbar, #right-huds > *, #layer-info, #perf-hud, #status-strip, .map-alert, .cesium-viewer-toolbar",
   panelRects: [],
   panelsAt: 0,
   placed: [], // [{label, x0, y0, x1, y1, moved}] visible labels as placed in the last frame
@@ -2712,6 +2720,7 @@ function populateForms(config) {
     $("layer-wind-correction").checked = lay.wind_correction !== false;
   }
   fillWindTable(config);
+  fillScheduleTable(config.target.maneuver_schedule || []);
   const l = config.lloyd || {};
   const lloydValues = { "lloyd-noise": l.level_noise_db, "lloyd-corr": l.noise_correlation_s, "lloyd-wave": l.wave_height_rms_m,
     "lloyd-path-error": l.path_difference_error_pct, "est-lloyd-model-error": config.estimator.lloyd_model_error_pct,
@@ -2749,6 +2758,7 @@ $("initial-form").addEventListener("submit", (event) => {
     t.desired_hdg_deg = t.initial_hdg_deg; // base motion: constant course / speed / depth
     t.desired_through_water_speed_kt = t.initial_through_water_speed_kt;
     t.desired_depth_ft = t.initial_position.depth_ft;
+    t.command_tick = null; // restart: the maneuver schedule runs from the new start
     next.current_field.reference_position = { ...t.initial_position, depth_ft: 0 };
   })
     .then(() => fetch(`/api/reset?replace_observers=${checked("init-replace-observers")}`, { method: "POST" }))
@@ -2773,6 +2783,8 @@ $("target-form").addEventListener("submit", (event) => {
     next.target.speed_rate_kt_per_sec = num("speed-rate");
     next.target.desired_depth_ft = num("desired-depth");
     next.target.depth_rate_ft_per_sec = num("depth-rate");
+    // a live command: schedule legs due before now no longer apply (later legs still do)
+    next.target.command_tick = state.latestSnapshot?.tick ?? null;
   })
     .then(() => setMessage("運動指令を反映しました（設定した変化率で変化します）。"))
     .catch((error) => setMessage(`設定エラー: ${error.message}`));
@@ -2897,7 +2909,7 @@ $("depth-exaggeration").addEventListener("change", () => {
   }
   if (state.latestSnapshot) render(state.latestSnapshot);
 });
-for (const id of ["show-truth", "show-online", "show-smoothed", "show-region", "show-voxels", "show-range", "show-bearing", "show-error-line", "show-drops", "show-forces", "show-layer-hud"]) {
+for (const id of ["show-truth", "show-online", "show-smoothed", "show-region", "show-voxels", "show-predicted", "show-range", "show-bearing", "show-error-line", "show-drops", "show-forces", "show-layer-hud"]) {
   $(id).addEventListener("change", () => {
     state.lastRegionKey = "";
     if (state.latestSnapshot) render(state.latestSnapshot);
@@ -2911,6 +2923,429 @@ for (const input of document.querySelectorAll("input[name='panel-mode']")) {
   });
 }
 if (window.addEventListener) window.addEventListener("resize", drawCharts);
+
+// ================================================================== maneuver schedule (機動予定表)
+// rows are edited locally and sent with 予定表を反映; the status cells follow the clock
+function elapsedText(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  const h = Math.floor(s / 3600);
+  return h ? `${h}:${pad2(Math.floor((s % 3600) / 60))}:${pad2(s % 60)}` : `${Math.floor(s / 60)}:${pad2(s % 60)}`;
+}
+// "m:ss" / "h:mm:ss" / seconds -> seconds after the run start; null when it cannot be read
+function elapsedFromText(text) {
+  const value = String(text || "").trim();
+  if (/^\d+$/.test(value)) return Number(value);
+  const parts = value.split(":");
+  if (parts.length < 2 || parts.length > 3 || parts.some((p) => !/^\d+$/.test(p))) return null;
+  return parts.map(Number).reduce((total, part) => total * 60 + part, 0);
+}
+const optionalNumber = (input) => (input.value.trim() === "" ? null : Number(input.value));
+
+function scheduleRowHtml(leg, index) {
+  const value = (v) => (v == null ? "" : v);
+  return `<tr data-row="${index}">`
+    + `<td><input type="text" inputmode="numeric" data-leg="at" value="${leg.at_s == null ? "" : elapsedText(leg.at_s)}" placeholder="10:00" /><small data-leg-status></small></td>`
+    + `<td><input type="number" min="0" max="359.9" step="0.1" data-leg="hdg" value="${value(leg.hdg_deg)}" /></td>`
+    + `<td><input type="number" min="0" step="0.1" data-leg="speed" value="${value(leg.speed_kt)}" /></td>`
+    + `<td><input type="number" min="0" step="10" data-leg="depth" value="${value(leg.depth_ft)}" /></td>`
+    + `<td><button type="button" class="mini ghost" data-leg-delete="${index}" title="この行を削除">×</button></td></tr>`;
+}
+
+function fillScheduleTable(legs) {
+  const rows = legs.map(scheduleRowHtml);
+  setHtml($("schedule-table").querySelector("tbody"), rows.length ? rows.join("") : `<tr><td colspan="5" class="empty">予定なし（「行を追加」で作成）</td></tr>`);
+  state.scheduleKey = "";
+  if (state.latestSnapshot) updateSchedule(state.latestSnapshot);
+}
+
+function scheduleFromTable() {
+  const legs = [];
+  for (const row of $("schedule-table").querySelectorAll("tr[data-row]")) {
+    const get = (name) => row.querySelector(`[data-leg="${name}"]`);
+    legs.push({ at_s: elapsedFromText(get("at").value), hdg_deg: optionalNumber(get("hdg")),
+      speed_kt: optionalNumber(get("speed")), depth_ft: optionalNumber(get("depth")) });
+  }
+  return legs;
+}
+
+function legChanges(leg) {
+  const parts = [];
+  if (leg.hdg_deg != null) parts.push(`針路 ${pad3(leg.hdg_deg)}°`);
+  if (leg.speed_kt != null) parts.push(`速力 ${fmt(leg.speed_kt, 1)} kt`);
+  if (leg.depth_ft != null) parts.push(`深度 ${fmt(leg.depth_ft, 0)} Ft`);
+  return parts.join("・") || "変更なし";
+}
+
+function updateSchedule(snapshot) {
+  if (!tabVisible("tab-target")) return;
+  const target = snapshot.target;
+  const config = snapshot.config?.target;
+  const start = target?.start_tick ?? null;
+  const key = `${snapshot.tick}-${start}-${config?.command_tick}-${JSON.stringify(config?.maneuver_schedule || [])}`;
+  if (key === state.scheduleKey) return;
+  state.scheduleKey = key;
+  const legs = (config?.maneuver_schedule || []).slice().sort((a, b) => a.at_s - b.at_s);
+  const elapsed = start == null ? null : snapshot.tick - start;
+  const next = elapsed == null ? null : legs.find((leg) => leg.at_s > elapsed);
+  let summary = start == null ? "目標が未生成です。" : `開始から ${elapsedText(elapsed)}（開始 ${clockAt(start)}）`;
+  if (!legs.length) summary += "・予定なし";
+  else if (next) summary += `・次の予定 ${clockAt(start + next.at_s)}（あと ${elapsedText(next.at_s - elapsed)}）：${legChanges(next)}`;
+  else if (start != null) summary += "・予定はすべて実行済み";
+  setText("schedule-status", summary);
+  // status of the rows as edited: their time against the clock (unapplied edits show as such)
+  const applied = new Set(legs.map((leg) => JSON.stringify(leg)));
+  const command = config?.command_tick ?? null;
+  for (const row of $("schedule-table").querySelectorAll("tr[data-row]")) {
+    const get = (name) => row.querySelector(`[data-leg="${name}"]`);
+    const at = elapsedFromText(get("at").value);
+    const leg = { at_s: at, hdg_deg: optionalNumber(get("hdg")), speed_kt: optionalNumber(get("speed")), depth_ft: optionalNumber(get("depth")) };
+    const cell = row.querySelector("[data-leg-status]");
+    let text;
+    let cls = "";
+    if (at == null) text = "時間を入力";
+    else if (start == null) text = "--";
+    else if (!applied.has(JSON.stringify(leg))) text = `${clockAt(start + at)}・未反映`;
+    else if (start + at > snapshot.tick) {
+      text = `${clockAt(start + at)}・${next && next.at_s === at ? "次" : "予定"}`;
+      if (next && next.at_s === at) cls = "next";
+    } else {
+      text = `${clockAt(start + at)}・${command != null && start + at <= command ? "運動指令で置換" : "実行済み"}`;
+      cls = "done";
+    }
+    cell.textContent = text;
+    row.className = cls;
+  }
+}
+
+$("schedule-add").addEventListener("click", () => {
+  const legs = scheduleFromTable();
+  const last = legs.length ? legs[legs.length - 1].at_s ?? 0 : null;
+  const target = state.latestSnapshot?.target;
+  const elapsed = target ? state.latestSnapshot.tick - (target.start_tick ?? 0) : 0;
+  // a new row 5 min after the last one (or after now), rounded to the minute
+  const at = Math.ceil(((last ?? elapsed) + 300) / 60) * 60;
+  legs.push({ at_s: at, hdg_deg: null, speed_kt: null, depth_ft: null });
+  fillScheduleTable(legs);
+});
+$("schedule-clear").addEventListener("click", () => fillScheduleTable([]));
+$("schedule-table").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-leg-delete]");
+  if (!button) return;
+  const legs = scheduleFromTable();
+  legs.splice(Number(button.dataset.legDelete), 1);
+  fillScheduleTable(legs);
+});
+$("schedule-table").addEventListener("input", () => {
+  state.scheduleKey = "";
+  if (state.latestSnapshot) updateSchedule(state.latestSnapshot);
+});
+$("schedule-apply").addEventListener("click", () => {
+  const legs = scheduleFromTable();
+  const bad = legs.findIndex((leg) => leg.at_s == null || leg.at_s > 10800);
+  if (bad >= 0) {
+    setMessage(`予定表の ${bad + 1} 行目の時間が読めません（「分:秒」「時:分:秒」または秒数、3 時間以内）。`);
+    return;
+  }
+  putConfig((next) => {
+    next.target.maneuver_schedule = legs.map((leg) => ({ ...leg, hdg_deg: leg.hdg_deg == null ? null : ((leg.hdg_deg % 360) + 360) % 360 }));
+  })
+    .then(() => {
+      fillScheduleTable(state.latestConfig.target.maneuver_schedule || []);
+      setMessage(`機動予定表を反映しました（${legs.length} 件）。`);
+    })
+    .catch((error) => setMessage(`設定エラー: ${error.message}`));
+});
+
+// ================================================================== predicted presence regions (予測存在圏)
+function updatePredicted(snapshot, estimate) {
+  const predicted = snapshot.predicted_regions || [];
+  const show = checked("show-predicted") && Boolean(estimate?.current_position);
+  const depth = estimate?.current_position?.depth_ft ?? 0;
+  const key = `${show}-${Math.round(depth / 10)}-${exaggeration()}-${state.runKey}`;
+  if (predicted === state.predictedData && key === state.predictedKey) return;
+  state.predictedData = predicted;
+  state.predictedKey = key;
+  gpu.predictedLines.removeAll();
+  gpu.predictedLabels.removeAll();
+  if (!show) return;
+  const height = heightOf(depth);
+  const longest = Math.max(1, ...predicted.map((p) => p.horizon_s));
+  for (const item of predicted) {
+    const fade = 1.0 - 0.35 * (item.horizon_s / longest); // farther ahead: fainter
+    for (const component of item.components) {
+      if (component.polygon.length < 3) continue;
+      const ring = [...component.polygon, component.polygon[0]];
+      gpu.predictedLines.add({
+        positions: ring.map(([lon, lat]) => Cesium.Cartesian3.fromDegrees(lon, lat, height)),
+        width: 2,
+        material: dashMaterial(COLORS.predicted.withAlpha(fade), 10),
+      });
+    }
+    const main = item.components.reduce((a, b) => (b.probability_mass_pct > (a?.probability_mass_pct ?? -1) ? b : a), null);
+    if (!main || !main.polygon.length) continue;
+    const north = main.polygon.reduce((a, b) => (b[1] > a[1] ? b : a)); // label above the outline
+    ranked(gpu.predictedLabels.add({
+      position: Cesium.Cartesian3.fromDegrees(north[0], north[1], height),
+      text: `+${Math.round(item.horizon_s / 60)}分 ${clockAt(item.tick).slice(0, 5)}`,
+      font: "11px sans-serif",
+      fillColor: COLORS.predicted.withAlpha(fade),
+      pixelOffset: new Cesium.Cartesian2(0, -10),
+    }), 20);
+  }
+}
+
+// ================================================================== map tools: ruler, range rings, scale bar
+const tools = { ruler: false, ringClick: false, start: null, rulers: [], rings: [], rubber: null, rubberLabel: null };
+
+function haversineM(a, b) {
+  const p1 = a.latitude * Math.PI / 180;
+  const p2 = b.latitude * Math.PI / 180;
+  const dp = p2 - p1;
+  const dl = (b.longitude - a.longitude) * Math.PI / 180;
+  const h = Math.sin(dp / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+  return 2 * EARTH_R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+function bearingDeg(a, b) {
+  const p1 = a.latitude * Math.PI / 180;
+  const p2 = b.latitude * Math.PI / 180;
+  const dl = (b.longitude - a.longitude) * Math.PI / 180;
+  const y = Math.sin(dl) * Math.cos(p2);
+  const x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+const distanceText = (m) => `${Math.round(m / YD_TO_M).toLocaleString("ja-JP")} YD（${(m / 1852).toFixed(2)} NM）`;
+
+// where a screen position meets the horizontal plane at the view target's depth (as the camera
+// readout's view centre), so a measurement lines up with the symbols drawn at that depth
+function planeDepthFt() {
+  return focusPosition(centreTarget())?.position.depth_ft ?? 0;
+}
+function pickPlane(windowPosition, depthFt = planeDepthFt()) {
+  const ray = viewer.camera.getPickRay(windowPosition);
+  if (!ray) return null;
+  const hit = Cesium.IntersectionTests.rayEllipsoid(ray, planeEllipsoid(heightOf(depthFt)));
+  if (!hit) return null;
+  const c = Cesium.Cartographic.fromCartesian(Cesium.Ray.getPoint(ray, Math.max(hit.start, 0)));
+  if (!c) return null;
+  return { latitude: Cesium.Math.toDegrees(c.latitude), longitude: Cesium.Math.toDegrees(c.longitude), depth_ft: depthFt };
+}
+
+function rulerText(a, b) {
+  return `${distanceText(haversineM(a, b))}  ${pad3(bearingDeg(a, b))}°`;
+}
+function midpoint(a, b) {
+  return { latitude: (a.latitude + b.latitude) / 2, longitude: (a.longitude + b.longitude) / 2, depth_ft: a.depth_ft };
+}
+function addRuler(a, b) {
+  const positions = [cartOf(a), cartOf(b)];
+  tools.rulers.push({
+    a, b, exag: exaggeration(),
+    line: gpu.toolLines.add({ positions, width: 2, material: colorMaterial(COLORS.tool) }),
+    ends: positions.map((position) => gpu.toolPoints.add({ position, pixelSize: 6, color: COLORS.tool, outlineColor: Cesium.Color.BLACK, outlineWidth: 1 })),
+    label: ranked(gpu.toolLabels.add({ position: cartOf(midpoint(a, b)), text: rulerText(a, b), font: "12px sans-serif",
+      fillColor: COLORS.tool, showBackground: true, backgroundColor: Cesium.Color.BLACK.withAlpha(0.6), pixelOffset: new Cesium.Cartesian2(0, -12) }), 90),
+  });
+}
+function clearRubber() {
+  if (tools.rubber) gpu.toolLines.remove(tools.rubber);
+  if (tools.rubberLabel) gpu.toolLabels.remove(tools.rubberLabel);
+  if (tools.startPoint) gpu.toolPoints.remove(tools.startPoint);
+  tools.rubber = null;
+  tools.rubberLabel = null;
+  tools.startPoint = null;
+  tools.start = null;
+}
+function showRubber(b) {
+  const a = tools.start;
+  if (!a || !b) return;
+  const positions = [cartOf(a), cartOf({ ...b, depth_ft: a.depth_ft })];
+  if (!tools.rubber) {
+    tools.rubber = gpu.toolLines.add({ positions, width: 1.5, material: dashMaterial(COLORS.tool, 8) });
+    tools.rubberLabel = ranked(gpu.toolLabels.add({ position: positions[1], text: "", font: "12px sans-serif", fillColor: COLORS.tool,
+      showBackground: true, backgroundColor: Cesium.Color.BLACK.withAlpha(0.6), pixelOffset: new Cesium.Cartesian2(0, -14) }), 90);
+  }
+  tools.rubber.positions = positions;
+  tools.rubberLabel.position = positions[1];
+  tools.rubberLabel.text = rulerText(a, b);
+  scene.requestRender();
+}
+
+function ringCentre(ring) {
+  if (ring.centre === "estimate") return selectedEstimate()?.current_position || null;
+  if (ring.centre === "truth") return state.latestSnapshot?.target?.position || null;
+  return ring.centre;
+}
+function ringRadiusM() {
+  const yd = Number($("ring-radius").value);
+  return (yd > 0 ? yd : state.latestConfig?.max_slant_range_yd ?? 6000) * YD_TO_M;
+}
+function addRing(centre) {
+  const radiusM = ringRadiusM();
+  const name = centre === "estimate" ? "推定" : centre === "truth" ? "真値" : "";
+  tools.rings.push({
+    centre, radiusM,
+    line: gpu.toolLines.add({ positions: [], width: 1.5, material: colorMaterial(COLORS.tool.withAlpha(0.8)) }),
+    label: ranked(gpu.toolLabels.add({ text: `${name ? `${name}から ` : ""}${Math.round(radiusM / YD_TO_M).toLocaleString("ja-JP")} YD`,
+      font: "11px sans-serif", fillColor: COLORS.tool, pixelOffset: new Cesium.Cartesian2(0, -8) }), 30),
+  });
+  updateRings();
+}
+function updateRings() {
+  for (const ruler of tools.rulers) { // rulers keep their points; redraw them at a new depth scale
+    if (ruler.exag === exaggeration()) continue;
+    ruler.exag = exaggeration();
+    const positions = [cartOf(ruler.a), cartOf(ruler.b)];
+    ruler.line.positions = positions;
+    ruler.ends.forEach((point, k) => { point.position = positions[k]; });
+    ruler.label.position = cartOf(midpoint(ruler.a, ruler.b));
+  }
+  for (const ring of tools.rings) {
+    const centre = ringCentre(ring);
+    ring.line.show = ring.label.show = Boolean(centre);
+    if (!centre) continue;
+    const key = `${centre.latitude.toFixed(6)},${centre.longitude.toFixed(6)},${Math.round(centre.depth_ft)},${exaggeration()}`;
+    if (key === ring.key) continue;
+    ring.key = key;
+    const height = heightOf(centre.depth_ft);
+    const points = [];
+    for (let k = 0; k <= 96; k += 1) {
+      const p = destination(centre, (360 * k) / 96, ring.radiusM);
+      points.push(Cesium.Cartesian3.fromDegrees(p.longitude, p.latitude, height));
+    }
+    ring.line.positions = points;
+    const top = destination(centre, 0, ring.radiusM);
+    ring.label.position = Cesium.Cartesian3.fromDegrees(top.longitude, top.latitude, height);
+  }
+}
+
+function setToolHint(text) {
+  $("tool-hint").hidden = !text;
+  $("tool-hint").textContent = text || "";
+  $("viewer-panel").classList.toggle("measuring", Boolean(text));
+}
+function setRuler(on) {
+  tools.ruler = on;
+  tools.ringClick = false;
+  clearRubber();
+  $("tool-ruler").setAttribute("aria-pressed", String(on));
+  setToolHint(on ? "定規：始点と終点をクリック（右クリック・Esc で取り消し、「定規」でもう一度押すと終了）" : "");
+  scene.requestRender();
+}
+$("tool-ruler").addEventListener("click", () => setRuler(!tools.ruler));
+$("tool-ring").addEventListener("click", () => {
+  const centre = $("ring-center").value;
+  if (centre === "click") {
+    setRuler(false);
+    tools.ringClick = true;
+    setToolHint("距離環：中心にする地点をクリック（Esc で取り消し）");
+    return;
+  }
+  if (!ringCentre({ centre })) {
+    setMessage(centre === "estimate" ? "推定位置がまだありません。" : "真値がまだありません。");
+    return;
+  }
+  addRing(centre);
+  scene.requestRender();
+});
+$("tool-clear").addEventListener("click", () => {
+  clearRubber();
+  for (const r of tools.rulers) {
+    gpu.toolLines.remove(r.line);
+    gpu.toolLabels.remove(r.label);
+    for (const p of r.ends) gpu.toolPoints.remove(p);
+  }
+  for (const r of tools.rings) {
+    gpu.toolLines.remove(r.line);
+    gpu.toolLabels.remove(r.label);
+  }
+  tools.rulers = [];
+  tools.rings = [];
+  scene.requestRender();
+});
+handler.setInputAction((click) => {
+  if (tools.ringClick) {
+    const point = pickPlane(click.position);
+    if (!point) return;
+    tools.ringClick = false;
+    setToolHint("");
+    addRing(point);
+    scene.requestRender();
+    return;
+  }
+  if (!tools.ruler) return;
+  const point = pickPlane(click.position, tools.start?.depth_ft);
+  if (!point) return;
+  if (!tools.start) {
+    tools.start = point;
+    tools.startPoint = gpu.toolPoints.add({ position: cartOf(point), pixelSize: 6, color: COLORS.tool, outlineColor: Cesium.Color.BLACK, outlineWidth: 1 });
+  } else {
+    const a = tools.start;
+    clearRubber();
+    if (haversineM(a, point) >= 1) addRuler(a, { ...point, depth_ft: a.depth_ft });
+  }
+  scene.requestRender();
+}, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+handler.setInputAction((movement) => {
+  if (tools.ruler && tools.start) showRubber(pickPlane(movement.endPosition, tools.start.depth_ft));
+}, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+handler.setInputAction(() => {
+  if (tools.start) {
+    clearRubber();
+    scene.requestRender();
+  }
+}, Cesium.ScreenSpaceEventType.RIGHT_CLICK);
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (tools.start) clearRubber();
+  else if (tools.ruler) setRuler(false);
+  if (tools.ringClick) {
+    tools.ringClick = false;
+    setToolHint(tools.ruler ? $("tool-hint").textContent : "");
+  }
+  scene.requestRender();
+});
+
+// scale bar: the length of 100 px across the view centre on the plane at the view target's
+// depth, rounded to 1 / 2 / 5 x 10^n YD (NM from 1 NM up), at most 140 px wide
+function niceLength(max) {
+  const base = 10 ** Math.floor(Math.log10(max));
+  return [5, 2, 1].map((k) => k * base).find((v) => v <= max) || base;
+}
+let lastScale = "";
+function updateScaleBar() {
+  const bar = $("scale-bar");
+  const canvas = scene.canvas;
+  const cx = canvas.clientWidth / 2;
+  const cy = canvas.clientHeight / 2;
+  const a = pickPlane(new Cesium.Cartesian2(cx - 50, cy));
+  const b = pickPlane(new Cesium.Cartesian2(cx + 50, cy));
+  const perPx = a && b ? haversineM(a, b) / 100 : 0;
+  if (!(perPx > 0) || !Number.isFinite(perPx)) {
+    if (!bar.hidden) bar.hidden = true;
+    lastScale = "";
+    return;
+  }
+  const maxM = 140 * perPx;
+  let lengthM;
+  let text;
+  if (maxM >= 1852) {
+    const nm = niceLength(maxM / 1852);
+    lengthM = nm * 1852;
+    text = `${nm.toLocaleString("ja-JP")} NM`;
+  } else {
+    const yd = niceLength(maxM / YD_TO_M);
+    lengthM = yd * YD_TO_M;
+    text = `${yd.toLocaleString("ja-JP")} YD`;
+  }
+  const width = Math.round(lengthM / perPx);
+  const key = `${width}-${text}`;
+  if (key === lastScale) return;
+  lastScale = key;
+  bar.hidden = false;
+  bar.querySelector(".scale-line").style.width = `${width}px`;
+  bar.querySelector(".scale-text").textContent = text;
+}
+scene.postRender.addEventListener(updateScaleBar);
 
 // ================================================================== render loop
 function render(snapshot) {
@@ -2927,6 +3362,9 @@ function render(snapshot) {
   updateEstimateLayers(snapshot.estimates);
   const estimate = selectedEstimate(snapshot);
   updateRegion(estimate);
+  updatePredicted(snapshot, estimate);
+  updateRings();
+  updateSchedule(snapshot);
   setText("observability", estimate?.observability_status || (snapshot.estimation?.running ? "--" : "推定停止中"));
   setText("position-basis", estimate?.metadata?.position_basis || "--");
   updateComparison(snapshot, estimate);
