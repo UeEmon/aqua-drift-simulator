@@ -262,7 +262,8 @@ class SimulationState:
             task_ids = []
             for position, planned_tick, basis in zip(request.positions, planned, bases, strict=False):
                 if self.config.layer.enabled:
-                    task = self._new_task(position, source, request.reason)
+                    task = self._new_task(position, request.source if source == "forward" else source,
+                                          request.reason)
                     task.planned_tick = task.requested_tick = planned_tick
                     task.basis, task.revision = basis, request.revision
                     task_ids.append(task.task_id)

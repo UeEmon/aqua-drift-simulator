@@ -1126,7 +1126,7 @@ function updateLayer(deployment) {
     const fall = t.status === "DONE" && t.splash_tick != null
       ? (t.miss_yd != null ? `・着水 ${clockAt(t.splash_tick)}（誤差 ${Math.round(t.miss_yd)} YD）` : "・落下中") : "";
     const when = t.status === "APPROVED" ? `${plan}・あと ${fmt(t.eta_s, 0)} s` : t.status === "DONE" ? `${clockAt(t.done_tick)} 投下${late}${fall}` : plan;
-    const src = { forward: "自動", operator: "即時配置", manual: "手動配置" }[t.source] || t.source;
+    const src = { forward: "自動", search: "再探知", operator: "即時配置", manual: "手動配置" }[t.source] || t.source;
     const rank = index >= 0 && open.length > 1 ? `・${index + 1}番目` : "";
     const suggest = t.status === "APPROVED" && t.cancel_suggestion
       ? `<br /><small class="cancel-note">中止を提案：${escapeHtml(t.cancel_suggestion)}</small>` : "";

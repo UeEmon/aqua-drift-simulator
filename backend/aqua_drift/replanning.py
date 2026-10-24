@@ -61,6 +61,7 @@ from aqua_drift.optimal_deployment import (
     plan_optimal_deployment,
 )
 from aqua_drift.physics import local_offset_m
+from aqua_drift.search_deployment import plan_search_drops
 
 KNOT_TO_MPS = 0.5144444444444445
 FLYING_MODES = ("TRANSIT",)
@@ -74,6 +75,7 @@ class ReplanDecision:
     bases: list[PlanBasis]
     revision: int
     reason: str
+    source: str = "forward"  # "search": re-detection drops (plan_search_replacement)
 
 
 def flying_task_id(state: LayerState | None) -> int | None:
@@ -314,3 +316,42 @@ def cancel_suggestions(tick: int, estimate: TrackEstimate | None, replan: Replan
         elif task.cancel_suggestion:
             out[task.task_id] = None
     return out
+
+
+def plan_search_replacement(
+    tick: int,
+    estimate: TrackEstimate | None,
+    replan: ReplanFeed | None,
+    config: ForwardDeploymentConfig,
+    max_slant_range_yd: float,
+    free_slots: int,
+    ready_in_s: float,
+    last_deploy_tick: int | None,
+) -> tuple[ReplanDecision | None, str]:
+    """After a lost contact (estimate LOST): replace the revisable open forward drops -- planned
+    on a track that no longer holds -- and lay search drops over the coasted cloud (see
+    aqua_drift.search_deployment). The kept drops (flown to, due soon, ...) stay: the head of the
+    queue is always laid. At most every search_interval_s, and not while earlier search drops are
+    still open (the cloud they were planned on is the one being searched)."""
+    if not (config.enabled and config.search_enabled):
+        return None, "search disabled"
+    if estimate is None or estimate.observability_status != "LOST":
+        return None, "contact not lost"
+    open_tasks = [] if replan is None else [t for t in replan.tasks if t.status in ("PROPOSED", "APPROVED")]
+    if any(t.source == "search" for t in open_tasks):
+        return None, "search drops still open"
+    if last_deploy_tick is not None and tick - last_deploy_tick < config.search_interval_s:
+        return None, "search interval"
+    replaced: list[int] = []
+    if replan is not None:
+        flying = flying_task_id(replan.layer_state)
+        auto = replan.layer.approval == "auto"
+        replaced = [t.task_id for t in open_tasks if is_revisable(t, tick, config, flying, auto)]
+    positions, reason = plan_search_drops(
+        estimate, config, max_slant_range_yd, free_slots + len(replaced), ready_in_s)
+    if not positions:
+        return None, reason
+    if replaced:
+        reason = f"{reason}; replaces drops {replaced}"
+    return ReplanDecision(replaces=replaced, positions=positions, planned_ticks=None, bases=[],
+                          revision=0, reason=reason, source="search"), reason

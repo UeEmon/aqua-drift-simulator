@@ -38,8 +38,10 @@ from aqua_drift.models import (
     Uncertainty,
     Velocity,
 )
+from aqua_drift.search_deployment import cloud_from_particles
 
 MAX_TRACK_POINTS = 2000
+SEARCH_CLOUD_POINTS = 300  # particles handed to the re-detection planner while LOST
 
 
 def _circular_mean_std(angles_rad: np.ndarray, weights: np.ndarray) -> tuple[float, float]:
@@ -650,6 +652,9 @@ class TrackingEngine:
             position_mean = (w[members] @ x[members]) / max(w[members].sum(), 1e-12)
             position_basis = f"dominant mode ({masses[dominant] * 100:.0f}% of mass)"
         base_meta["position_basis"] = position_basis
+        if status == "LOST":  # the re-detection search covers the cloud itself (search_deployment)
+            base_meta["search_cloud"] = cloud_from_particles(
+                x, w, position_mean, SEARCH_CLOUD_POINTS, np.random.default_rng(self.tick))
         geo = self.frame.to_geo(*position_mean[0:3])
         self._update_smoothed()
         common = {

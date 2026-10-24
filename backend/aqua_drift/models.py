@@ -302,6 +302,19 @@ class ForwardDeploymentConfig(BaseModel):
     # motion hypotheses that bring the target within R_max (+2 sigma) of it after its drop weigh less
     # than this (the proposal is withdrawn again above 2.5 x this)
     cancel_suggest_weight: float = Field(default=0.1, ge=0, le=1)
+    # re-detection (再探知) after a lost contact (aqua_drift.search_deployment): while the estimate
+    # is LOST the open automatic drops (planned on a track that no longer holds) are replaced and
+    # search drops are laid where detection discs of search_radius_fraction x R_max cover the
+    # largest share of the coasted particle cloud, until search_pd of it is covered or
+    # search_max_drops are planned; again at most every search_interval_s and never while the
+    # previous search drops are still open
+    search_enabled: bool = True
+    search_pd: float = Field(default=0.7, gt=0, le=1)
+    search_max_drops: int = Field(default=4, ge=1, le=8)
+    search_radius_fraction: float = Field(default=0.8, gt=0, le=1)
+    search_interval_s: int = Field(default=60, ge=0, le=3600)
+    search_transit_s: int = Field(default=120, ge=0, le=3600)  # flight to the drop, added to the layer's free time
+    search_fall_s: int = Field(default=40, ge=0, le=600)  # the observer's fall to the sea surface
 
 
 class ObserverDeploymentConfig(BaseModel):
@@ -611,6 +624,7 @@ class DeploymentRequest(BaseModel):
     # of them is no longer revisable) and the revision of the new drops
     replaces: list[int] = Field(default_factory=list)
     revision: int = 0
+    source: str = "forward"  # forward | search (re-detection after a lost contact)
 
 
 class DeploymentFeed(BaseModel):
@@ -677,7 +691,7 @@ class DropTask(BaseModel):
 
     task_id: int
     created_tick: int
-    source: str  # forward (automatic plan) | manual (operator placement) | operator (deploy now)
+    source: str  # forward (automatic plan) | search (re-detection) | manual (operator placement) | operator (deploy now)
     reason: str = ""
     position: Position
     status: str = "PROPOSED"
