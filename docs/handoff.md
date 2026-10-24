@@ -94,4 +94,4 @@ node --check web/app.js
 
 ## 7. 直近の PR
 
-* `feature/redetection-search` → main：要求 4.26（再探知投下）と 4.27（配置計画と設標者の飛行の見直し）。PR 番号は作成後に追記。
+* `feature/redetection-search` → main：[UeEmon/aqua-drift-simulator#49](https://github.com/UeEmon/aqua-drift-simulator/pull/49)。要求 4.26（再探知投下）と 4.27（配置計画と設標者の飛行の見直し）。
