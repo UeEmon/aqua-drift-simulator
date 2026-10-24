@@ -1,14 +1,14 @@
 # 開発の引き継ぎ（AQUA-DRIFT）
 
-新しいセッションで開発を続けるための要点です。最終更新：2026-10-08（コミット `edda74c` 時点）。
+新しいセッションで開発を続けるための要点です。最終更新：2026-10-24（ブランチ `feature/redetection-search` 時点）。
 
 ## 1. リポジトリと進め方
 
 | 項目 | 内容 |
 |---|---|
 | リポジトリ | `UeEmon/aqua-drift-simulator` |
-| 作業ブランチ | `feature/doppler-estimation`（main へ直接 push しない） |
-| PR | #1（すべての作業をこの PR に積む） |
+| 作業ブランチ | 直近は `feature/redetection-search`（main から分岐。main へ直接 push しない）。以前は `feature/doppler-estimation` |
+| PR | 直近は `feature/redetection-search` → main の PR（番号は第 7 節）。main にはこれまでの作業がマージ済み |
 | CI | `.github/workflows/ci.yml`：backend（ruff + pytest）、compose、web、e2e（Playwright、最大 60 分）、soak（25 分の耐久） |
 | 最新の CI | `edda74c` で 5 ジョブすべて成功 |
 | 応答 | ユーザーへの報告・UI 文言は日本語。単位は YD / Ft / kt / 度 |
@@ -44,6 +44,8 @@ node --check web/app.js
 
 | 要求 | 内容 | 主なファイル |
 |---|---|---|
+| 4.27 | 変針・変速・深度変化に対応した配置計画と設標者の飛行の見直し（短い探知距離）。直線敷設は、設標者が空くまで `line_queue_ahead_s`（60 秒）を超える間は次の線を計画しない、線の評価期間を設標者の 1 周期から決める（`line_max_per_pass` 8 本）、到着時刻を誘導と同じ経路で見積もる（`LayerAvailability.earliest_s`：ゆるい経路・捕捉半径、向きを問わない点は 36 方位の最短）、設標者が航跡上を同じ向きに飛ぶときはその飛行線の延長に置く。機動の直後と COASTING の間は機動の仮説を今から始め、航跡を横切る線も候補にし、前程計画・再計画を続ける。推定器の機動応答の設定 `move_maneuver_cut_fraction`・`maneuver_respread_fraction` を追加（既定は従来どおり）。500 YD の探知なしの時間：直進 22→8 %、変速 15→6 %、深度変化 35→11 %、90° 変針 55→46 %、ジグザグ 76→63 %。6,000 YD は回帰なし。詳細は `docs/optimal-deployment.md` | `optimal_deployment.py`、`forward_deployment.py`、`replanning.py`、`estimation/particle_filter.py`、`analysis/deployment_diagnosis.py` |
+| 4.26 | 失探知（LOST）の間の再探知投下：コーストした粒子雲を探知円で貪欲に覆う（`search_deployment.py`、`replanning.plan_search_replacement`、`DropTask.source = "search"`、画面の表示「再探知」）。残す前程投下の後に予定する。閉ループでは探知を戻せていない（投下は真値から 1,800〜8,000 YD、4.27 の原因による） | `search_deployment.py`、`replanning.py`、`services/deployer.py`、`scenario.py` |
 | UI | 右パネルのタブを作業ごとに再編：推定結果／目標／観測・推定／配置・設標（前程配置の状況と設定・設標計画・設標者・手動配置）／風・潮流（潮流の設定・平均風の推定・風向風速）／表示。設定フォームはタブごとに分け、各タブの「反映」はそのタブの項目だけを送る（`config-form`・`forward-form`・`current-form`） | `web/index.html`、`web/app.js`、`web/styles.css` |
 | 4.18 | 風向風速（海面〜30,000 ft、1,000 ft ごと）。設標者は高度を持って飛び（巡航・投下高度、昇降率）飛行高度の風で流される。観測者は投下後に各高度の風を受けて自由落下し、着水時刻に投入。着水位置と無風の自由落下の予想地点の差から投下高度〜海面の平均風を推定し、次の投下点を風上に修正。「風・潮流」タブ。詳細は `docs/wind.md` | `wind.py`、`layer.py`（`release_point`、気団座標の誘導）、`state.py`（`falling`、`_splash`）、`web/app.js`（`updateWind`） |
 | 4.16 | 設標順の入れ替え：「配置・設標」タブの計画一覧で ▲▼。投入時刻は新しい順で再計算（最適時刻 `requested_tick` か前の設標点から到着できる時刻の遅い方）。API `/api/drops/reorder` | `state.py`（`reorder_tasks`）、`models.py`（`DropTask.flight_key`）、`web/app.js`（`moveDrop`） |
@@ -66,10 +68,30 @@ node --check web/app.js
   ヘッドレス Chromium で Cesium の 3D 画面が起動して地球を描画することを確かめる（事前に `web/` で `npm ci`）。
 * フィクスチャ生成：`backend/aqua_drift/analysis/wire_fixture.py`。
 
+* **変針・ジグザグで探知が途切れる（未解決、4.27）**：500 YD の直線敷設では探知中の観測者が 1〜2 本・一直線で、
+  推定器の移動の処理（`estimation/move.py`、移動窓 600 秒の等速の当てはめ）が変針に 1〜2 分遅れ、しかも自信過剰
+  （変針 60 秒後に推定 90°・1σ 1.4°、真値 151°）。配置計画側の対策（機動の直後・COASTING の計画、横切る線）は
+  効果がばらつきの範囲だった。次の候補は推定器に旋回の運動モデルを入れること：A 案は `move.py` の当てはめを
+  「等速＋一定の旋回率」にする（見積もり 5〜9 時間）、B 案は粒子の状態に旋回率を加える（9〜13 時間）。
+  **ユーザーは今回の修正の効果を見てから判断する**としている（2026-10-24）。
+* **効果を確かめる道具**：`python -m aqua_drift.analysis.deployment_diagnosis --scenarios S0,S1,S2,S3,S4 --range 500
+  --seeds 4 --seconds 2400 --particles 1000 --jobs 4 --out 出力.jsonl`（`--set` で前程配置、`--est` で推定器の設定を上書き。
+  投下ごとの計画・着水・真値との距離・探知の有無と、探知なしの時間の割合を出す）。4 並列で 500 YD は 20 実行約 40 分、
+  6,000 YD は約 45 分。2 シードではばらつきが大きく判断を誤ったので、比較は 4 シード以上で行う。
+  `analysis/lost_contact.py` には `nosearch` と `fwd:key=value` の変種がある。
+* **作業環境**：クラウドのコンテナは途中で再起動することがあり、実行中のプロセスが止まる。長い検証は
+  `--out` に結果を逐次保存し、同じコマンドで続きから再開できる。依存は第 2 節の手順で入れ直す
+  （再起動後も入っていたが、無ければ `pip install -e '.[dev]'`）。全テストは約 30〜38 分。
+* **GitHub 連携**：このセッションでは GitHub のプラグインがプロキシで接続できなかった（403）。`git push` と `gh` は使えた。
+
 ## 6. 新しいセッションの最初の手順
 
-1. リポジトリを取得し、`feature/doppler-estimation` をチェックアウト。
-2. この文書と `docs/requirements.md` の 4.12〜4.16 を読む。
+1. リポジトリを取得し、作業するブランチを確認する（`feature/redetection-search` の PR がマージ済みなら main から新しいブランチを切る）。
+2. この文書と `docs/requirements.md` の 4.12〜4.16、4.26〜4.27、`docs/optimal-deployment.md` の「通過単位の計画と待ち行列」以降を読む。
 3. 第 2 節の手順で依存を入れ、全テストが通ることを確認（PyPI が 403 ならユーザーに報告）。
-4. `gh run list --branch feature/doppler-estimation --limit 1` で最新の CI が成功していることを確認。
+4. `gh run list --branch <作業ブランチ> --limit 1` で最新の CI が成功していることを確認。
 5. ユーザーの次の指示を待つ。
+
+## 7. 直近の PR
+
+* `feature/redetection-search` → main：要求 4.26（再探知投下）と 4.27（配置計画と設標者の飛行の見直し）。PR 番号は作成後に追記。
