@@ -102,6 +102,13 @@ LINE_ACROSS = 0.5  # line laying: candidate lines along the track up to this x R
 # line laying: one pass (a loop of the layer, ~4 min) is the scarce resource, so the line is
 # filled up to max_per_drop while each observer still helps this much
 LINE_MIN_GAIN = 0.02
+LINE_CYCLE_MARGIN_S = 60.0  # added to the layer's loop between two passes
+ANY_HEADINGS = list(np.radians(np.arange(0.0, 360.0, 10.0)))  # earliest_s without a crossing heading
+LINE_CONTINUE_DEG = 5.0  # line laying: the layer's pass continues a line within this of the track
+# line laying after a maneuver: lines across the track, as wide as this share of the distance the
+# target covers while one line holds it (a 45 deg turn gets ~0.7 of it away), at most BARRIER_MAX_R x R_max
+BARRIER_WIDTH = 0.7
+BARRIER_MAX_R = 4.0
 CHUNK = 256  # candidates evaluated at once (bounds the memory of a plan)
 
 
@@ -181,15 +188,21 @@ def _trajectory(
 
 def hypotheses(
     p0: np.ndarray, heading: float, speed: float, vz: float, heading_sigma: float,
-    config: ForwardDeploymentConfig, horizon: float, max_depth: float,
+    config: ForwardDeploymentConfig, horizon: float, max_depth: float, now: bool = False,
 ) -> list[Hypothesis]:
     """Weighted motion hypotheses: the estimated track (heading and +-1 sigma) and, with a
-    total weight config.maneuver_weight, course / speed / depth changes."""
+    total weight config.maneuver_weight, course / speed / depth changes maneuver_time_s from now.
+    now (a maneuver was just detected, or the contact is coasting): the changes start now, with a
+    total weight of at least maneuver_now_weight -- the target may be turning or have turned since
+    the last detection, and a maneuver due only later cannot place a field for that."""
     def make(weight: float, name: str, h: float = heading, **change) -> Hypothesis:
         pos, vel = _trajectory(p0, h, speed, vz, horizon, max_depth, **change)
         return Hypothesis(weight, pos, vel, name)
 
-    mw = config.maneuver_weight if config.maneuver_time_s < horizon else 0.0
+    if now:
+        mw = max(config.maneuver_weight, config.maneuver_now_weight)
+    else:
+        mw = config.maneuver_weight if config.maneuver_time_s < horizon else 0.0
     straight = 1.0 - mw
     out = [
         make(0.5 * straight, "track"),
@@ -197,7 +210,7 @@ def hypotheses(
         make(0.25 * straight, "track+1s", heading + heading_sigma),
     ]
     if mw > 0:
-        at = float(config.maneuver_time_s)
+        at = 0.0 if now else float(config.maneuver_time_s)
         dz = config.maneuver_depth_change_ft * FT_TO_M
         maneuvers = [
             ("turn-90", {"turn": -math.pi / 2}), ("turn-45", {"turn": -math.pi / 4}),
@@ -361,6 +374,7 @@ class LayerAvailability:
     max_per_release: int = 1  # observers one drop can release at once (stacked at one point)
     straight_before_s: float = 0.0  # wings level at a drop (LayerConfig.straight_before_s / after_s)
     straight_after_s: float = 0.0
+    capture_m: float = 150.0 * YD_TO_M  # the drop is made within this of the point (LayerConfig.capture_radius_yd)
     # where it is now and its open drops in flight order (planned drop time s from now, None:
     # at once): a new plan is routed on after them
     now_position: Position | None = None
@@ -404,27 +418,48 @@ class LayerAvailability:
     wind_mps: tuple[float, float] = (0.0, 0.0)
     drift_mps: tuple[float, float] = (0.0, 0.0)
 
+    def cycle_s(self) -> float:
+        """Time from one straight pass to the next: a loop at the bank limit, the level flight at
+        the drops and a margin (the next line starts where the target will be by then)."""
+        v = self.speed_kt * KNOT_TO_MPS
+        return 2.0 * math.pi * self.turn_radius_m() / v + self.straight_before_s + self.straight_after_s + LINE_CYCLE_MARGIN_S
+
     def turn_radius_m(self) -> float:
         v = self.speed_kt * KNOT_TO_MPS
         return v * v / (9.80665 * math.tan(math.radians(self.max_bank_deg)))
 
-    def earliest_s(self, origin: Position, points: np.ndarray) -> np.ndarray:
-        """Earliest drop time (s from now) at each point (water-frame metres from origin):
-        free time + straight flight + the turn towards the point at the bank limit (a full
-        loop more when the point is close behind)."""
+    def earliest_s(self, origin: Position, points: np.ndarray,
+                   approaches: list[float] | None = None) -> np.ndarray:
+        """Earliest drop time (s from now) at each point (water-frame metres from origin): free
+        time + the shortest path the guidance flies (aqua_drift.route.path_to: the straight
+        flight after the last drop, the Dubins path and the straight approach at the drop), crossing
+        the point on one of `approaches` (rad; None: any heading). A point close to the craft but
+        off its line is inside its turning circle and needs a loop (~4 min at 200 kt): a turn and a
+        straight line towards it, as estimated before, was several minutes too early there."""
         start = np.array(local_offset_m(origin, self.position)[0:2])
         v = self.speed_kt * KNOT_TO_MPS
-        omega = 9.80665 * math.tan(math.radians(self.max_bank_deg)) / v
-        radius = v / omega
+        radius = self.turn_radius_m()
         delta = points[:, 0:2] - start[None, :]
-        distance = np.linalg.norm(delta, axis=1)
-        if self.heading_deg is None:
-            turn = np.full(len(points), 0.5 * math.pi / omega)
-        else:
-            bearing = np.arctan2(delta[:, 0], delta[:, 1])
-            error = np.abs((bearing - math.radians(self.heading_deg) + math.pi) % (2 * math.pi) - math.pi)
-            turn = error / omega + np.where((distance < 2 * radius) & (error > 0.5 * math.pi), math.pi / omega, 0.0)
-        return self.ready_s + distance / v + turn
+        n = len(points)
+        if self.heading_deg is None or n == 0:  # unknown heading: an average half turn
+            omega = v / radius
+            return self.ready_s + np.linalg.norm(delta, axis=1) / v + 0.5 * math.pi / omega
+        heading = np.full(n, math.radians(self.heading_deg))
+        hold = self.straight_after_s * v if self.queue else 0.0  # free right after its last drop
+        length = np.full(n, np.inf)
+        # any heading: the shortest over headings round the compass. route.path_to without a heading
+        # only knows turn-then-straight, and a point inside the turning circle then costs a loop more
+        # than the guidance (which replans every second) takes
+        for approach in (approaches if approaches is not None else ANY_HEADINGS):
+            # as the layer itself predicts its arrival (layer._arrival_s): the guidance's loose path
+            # close to the point, and the drop once within the capture radius
+            _, trial, _ = routelib.path_to(
+                delta[:, 0], delta[:, 1], heading, None if approach is None else np.full(n, approach), radius,
+                loose=True, capture_m=self.capture_m, before_m=self.straight_before_s * v, hold_m=hold)
+            length = np.minimum(length, trial)
+        loop = 2.0 * math.pi * radius + np.linalg.norm(delta, axis=1)  # no path found: a loop and the way there
+        length = np.where(np.isfinite(length), np.maximum(length - self.capture_m, 0.0), loop)
+        return self.ready_s + length / v
 
 
 def drop_times(
@@ -485,9 +520,12 @@ def plan_optimal_deployment(
     sensor: SensorModel | None = None,
     max_depth_ft: float = 1500.0,
     cost_only: bool = False,
+    maneuver_now: bool = False,
 ) -> tuple[list[Position], str, PlanReport | None]:
     """Plan positions, number and depths (and, in report.drop_times_s, the optimal drop times).
-    cost_only: only the cost of the field as it is (report.cost_before_yd), no candidates."""
+    cost_only: only the cost of the field as it is (report.cost_before_yd), no candidates.
+    maneuver_now: the maneuver hypotheses start now (see hypotheses) and line laying may also
+    lay a line across the track (a barrier the turned tracks cross as well)."""
     sensor = sensor or SensorModel()
     sensor.source_frequency_hz = source_frequency_hz
     sensor.sound_speed_mps = sound_speed_mps
@@ -499,7 +537,9 @@ def plan_optimal_deployment(
     speed = (estimate.through_water_speed_kt or 0.0) * KNOT_TO_MPS
     vz = (estimate.vertical_rate_fps or 0.0) * FT_TO_M
     heading = math.radians(estimate.hdg_deg)
-    limit = min(config.max_per_drop, max(free_slots, 0))
+    lines = (layer is not None and config.line_laying and speed > 0
+             and r_max < layer.turn_radius_m())
+    limit = min(config.line_max_per_pass if lines else config.max_per_drop, max(free_slots, 0))
     if limit <= 0:
         return [], "no free observer slot", None
     horizon = float(config.horizon_s)
@@ -512,7 +552,7 @@ def plan_optimal_deployment(
     ).reshape(-1, 3)
 
     hdg_sigma = math.radians(min(max(estimate.uncertainty.hdg_sigma_deg, 3.0), 30.0))
-    hyps = hypotheses(p0, heading, speed, vz, hdg_sigma, config, horizon, max_depth_ft * FT_TO_M)
+    hyps = hypotheses(p0, heading, speed, vz, hdg_sigma, config, horizon, max_depth_ft * FT_TO_M, maneuver_now)
     weights = np.array([h.weight for h in hyps])
     pos = np.array([h.pos[::every] for h in hyps])  # (H,K,3)
     vel = np.array([h.vel[::every] for h in hyps])
@@ -559,8 +599,6 @@ def plan_optimal_deployment(
     # observers of one plan can be laid in one straight pass
     ux, uy = math.sin(heading), math.cos(heading)
     travel = speed * horizon
-    lines = (layer is not None and config.line_laying and speed > 0
-             and r_max < layer.turn_radius_m())
     along = np.arange(0.25 * r_max, max(travel, 0.5 * r_max) + 1e-9, 0.25 * r_max)
     if lines:
         across = np.arange(-LINE_ACROSS, LINE_ACROSS + 1e-9, 0.25) * r_max
@@ -569,6 +607,41 @@ def plan_optimal_deployment(
         across = np.arange(-half, half + 1e-9, 0.25 * r_max)
     depths = np.array(sorted(set(config.depth_options_ft))) * FT_TO_M
     spots = np.array([[ux * a + uy * x, uy * a - ux * x, i] for a in along for i, x in enumerate(across)])
+    lane_dir = [heading] * len(across)  # heading of each line (lane), crossed either way
+    continuing_lane = -1
+    if lines and layer is not None and layer.heading_deg is not None and not maneuver_now:
+        # the layer's own pass, when it flies along the track: a line straight on from where it is
+        # free continues that pass (no loop); one beside it needs a loop first, which delays the next
+        # line by the loop -- a cost the information criterion does not see -- so then the line is
+        # this continuation (the bearings resolve the mirror of a line on the track). Not after a
+        # maneuver: then the line may have to leave the old track
+        hl = math.radians(layer.heading_deg)
+        if abs((hl - heading + math.pi) % (2 * math.pi) - math.pi) < math.radians(LINE_CONTINUE_DEG):
+            le, ln, _ = local_offset_m(origin, layer.position)
+            lx, ly = math.sin(hl), math.cos(hl)
+            ahead = le * ux + ln * uy  # where the layer is along the track
+            beside = abs(le * uy - ln * ux)  # and how far off it (a pass along another line does not count)
+            ray = [[le + lx * d, ln + ly * d, len(across)] for d in along
+                   if 0.25 * r_max <= ahead + d * (lx * ux + ly * uy) <= max(travel, 0.5 * r_max)
+                   and beside <= LINE_ACROSS * r_max]
+            if ray:
+                spots = np.array(ray)
+                continuing_lane = len(across)
+                lane_dir.append(hl)
+    if lines and maneuver_now:
+        # lines across the track ahead (barriers): after a turn the target leaves any line along the
+        # old track within minutes, while a line across it ahead is crossed by the straight and the
+        # turned tracks alike. As wide as a turned track gets away in one line's holding time
+        # (lines along the track far to either side, for +-90 deg turns, did not help in the closed
+        # loop and made depth changes worse: deployment_diagnosis, 2026-10-24)
+        hold_m = speed * (layer.cycle_s() + float(config.drop_lead_s)) + r_max
+        width = max(0.75 * r_max, min(BARRIER_WIDTH * hold_m, BARRIER_MAX_R * r_max))
+        offsets = np.arange(-width, width + 1e-9, 0.25 * r_max)
+        first = len(lane_dir)
+        barriers = [b for b in np.arange(0.5 * r_max, max(hold_m, r_max) + 1e-9, 0.5 * r_max)]
+        rows = [[ux * b + uy * c, uy * b - ux * c, first + j] for j, b in enumerate(barriers) for c in offsets]
+        spots = np.vstack([spots, np.array(rows)])
+        lane_dir += [heading + 0.5 * math.pi] * len(barriers)
     fine = np.concatenate([h.pos[:, 0:2] for h in hyps])
     near = np.array([np.min(np.linalg.norm(fine - s[0:2], axis=1)) for s in spots]) <= r_max
     spots = spots[near]
@@ -579,14 +652,31 @@ def plan_optimal_deployment(
         return [], "optimal: no candidate within detection range of the predicted track", None
 
     # an observer only measures once it is in the water: from the layer's earliest arrival
-    earliest = layer.earliest_s(origin, grid) if layer is not None else np.zeros(len(grid))
+    if layer is None:
+        earliest = np.zeros(len(grid))
+    elif lines:  # a line is crossed along its direction, either way (the continuation: straight on)
+        earliest = np.zeros(len(grid))
+        directions = np.array(lane_dir)[lane]
+        for d in np.unique(directions):
+            members = directions == d
+            if continuing_lane >= 0 and np.all(lane[members] == continuing_lane):
+                ways = [float(d)]  # straight on
+            elif config.line_forward_only and abs(float(d) - heading) < 1e-9:
+                ways = [float(d)]  # along the track: in the target's direction only
+            else:
+                ways = [float(d), float(d) + math.pi]
+            earliest[members] = layer.earliest_s(origin, grid[members], ways)
+    else:
+        earliest = layer.earliest_s(origin, grid)
     if lines:
         # the information counts from when the layer can be on the track (not only after the lead
         # time: a short-range field must be laid close ahead, where the estimate is still good) and
-        # for as long as one line of `limit` observers can hold the target (the next plan lays the
-        # next line), so the line is laid contiguous and not spread over the whole horizon
+        # until the next line can take over: the layer's next pass (its loop), the lead of a drop
+        # and one detection radius of overlap. The line must hold the target that long, so it is
+        # laid contiguous and not spread over the whole horizon
         t0 = min(max(float(np.min(earliest)), 0.0), float(steps[-1]))
-        evaluate = (steps >= t0) & (steps <= t0 + max((limit + 1) * r_max / speed, STEP_S))
+        hold = layer.cycle_s() + float(config.drop_lead_s) + r_max / speed
+        evaluate = (steps >= t0) & (steps <= t0 + max(hold, STEP_S))
     parts = [_measurement_info(grid[part], pos, vel, steps, earliest[part], sensor, r_max)
              for part in np.array_split(np.arange(len(grid)), math.ceil(len(grid) / CHUNK))]
     cand_meas = np.concatenate([p[0] for p in parts], axis=1)
@@ -716,8 +806,11 @@ def plan_optimal_deployment(
         prefix = None
         line_orders = None
         if lines:  # along the line, either way (no loop between its observers)
-            ahead = sorted(range(len(heads)), key=lambda k: ux * grid[heads[k], 0] + uy * grid[heads[k], 1])
-            line_orders = [ahead, ahead[::-1]]
+            d = lane_dir[int(lane[chosen[0]])]
+            dx, dy = math.sin(d), math.cos(d)
+            ahead = sorted(range(len(heads)), key=lambda k: dx * grid[heads[k], 0] + dy * grid[heads[k], 1])
+            forward = config.line_forward_only and abs(d - heading) < 1e-9 or int(lane[chosen[0]]) == continuing_lane
+            line_orders = [ahead] if forward else [ahead, ahead[::-1]]
         if queued:
             offsets = [local_offset_m(start, p) for p, _ in layer.queue]
             prefix = ([o[0] for o in offsets], [o[1] for o in offsets], [s for _, s in layer.queue])
@@ -770,6 +863,7 @@ def availability_from_feed(feed) -> LayerAvailability | None:
         heading_deg=feed.layer_ready_heading_deg,
         straight_before_s=feed.layer_straight_before_s,
         straight_after_s=feed.layer_straight_after_s,
+        capture_m=feed.layer_capture_m,
         now_position=feed.layer_position,
         now_heading_deg=feed.layer_heading_deg,
         queue=[(p, None if t is None else float(t - feed.tick))

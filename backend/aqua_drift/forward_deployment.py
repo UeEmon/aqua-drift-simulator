@@ -27,6 +27,20 @@ MIN_DEPTH_FT = 50.0
 MAX_DEPTH_FT = 1500.0
 
 
+def is_coasting(status: str, config: ForwardDeploymentConfig) -> bool:
+    """Coasting (no detection for a few seconds, not yet LOST) and planned for: plan on the coasted
+    estimate (for an AMBIGUOUS one: its dominant mode, which the estimate gives), assuming the target
+    may have turned -- waiting for LOST left the layer idle while the target got away."""
+    return config.coast_planning and status.startswith("COASTING_")
+
+
+def is_maneuver_now(estimate: TrackEstimate, config: ForwardDeploymentConfig) -> bool:
+    """Plan for a maneuver starting now: coasting, or a maneuver detected within maneuver_recent_s."""
+    tick = (estimate.metadata or {}).get("maneuver_detected_tick")
+    return is_coasting(estimate.observability_status, config) or (
+        tick is not None and estimate.tick - tick <= config.maneuver_recent_s)
+
+
 def covered_count(estimate: TrackEstimate, positions: list[Position], config: ForwardDeploymentConfig,
                   r_max_m: float) -> int:
     """How many of positions lie within coverage_fraction x R_max (horizontal) of the target's
@@ -77,14 +91,20 @@ def plan_forward_deployment_scheduled(
         return [], "disabled", None
     if estimate is None or estimate.current_position is None or estimate.uncertainty is None:
         return [], "no estimate", None
-    if not estimate.observability_status.startswith("TRACKING"):
-        return [], f"estimate not usable ({estimate.observability_status})", None
+    status = estimate.observability_status
+    coasting = is_coasting(status, config)
+    if not (status.startswith("TRACKING") or coasting):
+        return [], f"estimate not usable ({status})", None
     r_max = max_slant_range_yd * YD_TO_M
     if estimate.uncertainty.horizontal_major_yd * YD_TO_M > config.max_sigma_fraction * r_max:
         return [], "estimate too uncertain", None
     maneuver_tick = (estimate.metadata or {}).get("maneuver_detected_tick")
+    maneuver_now = is_maneuver_now(estimate, config)
     replan = maneuver_tick is not None and (last_deploy_tick is None or maneuver_tick > last_deploy_tick)
-    if not force and not replan and last_deploy_tick is not None and tick - last_deploy_tick < config.cooldown_s:
+    # while coasting the contact gets away by the minute: no cooldown (the layer's queue still limits
+    # how far ahead it is planned)
+    if (not force and not replan and not coasting and last_deploy_tick is not None
+            and tick - last_deploy_tick < config.cooldown_s):
         return [], "cooldown", None
     speed_kt = estimate.through_water_speed_kt or 0.0
     if speed_kt < config.min_speed_kt or estimate.hdg_deg is None:
@@ -95,14 +115,21 @@ def plan_forward_deployment_scheduled(
     origin = estimate.current_position
     covered = covered_count(estimate, [*observers, *pending], config, r_max)
     if config.strategy == "optimal":
-        if not force and estimate.uncertainty.horizontal_major_yd * YD_TO_M > config.optimal_max_sigma_fraction * r_max:
+        if (not force and layer is not None and config.line_laying and r_max < layer.turn_radius_m()
+                and layer.ready_s > config.line_queue_ahead_s):
+            # line laying: one pass ahead only; the next line on the latest estimate
+            return [], f"layer busy for {layer.ready_s:.0f} s (line laying plans one pass ahead)", None
+        if (not force and not coasting
+                and estimate.uncertainty.horizontal_major_yd * YD_TO_M > config.optimal_max_sigma_fraction * r_max):
             return [], "estimate not yet converged enough for optimal placement", None
         positions, reason, report = plan_optimal_deployment(
             estimate, observers, pending, config, max_slant_range_yd, free_slots,
             source_frequency_hz, sound_speed_mps, frequency_sigma_hz,
             coverage_short=covered < config.min_coverage, force=force, layer=layer,
-            sensor=sensor, max_depth_ft=max_depth_ft,
+            sensor=sensor, max_depth_ft=max_depth_ft, maneuver_now=maneuver_now,
         )
+        if positions and coasting:
+            reason = f"{reason}; coasting (no detection), planned for a maneuver"
         if positions and replan and not force:
             reason = f"{reason}; replanned after a maneuver at tick {maneuver_tick}"
         if not positions and covered >= config.min_coverage:

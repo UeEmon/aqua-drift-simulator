@@ -280,8 +280,11 @@ def test_layer_flies_the_shortest_path_and_drops_when_it_gets_there() -> None:
     assert None not in [e for e, *_ in runs]
     assert all(steady for *_, steady in runs)  # no detour back to the orbit, no hold, one speed
     assert sum(abs(a) <= 5 for _, _, a, _ in runs) >= 0.8 * len(runs)  # dropped on the arrival
+    # the planned time is mostly the shortest arrival itself (the planner's estimate of it, LayerAvailability
+    # .earliest_s, is the guidance path), so only some runs leave slack to wait on the orbit; those are on time
+    assert sum(abs(e) <= 5 for e, *_ in runs) >= 0.8 * len(runs)
     errors = [e for e, feasible, _, _ in runs if feasible]
-    assert len(errors) >= 45
+    assert len(errors) >= 15
     assert sum(abs(e) <= 5 for e in errors) >= 0.4 * len(errors)
 
 
@@ -395,10 +398,11 @@ def test_planner_schedules_drops_before_detection_and_after_the_layer_can_be_the
     for tick, first in zip(planned, earliest, strict=True):
         assert tick >= 100 + first - 1  # not before the layer can be there
         assert tick <= 100 + config.horizon_s
-    # without scheduling the drops are as early as the layer allows
+    # without scheduling the drops are as early as the layer allows (the two plans may pick slightly
+    # different points: a second of rounding)
     asap = ForwardDeploymentConfig(schedule_drops=False)
     _, _, early = plan_forward_deployment_scheduled(100, estimate, behind, [], asap, 6000, None, layer=layer)
-    assert min(early) <= min(planned)
+    assert min(early) <= min(planned) + 1
 
 
 def test_turn_takes_the_shorter_side_either_way() -> None:

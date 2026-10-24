@@ -40,6 +40,9 @@ from aqua_drift.estimation.move import (
     window_loglik,
 )
 
+RESPREAD_TURN = math.pi / 2  # rad either way (see DopplerParticleFilter._respread_velocity)
+RESPREAD_SPEED = (0.7, 1.3)
+
 
 @dataclass
 class ObservationRow:
@@ -75,6 +78,8 @@ class DopplerParticleFilter:
         maneuver_vertical: float = 0.15,
         move_min_window_s: int = 60,
         move_mismatch_chi2: float = 4.0,
+        move_maneuver_cut_fraction: float = 0.5,
+        maneuver_respread_fraction: float = 0.0,
         use_bearing: bool = True,
         bearing_sigma_rad: float = math.radians(15.0),
         propagation_delay: bool = False,
@@ -94,6 +99,8 @@ class DopplerParticleFilter:
         self.maneuver_vertical = maneuver_vertical
         self.move_min_window_s = move_min_window_s
         self.move_mismatch_chi2 = move_mismatch_chi2
+        self.move_maneuver_cut_fraction = move_maneuver_cut_fraction
+        self.maneuver_respread_fraction = maneuver_respread_fraction
         self.use_bearing = use_bearing
         self.bearing_sigma = bearing_sigma_rad
         self.delay = propagation_delay
@@ -580,8 +587,11 @@ class DopplerParticleFilter:
         doppler_rows = float(np.sum(win.w_dop > 0) * max(win.w_dop.max(), 1.0))
         chi2 = 2.0 * modes[0][2] / max(doppler_rows, 1.0) if modes else 0.0
         if chi2 > self.move_mismatch_chi2:
-            # maneuver inside the window: data older than half the window are not used
-            self.maneuver_cut_tick = int(now - max(self.move_min_window_s, 0.5 * self.move_window_eff))
+            # maneuver inside the window: data older than move_maneuver_cut_fraction of the window are
+            # not used (0: only the last move_min_window_s; halving took ~4 detections to drop the data
+            # from before a turn, and the course lagged it by 1-2 min)
+            self.maneuver_cut_tick = int(now - max(self.move_min_window_s,
+                                                   self.move_maneuver_cut_fraction * self.move_window_eff))
             self.maneuver_detected_tick = int(now)
         accepted_ind = 0.0
         if modes:
@@ -618,6 +628,8 @@ class DopplerParticleFilter:
         accept = np.log(self.rng.uniform(size=self.n)) < delta
         self.x[accept] = proposal[accept]
         self.ground_v = self.x[:, 3:6] + current.velocity(self.x[:, 0:3])
+        if chi2 > self.move_mismatch_chi2 and self.maneuver_respread_fraction > 0:
+            self._respread_velocity(self.maneuver_respread_fraction)
         self.move_info = {
             "move_modes": float(len(modes)),
             "move_accept_independent": accepted_ind,
@@ -626,6 +638,24 @@ class DopplerParticleFilter:
             "move_fit_chi2": float(chi2),
         }
         return self.move_info
+
+    def _respread_velocity(self, fraction: float) -> None:
+        """After a detected maneuver: a share of the particles take another course (up to
+        RESPREAD_TURN either way) and speed (x RESPREAD_SPEED), so the cloud is no longer sure of the
+        old course and the next detections pick the new one. The constant-velocity fit of the move
+        window lags a turn and keeps the cloud tight around the course held before it."""
+        pick = self.rng.uniform(size=self.n) < fraction
+        k = int(pick.sum())
+        if not k:
+            return
+        turn = self.rng.uniform(-RESPREAD_TURN, RESPREAD_TURN, k)
+        factor = self.rng.uniform(*RESPREAD_SPEED, k)
+        ve, vn = self.x[pick, 3].copy(), self.x[pick, 4].copy()
+        self.x[pick, 3] = factor * (ve * np.cos(turn) + vn * np.sin(turn))
+        self.x[pick, 4] = factor * (-ve * np.sin(turn) + vn * np.cos(turn))
+        speed = np.hypot(self.x[:, 3], self.x[:, 4])
+        too_fast = speed > self.max_speed
+        self.x[too_fast, 3:5] *= (self.max_speed / speed[too_fast])[:, None]
 
     # ------------------------------------------------------------------ summaries
     def mean_state(self) -> np.ndarray:

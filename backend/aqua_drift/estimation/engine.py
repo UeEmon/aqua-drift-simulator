@@ -39,8 +39,10 @@ from aqua_drift.models import (
     Uncertainty,
     Velocity,
 )
+from aqua_drift.search_deployment import cloud_from_particles
 
 MAX_TRACK_POINTS = 2000
+SEARCH_CLOUD_POINTS = 300  # particles handed to the re-detection planner while LOST
 
 
 def _circular_mean_std(angles_rad: np.ndarray, weights: np.ndarray) -> tuple[float, float]:
@@ -154,6 +156,8 @@ class TrackingEngine:
             maneuver_vertical=e.maneuver_vertical_sigma_mps,
             move_min_window_s=e.move_min_window_s,
             move_mismatch_chi2=e.move_mismatch_chi2,
+            move_maneuver_cut_fraction=e.move_maneuver_cut_fraction,
+            maneuver_respread_fraction=e.maneuver_respread_fraction,
             use_bearing=e.use_bearing,
             bearing_sigma_rad=math.radians(e.bearing_sigma_deg),
             propagation_delay=self.settings.propagation_delay,
@@ -185,6 +189,8 @@ class TrackingEngine:
         pf.maneuver_vertical = e.maneuver_vertical_sigma_mps
         pf.move_min_window_s = e.move_min_window_s
         pf.move_mismatch_chi2 = e.move_mismatch_chi2
+        pf.move_maneuver_cut_fraction = e.move_maneuver_cut_fraction
+        pf.maneuver_respread_fraction = e.maneuver_respread_fraction
         pf.use_bearing = e.use_bearing
         pf.bearing_sigma = math.radians(e.bearing_sigma_deg)
         pf.delay = settings.propagation_delay
@@ -677,6 +683,9 @@ class TrackingEngine:
             position_mean = (w[members] @ x[members]) / max(w[members].sum(), 1e-12)
             position_basis = f"dominant mode ({masses[dominant] * 100:.0f}% of mass)"
         base_meta["position_basis"] = position_basis
+        if status == "LOST":  # the re-detection search covers the cloud itself (search_deployment)
+            base_meta["search_cloud"] = cloud_from_particles(
+                x, w, position_mean, SEARCH_CLOUD_POINTS, np.random.default_rng(self.tick))
         geo = self.frame.to_geo(*position_mean[0:3])
         self._update_smoothed()
         common = {

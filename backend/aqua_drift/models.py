@@ -293,6 +293,25 @@ class ForwardDeploymentConfig(BaseModel):
     # detection range shorter than the layer's turn radius: the observers of one plan on one line
     # along the track, laid in one straight pass (aqua_drift.optimal_deployment)
     line_laying: bool = True
+    # line laying: one plan is one straight pass of the layer and must hold the target until the
+    # next pass (the layer's loop, about 4-5 min): up to line_max_per_pass observers on the line,
+    # and the next line is planned only when the layer is free within line_queue_ahead_s, on the
+    # latest estimate (lines queued far ahead were laid late, bunched and on a track the target had
+    # left: deployment_diagnosis, 2026-10-24)
+    line_max_per_pass: int = Field(default=8, ge=1, le=16)
+    # just after a maneuver (detected within maneuver_recent_s) and while the contact is coasting
+    # (COASTING_*: no detection for a few seconds, not yet LOST) the plan assumes the target may be
+    # turning now: the maneuver hypotheses start at once with at least maneuver_now_weight, and line
+    # laying may lay a line across the track. coast_planning: plan while coasting at all (the
+    # estimate may then be up to max_sigma_fraction x R_max uncertain)
+    coast_planning: bool = True
+    # line laying: lay a line along the track in the target's direction only, so the layer ends it
+    # heading along the track and can continue it with the next line (one laid the other way ends
+    # heading back and needs a loop, ~4-8 min, before the next line)
+    line_forward_only: bool = False
+    maneuver_recent_s: int = Field(default=300, ge=0, le=3600)
+    maneuver_now_weight: float = Field(default=0.6, ge=0, le=0.9)
+    line_queue_ahead_s: int = Field(default=60, ge=0, le=1800)
     drop_lead_s: int = Field(default=60, ge=0, le=1800)  # in the water this long before detection starts
     # maneuver-robust planning (optimal strategy): weighted course / speed / depth change
     # hypotheses, process noise in the information recursion, risk (CVaR) and coverage terms
@@ -322,6 +341,22 @@ class ForwardDeploymentConfig(BaseModel):
     # motion hypotheses that bring the target within R_max (+2 sigma) of it after its drop weigh less
     # than this (the proposal is withdrawn again above 2.5 x this)
     cancel_suggest_weight: float = Field(default=0.1, ge=0, le=1)
+    # re-detection (再探知) after a lost contact (aqua_drift.search_deployment): while the estimate
+    # is LOST the open automatic drops (planned on a track that no longer holds) are replaced and
+    # search drops are laid where detection discs of search_radius_fraction x R_max cover the
+    # largest share of the coasted particle cloud, until search_pd of it is covered or
+    # search_max_drops are planned; again at most every search_interval_s and never while the
+    # previous search drops are still open
+    search_enabled: bool = True
+    search_pd: float = Field(default=0.7, gt=0, le=1)
+    search_max_drops: int = Field(default=4, ge=1, le=8)
+    search_radius_fraction: float = Field(default=0.8, gt=0, le=1)
+    search_interval_s: int = Field(default=60, ge=0, le=3600)
+    search_transit_s: int = Field(default=120, ge=0, le=3600)  # flight to the drop, added to the layer's free time
+    search_fall_s: int = Field(default=40, ge=0, le=600)  # the observer's fall to the sea surface
+    # share of the cloud's samples that are maneuver hypotheses (course / speed change while the
+    # contact was gone): the coasted cloud keeps the old course and misses a target that turned
+    search_maneuver_fraction: float = Field(default=0.4, ge=0, le=1)
 
 
 class ObserverDeploymentConfig(BaseModel):
@@ -368,6 +403,12 @@ class EstimatorConfig(BaseModel):
     coast_maneuver_fraction: float = Field(default=0.1, ge=0, le=0.9)
     move_min_window_s: int = Field(default=60, ge=20, le=3600)
     move_mismatch_chi2: float = Field(default=4.0, gt=1)
+    # a detected maneuver drops the data older than this share of the move window (at least
+    # move_min_window_s are kept); 0.5 halves it at each detection
+    move_maneuver_cut_fraction: float = Field(default=0.5, ge=0, le=1)
+    # a detected maneuver gives this share of the particles another course (up to +-90 deg) and
+    # speed (x0.7..1.3): the cloud otherwise stays sure of the old course while the target turns
+    maneuver_respread_fraction: float = Field(default=0.0, ge=0, le=1)
     use_bearing: bool = True
     bearing_sigma_deg: float = Field(default=15.0, gt=0, le=90)
     range_gate_softness_yd: float = Field(default=15.0, gt=0)
@@ -643,6 +684,7 @@ class DeploymentRequest(BaseModel):
     # of them is no longer revisable) and the revision of the new drops
     replaces: list[int] = Field(default_factory=list)
     revision: int = 0
+    source: str = "forward"  # forward | search (re-detection after a lost contact)
 
 
 class DeploymentFeed(BaseModel):
@@ -675,6 +717,7 @@ class DeploymentFeed(BaseModel):
     layer_max_per_release: int = 1  # observers one drop can release at once (LayerConfig.max_per_release)
     layer_straight_before_s: float = 0.0  # LayerConfig.straight_before_s
     layer_straight_after_s: float = 0.0  # LayerConfig.straight_after_s
+    layer_capture_m: float = 150.0 * 0.9144  # LayerConfig.capture_radius_yd
     # the observer's fall from the release altitude to the sea surface (drop time = in the water
     # less the fall): the layer's altitude when free (ready tick) and LayerConfig's altitudes
     layer_fall_terminal_mps: float | None = None  # WindConfig.terminal_velocity_fps (None: no fall)
@@ -709,7 +752,7 @@ class DropTask(BaseModel):
 
     task_id: int
     created_tick: int
-    source: str  # forward (automatic plan) | manual (operator placement) | operator (deploy now)
+    source: str  # forward (automatic plan) | search (re-detection) | manual (operator placement) | operator (deploy now)
     reason: str = ""
     position: Position
     status: str = "PROPOSED"

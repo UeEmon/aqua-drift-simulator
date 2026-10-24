@@ -41,7 +41,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from aqua_drift import layer as layerlib
-from aqua_drift.forward_deployment import YD_TO_M, covered_count
+from aqua_drift.forward_deployment import YD_TO_M, covered_count, is_coasting, is_maneuver_now
 from aqua_drift.models import (
     DropTask,
     ForwardDeploymentConfig,
@@ -61,6 +61,7 @@ from aqua_drift.optimal_deployment import (
     plan_optimal_deployment,
 )
 from aqua_drift.physics import local_offset_m
+from aqua_drift.search_deployment import plan_search_drops
 
 KNOT_TO_MPS = 0.5144444444444445
 FLYING_MODES = ("TRANSIT",)
@@ -74,6 +75,7 @@ class ReplanDecision:
     bases: list[PlanBasis]
     revision: int
     reason: str
+    source: str = "forward"  # "search": re-detection drops (plan_search_replacement)
 
 
 def flying_task_id(state: LayerState | None) -> int | None:
@@ -157,6 +159,7 @@ def layer_availability(replan: ReplanFeed, kept: list[DropTask], tick: int) -> L
         max_bank_deg=replan.layer.max_bank_deg, heading_deg=heading,
         max_per_release=replan.layer.max_per_release,
         straight_before_s=replan.layer.straight_before_s, straight_after_s=replan.layer.straight_after_s,
+        capture_m=replan.layer.capture_radius_yd * YD_TO_M,
         now_position=state.position if state is not None else None,
         now_heading_deg=state.heading_deg if state is not None else None,
         queue=[(t.position, None if t.planned_tick is None else float(t.planned_tick - tick)) for t in queue],
@@ -171,11 +174,13 @@ def layer_availability(replan: ReplanFeed, kept: list[DropTask], tick: int) -> L
 def plan_cost_yd(estimate: TrackEstimate, observers: list[Position], pending: list[Position],
                  config: ForwardDeploymentConfig, max_slant_range_yd: float, sensor: SensorModel,
                  max_depth_ft: float) -> float | None:
-    """optimal_deployment's cost (predicted error, YD) of a field without adding to it."""
+    """optimal_deployment's cost (predicted error, YD) of a field without adding to it (with the
+    maneuver hypotheses the forward planner uses for this estimate)."""
     _, _, report = plan_optimal_deployment(
         estimate, observers, pending, config, max_slant_range_yd, 1,
         sensor.source_frequency_hz, sensor.sound_speed_mps, sensor.frequency_sigma_hz,
         sensor=sensor, max_depth_ft=max_depth_ft, cost_only=True,
+        maneuver_now=is_maneuver_now(estimate, config),
     )
     return None if report is None else report.cost_before_yd
 
@@ -207,10 +212,13 @@ def plan_replacement(
         return None, "no revisable drop"
     if estimate is None or estimate.current_position is None or estimate.uncertainty is None:
         return None, "no estimate"
-    if not estimate.observability_status.startswith("TRACKING") or estimate.hdg_deg is None:
-        return None, f"estimate not usable ({estimate.observability_status})"
+    status = estimate.observability_status
+    coasting = is_coasting(status, config)  # the drops planned before the contact was lost
+    if not (status.startswith("TRACKING") or coasting) or estimate.hdg_deg is None:
+        return None, f"estimate not usable ({status})"
     r_max = max_slant_range_yd * YD_TO_M
-    if estimate.uncertainty.horizontal_major_yd * YD_TO_M > config.optimal_max_sigma_fraction * r_max:
+    limit = config.max_sigma_fraction if coasting else config.optimal_max_sigma_fraction
+    if estimate.uncertainty.horizontal_major_yd * YD_TO_M > limit * r_max:
         return None, "estimate not converged enough to replan"
     if (estimate.through_water_speed_kt or 0.0) < config.min_speed_kt:
         return None, "target (nearly) stationary in the water"
@@ -235,7 +243,7 @@ def plan_replacement(
         estimate, observers, kept_pending, config, max_slant_range_yd, free_slots + len(revisable),
         sensor.source_frequency_hz, sensor.sound_speed_mps, sensor.frequency_sigma_hz,
         coverage_short=covered < config.min_coverage, layer=layer_availability(replan, kept, tick),
-        sensor=sensor, max_depth_ft=max_depth_ft,
+        sensor=sensor, max_depth_ft=max_depth_ft, maneuver_now=is_maneuver_now(estimate, config),
     )
     if not positions:
         return None, f"{why}; kept the open drops (a fresh plan adds none: {plan_reason})"
@@ -314,3 +322,47 @@ def cancel_suggestions(tick: int, estimate: TrackEstimate | None, replan: Replan
         elif task.cancel_suggestion:
             out[task.task_id] = None
     return out
+
+
+def plan_search_replacement(
+    tick: int,
+    estimate: TrackEstimate | None,
+    replan: ReplanFeed | None,
+    config: ForwardDeploymentConfig,
+    max_slant_range_yd: float,
+    free_slots: int,
+    ready_in_s: float,
+    last_deploy_tick: int | None,
+) -> tuple[ReplanDecision | None, str]:
+    """After a lost contact (estimate LOST): replace the revisable open forward drops -- planned
+    on a track that no longer holds -- and lay search drops over the coasted cloud (see
+    aqua_drift.search_deployment). The kept drops (flown to, due soon, ...) stay: the head of the
+    queue is always laid. At most every search_interval_s, and not while earlier search drops are
+    still open (the cloud they were planned on is the one being searched)."""
+    if not (config.enabled and config.search_enabled):
+        return None, "search disabled"
+    if estimate is None or estimate.observability_status != "LOST":
+        return None, "contact not lost"
+    open_tasks = [] if replan is None else [t for t in replan.tasks if t.status in ("PROPOSED", "APPROVED")]
+    if any(t.source == "search" for t in open_tasks):
+        return None, "search drops still open"
+    if last_deploy_tick is not None and tick - last_deploy_tick < config.search_interval_s:
+        return None, "search interval"
+    replaced: list[int] = []
+    if replan is not None:
+        flying = flying_task_id(replan.layer_state)
+        auto = replan.layer.approval == "auto"
+        replaced = [t.task_id for t in open_tasks if is_revisable(t, tick, config, flying, auto)]
+    positions, reason = plan_search_drops(
+        estimate, config, max_slant_range_yd, free_slots + len(replaced), ready_in_s)
+    if not positions:
+        return None, reason
+    if replaced:
+        reason = f"{reason}; replaces drops {replaced}"
+    # after the drops that are kept: a search drop without a time would be flown first and could keep
+    # them from ever being laid (each new search comes first again)
+    kept = [due_tick(t, tick) for t in open_tasks if t.task_id not in replaced]
+    kept = [k for k in kept if k is not None]
+    planned = [math.ceil(max(kept)) + 1] * len(positions) if kept else None
+    return ReplanDecision(replaces=replaced, positions=positions, planned_ticks=planned, bases=[],
+                          revision=0, reason=reason, source="search"), reason

@@ -43,7 +43,7 @@ from aqua_drift.physics import (
     initial_target,
     local_offset_m,
 )
-from aqua_drift.replanning import basis_for, plan_replacement
+from aqua_drift.replanning import basis_for, plan_replacement, plan_search_replacement
 
 YD_TO_M = 0.9144
 
@@ -150,6 +150,7 @@ class ScenarioRun:
             ready_s=float(ready - self.tick), position=where, speed_kt=layer.speed_kt,
             max_bank_deg=layer.max_bank_deg, heading_deg=heading,
             straight_before_s=layer.straight_before_s, straight_after_s=layer.straight_after_s,
+            capture_m=layer.capture_radius_yd * 0.9144,
             now_position=state.position if state is not None else None,
             now_heading_deg=state.heading_deg if state is not None else None,
             queue=[(t.position, None if t.planned_tick is None else float(t.planned_tick - self.tick)) for t in queue],
@@ -178,9 +179,22 @@ class ScenarioRun:
         )
         open_tasks = [t for t in self.tasks if t.status == "APPROVED"]
         free_slots = max(self.config.observer_limit - len(self.observers) - len(open_tasks), 0)
-        if self.config.layer.enabled:  # first: do the open drops still match the estimate?
+        replan = None
+        if self.config.layer.enabled:
             replan = ReplanFeed(tasks=open_tasks, layer_state=self.layer_state, layer=self.config.layer,
                                 datum=self.config.target.initial_position, last_replan_tick=self.last_replan_tick)
+        availability = self._layer_availability()
+        search, _ = plan_search_replacement(  # lost contact: search the coasted cloud
+            self.tick, estimate, replan, self.config.forward, self.config.max_slant_range_yd, free_slots,
+            availability.ready_s if availability is not None else 0.0, self.last_deploy_tick,
+        )
+        if search is not None:
+            for task in open_tasks:
+                if task.task_id in search.replaces:
+                    task.status = "REPLACED"
+            self._queue(search.positions, search.planned_ticks, [], 0, source="search", reason=search.reason)
+            return
+        if replan is not None:  # first: do the open drops still match the estimate?
             decision, _ = plan_replacement(
                 self.tick, estimate, [o.position for o in self.observers], [], replan, self.config.forward,
                 self.config.max_slant_range_yd, free_slots, sensor, self.config.estimator.max_target_depth_ft,
@@ -206,7 +220,7 @@ class ScenarioRun:
             source_frequency_hz=sensor.source_frequency_hz,
             sound_speed_mps=sensor.sound_speed_mps,
             frequency_sigma_hz=sensor.frequency_sigma_hz,
-            layer=self._layer_availability(),
+            layer=availability,
             sensor=sensor,
             max_depth_ft=self.config.estimator.max_target_depth_ft,
         )
@@ -214,13 +228,14 @@ class ScenarioRun:
             self._queue(positions, planned, [basis_for(estimate, p) for p in positions], 0)
 
     def _queue(self, positions: list[Position], planned: list[int] | None, bases: list[PlanBasis],
-               revision: int) -> None:
+               revision: int, source: str = "forward", reason: str = "") -> None:
         for index, position in enumerate(positions):
             if self.config.layer.enabled:  # laid when the layer gets there (automatic approval)
                 self.tasks.append(DropTask(
-                    task_id=len(self.tasks) + 1, created_tick=self.tick, source="forward",
+                    task_id=len(self.tasks) + 1, created_tick=self.tick, source=source, reason=reason,
                     position=position, status="APPROVED", approved_tick=self.tick,
-                    planned_tick=planned[index] if planned else None, basis=bases[index], revision=revision,
+                    planned_tick=planned[index] if planned else None,
+                    basis=bases[index] if bases else None, revision=revision,
                 ))
             else:
                 self._add_observer(position)

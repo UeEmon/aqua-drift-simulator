@@ -10,7 +10,12 @@ import httpx
 from aqua_drift.forward_deployment import plan_forward_deployment_scheduled
 from aqua_drift.models import CancelSuggestions, DeploymentFeed, DeploymentRequest
 from aqua_drift.optimal_deployment import availability_from_feed, sensor_from_feed
-from aqua_drift.replanning import basis_for, cancel_suggestions, plan_replacement
+from aqua_drift.replanning import (
+    basis_for,
+    cancel_suggestions,
+    plan_replacement,
+    plan_search_replacement,
+)
 from aqua_drift.services.common import API_URL, post, wait_for_api
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s deployer %(message)s")
@@ -27,6 +32,24 @@ async def run() -> None:
             response.raise_for_status()
             feed = DeploymentFeed.model_validate(response.json())
             estimate = next((e for e in feed.estimates if e.mode.value == "ONLINE"), None)
+            search, _ = plan_search_replacement(  # lost contact: search the coasted cloud
+                feed.tick, estimate, feed.replan, feed.config, feed.max_slant_range_yd, feed.free_slots,
+                max(feed.layer_ready_tick - feed.tick, 0) if feed.layer_ready_tick is not None else 0.0,
+                feed.last_deploy_tick,
+            )
+            if search is not None:
+                request = DeploymentRequest(
+                    tick=feed.tick, positions=search.positions, reason=search.reason,
+                    planned_ticks=search.planned_ticks, replaces=search.replaces, source=search.source,
+                )
+                result = await post(client, "/internal/deploy", request.model_dump(mode="json"), feed.generation)
+                if result.status_code == 409:  # a drop was laid or flown to meanwhile
+                    log.info("tick=%s search refused (%s); next cycle", feed.tick, result.text)
+                else:
+                    result.raise_for_status()
+                    log.info("tick=%s %s", feed.tick, search.reason)
+                await asyncio.sleep(CHECK_INTERVAL_S)
+                continue
             if feed.replan is not None:
                 # first: do the open drops still match the estimate? (replaced all or nothing)
                 decision, why = plan_replacement(
