@@ -153,6 +153,8 @@ class TrackingEngine:
             maneuver_vertical=e.maneuver_vertical_sigma_mps,
             move_min_window_s=e.move_min_window_s,
             move_mismatch_chi2=e.move_mismatch_chi2,
+            move_maneuver_cut_fraction=e.move_maneuver_cut_fraction,
+            maneuver_respread_fraction=e.maneuver_respread_fraction,
             use_bearing=e.use_bearing,
             bearing_sigma_rad=math.radians(e.bearing_sigma_deg),
             propagation_delay=self.settings.propagation_delay,
@@ -184,6 +186,8 @@ class TrackingEngine:
         pf.maneuver_vertical = e.maneuver_vertical_sigma_mps
         pf.move_min_window_s = e.move_min_window_s
         pf.move_mismatch_chi2 = e.move_mismatch_chi2
+        pf.move_maneuver_cut_fraction = e.move_maneuver_cut_fraction
+        pf.maneuver_respread_fraction = e.maneuver_respread_fraction
         pf.use_bearing = e.use_bearing
         pf.bearing_sigma = math.radians(e.bearing_sigma_deg)
         pf.delay = settings.propagation_delay

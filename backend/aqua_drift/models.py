@@ -383,6 +383,12 @@ class EstimatorConfig(BaseModel):
     coast_maneuver_fraction: float = Field(default=0.1, ge=0, le=0.9)
     move_min_window_s: int = Field(default=60, ge=20, le=3600)
     move_mismatch_chi2: float = Field(default=4.0, gt=1)
+    # a detected maneuver drops the data older than this share of the move window (at least
+    # move_min_window_s are kept); 0.5 halves it at each detection
+    move_maneuver_cut_fraction: float = Field(default=0.5, ge=0, le=1)
+    # a detected maneuver gives this share of the particles another course (up to +-90 deg) and
+    # speed (x0.7..1.3): the cloud otherwise stays sure of the old course while the target turns
+    maneuver_respread_fraction: float = Field(default=0.0, ge=0, le=1)
     use_bearing: bool = True
     bearing_sigma_deg: float = Field(default=15.0, gt=0, le=90)
     range_gate_softness_yd: float = Field(default=15.0, gt=0)

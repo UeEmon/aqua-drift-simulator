@@ -28,7 +28,7 @@ YD_TO_M = 0.9144
 
 
 def run_one(scenario: str, seed: int, range_yd: float, seconds: int, particles: int,
-            forward: dict | None = None) -> dict:
+            forward: dict | None = None, estimator: dict | None = None) -> dict:
     from aqua_drift.models import ScenarioConfig
     from aqua_drift.physics import local_offset_m
     from aqua_drift.scenario import ScenarioRun
@@ -44,6 +44,8 @@ def run_one(scenario: str, seed: int, range_yd: float, seconds: int, particles: 
     config.layer.random_seed = 31 + 101 * seed
     for key, value in (forward or {}).items():
         setattr(config.forward, key, value)
+    for key, value in (estimator or {}).items():
+        setattr(config.estimator, key, value)
     run = ScenarioRun(config, 4, forward=True)
     events = {tick: rest for tick, *rest in SCENARIOS[scenario]}
 
@@ -155,9 +157,11 @@ def main() -> None:
     parser.add_argument("--particles", type=int, default=1000)
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--set", action="append", default=[], help="forward setting key=json value")
+    parser.add_argument("--est", action="append", default=[], help="estimator setting key=json value")
     parser.add_argument("--out", default=None, help="results as JSON lines (resumes from it)")
     args = parser.parse_args()
     forward = {k: json.loads(v) for k, v in (item.split("=", 1) for item in args.set)}
+    estimator = {k: json.loads(v) for k, v in (item.split("=", 1) for item in args.est)}
     jobs = [(sc, seed) for sc in args.scenarios.split(",") for seed in range(args.seeds)]
     results: list[dict] = []
     if args.out and os.path.exists(args.out):
@@ -174,13 +178,13 @@ def main() -> None:
     todo = [j for j in jobs if j not in done]
     if args.jobs > 1 and todo:
         with ProcessPoolExecutor(args.jobs) as pool:
-            futures = [pool.submit(run_one, sc, seed, args.range, args.seconds, args.particles, forward)
-                       for sc, seed in todo]
+            futures = [pool.submit(run_one, sc, seed, args.range, args.seconds, args.particles, forward,
+                                   estimator) for sc, seed in todo]
             for future in as_completed(futures):
                 keep(future.result())
     else:
         for sc, seed in todo:
-            keep(run_one(sc, seed, args.range, args.seconds, args.particles, forward))
+            keep(run_one(sc, seed, args.range, args.seconds, args.particles, forward, estimator))
     for result in sorted(results, key=lambda r: (r["scenario"], r["seed"])):
         print(json.dumps(summarize(result), ensure_ascii=False))
 

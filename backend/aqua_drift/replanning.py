@@ -41,7 +41,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from aqua_drift import layer as layerlib
-from aqua_drift.forward_deployment import YD_TO_M, covered_count
+from aqua_drift.forward_deployment import YD_TO_M, covered_count, is_coasting, is_maneuver_now
 from aqua_drift.models import (
     DropTask,
     ForwardDeploymentConfig,
@@ -173,11 +173,13 @@ def layer_availability(replan: ReplanFeed, kept: list[DropTask], tick: int) -> L
 def plan_cost_yd(estimate: TrackEstimate, observers: list[Position], pending: list[Position],
                  config: ForwardDeploymentConfig, max_slant_range_yd: float, sensor: SensorModel,
                  max_depth_ft: float) -> float | None:
-    """optimal_deployment's cost (predicted error, YD) of a field without adding to it."""
+    """optimal_deployment's cost (predicted error, YD) of a field without adding to it (with the
+    maneuver hypotheses the forward planner uses for this estimate)."""
     _, _, report = plan_optimal_deployment(
         estimate, observers, pending, config, max_slant_range_yd, 1,
         sensor.source_frequency_hz, sensor.sound_speed_mps, sensor.frequency_sigma_hz,
         sensor=sensor, max_depth_ft=max_depth_ft, cost_only=True,
+        maneuver_now=is_maneuver_now(estimate, config),
     )
     return None if report is None else report.cost_before_yd
 
@@ -209,10 +211,13 @@ def plan_replacement(
         return None, "no revisable drop"
     if estimate is None or estimate.current_position is None or estimate.uncertainty is None:
         return None, "no estimate"
-    if not estimate.observability_status.startswith("TRACKING") or estimate.hdg_deg is None:
-        return None, f"estimate not usable ({estimate.observability_status})"
+    status = estimate.observability_status
+    coasting = is_coasting(status, config)  # the drops planned before the contact was lost
+    if not (status.startswith("TRACKING") or coasting) or estimate.hdg_deg is None:
+        return None, f"estimate not usable ({status})"
     r_max = max_slant_range_yd * YD_TO_M
-    if estimate.uncertainty.horizontal_major_yd * YD_TO_M > config.optimal_max_sigma_fraction * r_max:
+    limit = config.max_sigma_fraction if coasting else config.optimal_max_sigma_fraction
+    if estimate.uncertainty.horizontal_major_yd * YD_TO_M > limit * r_max:
         return None, "estimate not converged enough to replan"
     if (estimate.through_water_speed_kt or 0.0) < config.min_speed_kt:
         return None, "target (nearly) stationary in the water"
@@ -237,7 +242,7 @@ def plan_replacement(
         estimate, observers, kept_pending, config, max_slant_range_yd, free_slots + len(revisable),
         sensor.source_frequency_hz, sensor.sound_speed_mps, sensor.frequency_sigma_hz,
         coverage_short=covered < config.min_coverage, layer=layer_availability(replan, kept, tick),
-        sensor=sensor, max_depth_ft=max_depth_ft,
+        sensor=sensor, max_depth_ft=max_depth_ft, maneuver_now=is_maneuver_now(estimate, config),
     )
     if not positions:
         return None, f"{why}; kept the open drops (a fresh plan adds none: {plan_reason})"

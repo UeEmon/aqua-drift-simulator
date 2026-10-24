@@ -27,6 +27,20 @@ MIN_DEPTH_FT = 50.0
 MAX_DEPTH_FT = 1500.0
 
 
+def is_coasting(status: str, config: ForwardDeploymentConfig) -> bool:
+    """Coasting (no detection for a few seconds, not yet LOST) and planned for: plan on the coasted
+    estimate (for an AMBIGUOUS one: its dominant mode, which the estimate gives), assuming the target
+    may have turned -- waiting for LOST left the layer idle while the target got away."""
+    return config.coast_planning and status.startswith("COASTING_")
+
+
+def is_maneuver_now(estimate: TrackEstimate, config: ForwardDeploymentConfig) -> bool:
+    """Plan for a maneuver starting now: coasting, or a maneuver detected within maneuver_recent_s."""
+    tick = (estimate.metadata or {}).get("maneuver_detected_tick")
+    return is_coasting(estimate.observability_status, config) or (
+        tick is not None and estimate.tick - tick <= config.maneuver_recent_s)
+
+
 def covered_count(estimate: TrackEstimate, positions: list[Position], config: ForwardDeploymentConfig,
                   r_max_m: float) -> int:
     """How many of positions lie within coverage_fraction x R_max (horizontal) of the target's
@@ -78,19 +92,19 @@ def plan_forward_deployment_scheduled(
     if estimate is None or estimate.current_position is None or estimate.uncertainty is None:
         return [], "no estimate", None
     status = estimate.observability_status
-    # coasting (no detection for a few seconds, not yet LOST): plan on the coasted estimate, assuming
-    # the target may have turned -- waiting for LOST left the layer idle while the target got away
-    coasting = (config.coast_planning and status.startswith("COASTING_")
-                and not status.endswith("AMBIGUOUS"))
+    coasting = is_coasting(status, config)
     if not (status.startswith("TRACKING") or coasting):
         return [], f"estimate not usable ({status})", None
     r_max = max_slant_range_yd * YD_TO_M
     if estimate.uncertainty.horizontal_major_yd * YD_TO_M > config.max_sigma_fraction * r_max:
         return [], "estimate too uncertain", None
     maneuver_tick = (estimate.metadata or {}).get("maneuver_detected_tick")
-    maneuver_now = coasting or (maneuver_tick is not None and estimate.tick - maneuver_tick <= config.maneuver_recent_s)
+    maneuver_now = is_maneuver_now(estimate, config)
     replan = maneuver_tick is not None and (last_deploy_tick is None or maneuver_tick > last_deploy_tick)
-    if not force and not replan and last_deploy_tick is not None and tick - last_deploy_tick < config.cooldown_s:
+    # while coasting the contact gets away by the minute: no cooldown (the layer's queue still limits
+    # how far ahead it is planned)
+    if (not force and not replan and not coasting and last_deploy_tick is not None
+            and tick - last_deploy_tick < config.cooldown_s):
         return [], "cooldown", None
     speed_kt = estimate.through_water_speed_kt or 0.0
     if speed_kt < config.min_speed_kt or estimate.hdg_deg is None:
