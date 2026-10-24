@@ -649,8 +649,12 @@ def plan_optimal_deployment(
         directions = np.array(lane_dir)[lane]
         for d in np.unique(directions):
             members = directions == d
-            ways = [float(d)] if continuing_lane >= 0 and np.all(lane[members] == continuing_lane) \
-                else [float(d), float(d) + math.pi]
+            if continuing_lane >= 0 and np.all(lane[members] == continuing_lane):
+                ways = [float(d)]  # straight on
+            elif config.line_forward_only and abs(float(d) - heading) < 1e-9:
+                ways = [float(d)]  # along the track: in the target's direction only
+            else:
+                ways = [float(d), float(d) + math.pi]
             earliest[members] = layer.earliest_s(origin, grid[members], ways)
     else:
         earliest = layer.earliest_s(origin, grid)
@@ -795,7 +799,8 @@ def plan_optimal_deployment(
             d = lane_dir[int(lane[chosen[0]])]
             dx, dy = math.sin(d), math.cos(d)
             ahead = sorted(range(len(heads)), key=lambda k: dx * grid[heads[k], 0] + dy * grid[heads[k], 1])
-            line_orders = [ahead, ahead[::-1]]
+            forward = config.line_forward_only and abs(d - heading) < 1e-9 or int(lane[chosen[0]]) == continuing_lane
+            line_orders = [ahead] if forward else [ahead, ahead[::-1]]
         if queued:
             offsets = [local_offset_m(start, p) for p, _ in layer.queue]
             prefix = ([o[0] for o in offsets], [o[1] for o in offsets], [s for _, s in layer.queue])

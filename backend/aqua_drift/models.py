@@ -285,6 +285,10 @@ class ForwardDeploymentConfig(BaseModel):
     # laying may lay a line across the track. coast_planning: plan while coasting at all (the
     # estimate may then be up to max_sigma_fraction x R_max uncertain)
     coast_planning: bool = True
+    # line laying: lay a line along the track in the target's direction only, so the layer ends it
+    # heading along the track and can continue it with the next line (one laid the other way ends
+    # heading back and needs a loop, ~4-8 min, before the next line)
+    line_forward_only: bool = False
     maneuver_recent_s: int = Field(default=300, ge=0, le=3600)
     maneuver_now_weight: float = Field(default=0.6, ge=0, le=0.9)
     line_queue_ahead_s: int = Field(default=60, ge=0, le=1800)
