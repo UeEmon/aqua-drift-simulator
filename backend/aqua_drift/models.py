@@ -279,6 +279,14 @@ class ForwardDeploymentConfig(BaseModel):
     # latest estimate (lines queued far ahead were laid late, bunched and on a track the target had
     # left: deployment_diagnosis, 2026-10-24)
     line_max_per_pass: int = Field(default=8, ge=1, le=16)
+    # just after a maneuver (detected within maneuver_recent_s) and while the contact is coasting
+    # (COASTING_*: no detection for a few seconds, not yet LOST) the plan assumes the target may be
+    # turning now: the maneuver hypotheses start at once with at least maneuver_now_weight, and line
+    # laying may lay a line across the track. coast_planning: plan while coasting at all (the
+    # estimate may then be up to max_sigma_fraction x R_max uncertain)
+    coast_planning: bool = True
+    maneuver_recent_s: int = Field(default=300, ge=0, le=3600)
+    maneuver_now_weight: float = Field(default=0.6, ge=0, le=0.9)
     line_queue_ahead_s: int = Field(default=60, ge=0, le=1800)
     drop_lead_s: int = Field(default=60, ge=0, le=1800)  # in the water this long before detection starts
     # maneuver-robust planning (optimal strategy): weighted course / speed / depth change

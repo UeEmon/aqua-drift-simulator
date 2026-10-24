@@ -77,12 +77,18 @@ def plan_forward_deployment_scheduled(
         return [], "disabled", None
     if estimate is None or estimate.current_position is None or estimate.uncertainty is None:
         return [], "no estimate", None
-    if not estimate.observability_status.startswith("TRACKING"):
-        return [], f"estimate not usable ({estimate.observability_status})", None
+    status = estimate.observability_status
+    # coasting (no detection for a few seconds, not yet LOST): plan on the coasted estimate, assuming
+    # the target may have turned -- waiting for LOST left the layer idle while the target got away
+    coasting = (config.coast_planning and status.startswith("COASTING_")
+                and not status.endswith("AMBIGUOUS"))
+    if not (status.startswith("TRACKING") or coasting):
+        return [], f"estimate not usable ({status})", None
     r_max = max_slant_range_yd * YD_TO_M
     if estimate.uncertainty.horizontal_major_yd * YD_TO_M > config.max_sigma_fraction * r_max:
         return [], "estimate too uncertain", None
     maneuver_tick = (estimate.metadata or {}).get("maneuver_detected_tick")
+    maneuver_now = coasting or (maneuver_tick is not None and estimate.tick - maneuver_tick <= config.maneuver_recent_s)
     replan = maneuver_tick is not None and (last_deploy_tick is None or maneuver_tick > last_deploy_tick)
     if not force and not replan and last_deploy_tick is not None and tick - last_deploy_tick < config.cooldown_s:
         return [], "cooldown", None
@@ -99,14 +105,17 @@ def plan_forward_deployment_scheduled(
                 and layer.ready_s > config.line_queue_ahead_s):
             # line laying: one pass ahead only; the next line on the latest estimate
             return [], f"layer busy for {layer.ready_s:.0f} s (line laying plans one pass ahead)", None
-        if not force and estimate.uncertainty.horizontal_major_yd * YD_TO_M > config.optimal_max_sigma_fraction * r_max:
+        if (not force and not coasting
+                and estimate.uncertainty.horizontal_major_yd * YD_TO_M > config.optimal_max_sigma_fraction * r_max):
             return [], "estimate not yet converged enough for optimal placement", None
         positions, reason, report = plan_optimal_deployment(
             estimate, observers, pending, config, max_slant_range_yd, free_slots,
             source_frequency_hz, sound_speed_mps, frequency_sigma_hz,
             coverage_short=covered < config.min_coverage, force=force, layer=layer,
-            sensor=sensor, max_depth_ft=max_depth_ft,
+            sensor=sensor, max_depth_ft=max_depth_ft, maneuver_now=maneuver_now,
         )
+        if positions and coasting:
+            reason = f"{reason}; coasting (no detection), planned for a maneuver"
         if positions and replan and not force:
             reason = f"{reason}; replanned after a maneuver at tick {maneuver_tick}"
         if not positions and covered >= config.min_coverage:

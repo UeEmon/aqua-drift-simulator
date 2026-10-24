@@ -104,6 +104,10 @@ LINE_ACROSS = 0.5  # line laying: candidate lines along the track up to this x R
 LINE_MIN_GAIN = 0.02
 LINE_CYCLE_MARGIN_S = 60.0  # added to the layer's loop between two passes
 LINE_CONTINUE_DEG = 5.0  # line laying: the layer's pass continues a line within this of the track
+# line laying after a maneuver: lines across the track, as wide as this share of the distance the
+# target covers while one line holds it (a 45 deg turn gets ~0.7 of it away), at most BARRIER_MAX_R x R_max
+BARRIER_WIDTH = 0.7
+BARRIER_MAX_R = 4.0
 CHUNK = 256  # candidates evaluated at once (bounds the memory of a plan)
 
 
@@ -183,15 +187,21 @@ def _trajectory(
 
 def hypotheses(
     p0: np.ndarray, heading: float, speed: float, vz: float, heading_sigma: float,
-    config: ForwardDeploymentConfig, horizon: float, max_depth: float,
+    config: ForwardDeploymentConfig, horizon: float, max_depth: float, now: bool = False,
 ) -> list[Hypothesis]:
     """Weighted motion hypotheses: the estimated track (heading and +-1 sigma) and, with a
-    total weight config.maneuver_weight, course / speed / depth changes."""
+    total weight config.maneuver_weight, course / speed / depth changes maneuver_time_s from now.
+    now (a maneuver was just detected, or the contact is coasting): the changes start now, with a
+    total weight of at least maneuver_now_weight -- the target may be turning or have turned since
+    the last detection, and a maneuver due only later cannot place a field for that."""
     def make(weight: float, name: str, h: float = heading, **change) -> Hypothesis:
         pos, vel = _trajectory(p0, h, speed, vz, horizon, max_depth, **change)
         return Hypothesis(weight, pos, vel, name)
 
-    mw = config.maneuver_weight if config.maneuver_time_s < horizon else 0.0
+    if now:
+        mw = max(config.maneuver_weight, config.maneuver_now_weight)
+    else:
+        mw = config.maneuver_weight if config.maneuver_time_s < horizon else 0.0
     straight = 1.0 - mw
     out = [
         make(0.5 * straight, "track"),
@@ -199,7 +209,7 @@ def hypotheses(
         make(0.25 * straight, "track+1s", heading + heading_sigma),
     ]
     if mw > 0:
-        at = float(config.maneuver_time_s)
+        at = 0.0 if now else float(config.maneuver_time_s)
         dz = config.maneuver_depth_change_ft * FT_TO_M
         maneuvers = [
             ("turn-90", {"turn": -math.pi / 2}), ("turn-45", {"turn": -math.pi / 4}),
@@ -502,9 +512,12 @@ def plan_optimal_deployment(
     sensor: SensorModel | None = None,
     max_depth_ft: float = 1500.0,
     cost_only: bool = False,
+    maneuver_now: bool = False,
 ) -> tuple[list[Position], str, PlanReport | None]:
     """Plan positions, number and depths (and, in report.drop_times_s, the optimal drop times).
-    cost_only: only the cost of the field as it is (report.cost_before_yd), no candidates."""
+    cost_only: only the cost of the field as it is (report.cost_before_yd), no candidates.
+    maneuver_now: the maneuver hypotheses start now (see hypotheses) and line laying may also
+    lay a line across the track (a barrier the turned tracks cross as well)."""
     sensor = sensor or SensorModel()
     sensor.source_frequency_hz = source_frequency_hz
     sensor.sound_speed_mps = sound_speed_mps
@@ -531,7 +544,7 @@ def plan_optimal_deployment(
     ).reshape(-1, 3)
 
     hdg_sigma = math.radians(min(max(estimate.uncertainty.hdg_sigma_deg, 3.0), 30.0))
-    hyps = hypotheses(p0, heading, speed, vz, hdg_sigma, config, horizon, max_depth_ft * FT_TO_M)
+    hyps = hypotheses(p0, heading, speed, vz, hdg_sigma, config, horizon, max_depth_ft * FT_TO_M, maneuver_now)
     weights = np.array([h.weight for h in hyps])
     pos = np.array([h.pos[::every] for h in hyps])  # (H,K,3)
     vel = np.array([h.vel[::every] for h in hyps])
@@ -586,20 +599,39 @@ def plan_optimal_deployment(
         across = np.arange(-half, half + 1e-9, 0.25 * r_max)
     depths = np.array(sorted(set(config.depth_options_ft))) * FT_TO_M
     spots = np.array([[ux * a + uy * x, uy * a - ux * x, i] for a in along for i, x in enumerate(across)])
-    if lines and layer is not None and layer.heading_deg is not None:
+    lane_dir = [heading] * len(across)  # heading of each line (lane), crossed either way
+    continuing_lane = -1
+    if lines and layer is not None and layer.heading_deg is not None and not maneuver_now:
         # the layer's own pass, when it flies along the track: a line straight on from where it is
         # free continues that pass (no loop); one beside it needs a loop first, which delays the next
         # line by the loop -- a cost the information criterion does not see -- so then the line is
-        # this continuation (the bearings resolve the mirror of a line on the track)
+        # this continuation (the bearings resolve the mirror of a line on the track). Not after a
+        # maneuver: then the line may have to leave the old track
         hl = math.radians(layer.heading_deg)
         if abs((hl - heading + math.pi) % (2 * math.pi) - math.pi) < math.radians(LINE_CONTINUE_DEG):
             le, ln, _ = local_offset_m(origin, layer.position)
             lx, ly = math.sin(hl), math.cos(hl)
             ahead = le * ux + ln * uy  # where the layer is along the track
+            beside = abs(le * uy - ln * ux)  # and how far off it (a pass along another line does not count)
             ray = [[le + lx * d, ln + ly * d, len(across)] for d in along
-                   if 0.25 * r_max <= ahead + d * (lx * ux + ly * uy) <= max(travel, 0.5 * r_max)]
+                   if 0.25 * r_max <= ahead + d * (lx * ux + ly * uy) <= max(travel, 0.5 * r_max)
+                   and beside <= LINE_ACROSS * r_max]
             if ray:
                 spots = np.array(ray)
+                continuing_lane = len(across)
+                lane_dir.append(hl)
+    if lines and maneuver_now:
+        # lines across the track ahead (barriers): after a turn the target leaves any line along the
+        # old track within minutes, while a line across it ahead is crossed by the straight and the
+        # turned tracks alike. As wide as a turned track gets away in one line's holding time
+        hold_m = speed * (layer.cycle_s() + float(config.drop_lead_s)) + r_max
+        width = max(0.75 * r_max, min(BARRIER_WIDTH * hold_m, BARRIER_MAX_R * r_max))
+        offsets = np.arange(-width, width + 1e-9, 0.25 * r_max)
+        first = len(lane_dir)
+        barriers = [b for b in np.arange(0.5 * r_max, max(hold_m, r_max) + 1e-9, 0.5 * r_max)]
+        rows = [[ux * b + uy * c, uy * b - ux * c, first + j] for j, b in enumerate(barriers) for c in offsets]
+        spots = np.vstack([spots, np.array(rows)])
+        lane_dir += [heading + 0.5 * math.pi] * len(barriers)
     fine = np.concatenate([h.pos[:, 0:2] for h in hyps])
     near = np.array([np.min(np.linalg.norm(fine - s[0:2], axis=1)) for s in spots]) <= r_max
     spots = spots[near]
@@ -612,12 +644,14 @@ def plan_optimal_deployment(
     # an observer only measures once it is in the water: from the layer's earliest arrival
     if layer is None:
         earliest = np.zeros(len(grid))
-    elif lines:  # a line is crossed along the track, either way
-        earliest = layer.earliest_s(origin, grid, [heading, heading + math.pi])
-        continuing = lane == len(across)  # the layer's own pass: along its heading
-        if continuing.any():
-            hl = math.radians(layer.heading_deg)
-            earliest[continuing] = layer.earliest_s(origin, grid[continuing], [hl])
+    elif lines:  # a line is crossed along its direction, either way (the continuation: straight on)
+        earliest = np.zeros(len(grid))
+        directions = np.array(lane_dir)[lane]
+        for d in np.unique(directions):
+            members = directions == d
+            ways = [float(d)] if continuing_lane >= 0 and np.all(lane[members] == continuing_lane) \
+                else [float(d), float(d) + math.pi]
+            earliest[members] = layer.earliest_s(origin, grid[members], ways)
     else:
         earliest = layer.earliest_s(origin, grid)
     if lines:
@@ -758,7 +792,9 @@ def plan_optimal_deployment(
         prefix = None
         line_orders = None
         if lines:  # along the line, either way (no loop between its observers)
-            ahead = sorted(range(len(heads)), key=lambda k: ux * grid[heads[k], 0] + uy * grid[heads[k], 1])
+            d = lane_dir[int(lane[chosen[0]])]
+            dx, dy = math.sin(d), math.cos(d)
+            ahead = sorted(range(len(heads)), key=lambda k: dx * grid[heads[k], 0] + dy * grid[heads[k], 1])
             line_orders = [ahead, ahead[::-1]]
         if queued:
             offsets = [local_offset_m(start, p) for p, _ in layer.queue]

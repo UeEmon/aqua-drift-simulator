@@ -295,3 +295,58 @@ def test_observers_stack_at_one_drop_point_only_up_to_the_layers_release() -> No
     stacked, reason = plans[4]
     assert len(set(stacked)) < len(stacked), (stacked, reason)  # needed here: several in one drop
     assert "drop points" in reason
+
+
+def test_short_range_line_continues_the_layers_pass() -> None:
+    """The layer has just laid a line along the track and flies on along it: the next line is straight
+    on from where it is free (no loop, laid within seconds), not beside it (a loop of ~4 min first)."""
+    from aqua_drift.deployment import _offset
+    from aqua_drift.optimal_deployment import LayerAvailability, plan_optimal_deployment
+
+    layer = LayerAvailability(ready_s=0.0, position=_offset(ORIGIN, 600.0, 0.0, 0.0), speed_kt=200.0,
+                              max_bank_deg=15.0, heading_deg=90.0, queue=[(offset(500, 0), 0.0)])
+    positions, reason, report = plan_optimal_deployment(
+        estimate(), [offset(-300, 0), offset(-100, 0)], [], ForwardDeploymentConfig(), 500, 99,
+        coverage_short=True, layer=layer)
+    assert positions, reason
+    assert all(abs(local_offset_m(ORIGIN, p)[1]) < 1.0 for p in positions)  # on the layer's own line
+    assert all(local_offset_m(ORIGIN, p)[0] > 600.0 for p in positions)  # ahead of it
+    assert max(report.drop_times_s) < 60.0  # straight on, no loop
+
+
+def test_a_pass_along_another_line_is_not_continued() -> None:
+    from aqua_drift.optimal_deployment import plan_optimal_deployment
+
+    ahead = [offset(x, 0) for x in (200, 600, 1000, 1400, 1800)]
+    positions, reason, _ = plan_optimal_deployment(
+        estimate(), ahead, [], ForwardDeploymentConfig(), 500, 99, coverage_short=True,
+        layer=_layer_at(0.0, -6000.0, 90.0))  # flying east, but 6 km south of the track
+    assert positions, reason
+    assert all(abs(local_offset_m(ORIGIN, p)[1]) < 0.6 * 500 * 0.9144 for p in positions)
+
+
+def test_coasting_contact_is_planned_for_a_maneuver_now() -> None:
+    """No detection for a few seconds (COASTING, not yet LOST): plan on the coasted estimate with the
+    maneuvers starting now, instead of waiting until the contact is LOST."""
+    from aqua_drift.forward_deployment import plan_forward_deployment_scheduled
+    from aqua_drift.optimal_deployment import hypotheses
+
+    layer = _layer_at(0.0, -6000.0, 90.0)
+    behind = [offset(-300, 0), offset(-100, 0)]
+    config = ForwardDeploymentConfig()
+    positions, reason, _ = plan_forward_deployment_scheduled(
+        100, estimate("COASTING_TRACKING"), behind, [], config, 500, None, layer=layer)
+    assert positions and "coasting" in reason
+    assert plan_forward_deployment_scheduled(100, estimate("LOST"), behind, [], config, 500, None, layer=layer)[0] == []
+    off = ForwardDeploymentConfig(coast_planning=False)
+    assert plan_forward_deployment_scheduled(
+        100, estimate("COASTING_TRACKING"), behind, [], off, 500, None, layer=layer)[0] == []
+    # the maneuver hypotheses start at once (and weigh at least maneuver_now_weight)
+    import numpy as np
+    later = hypotheses(np.zeros(3), 0.0, 4.0, 0.0, 0.05, config, 1800.0, 450.0)
+    now = hypotheses(np.zeros(3), 0.0, 4.0, 0.0, 0.05, config, 1800.0, 450.0, now=True)
+    turn_later = next(h for h in later if h.name == "turn+90")
+    turn_now = next(h for h in now if h.name == "turn+90")
+    assert np.allclose(turn_later.vel[30], [0.0, 4.0, 0.0])  # 300 s: still on the track
+    assert turn_now.vel[30][0] > 3.9  # 300 s: turned east already
+    assert sum(h.weight for h in now if h.name.startswith(("turn", "slow", "fast", "up", "down"))) >= 0.6 - 1e-9
