@@ -353,5 +353,10 @@ def plan_search_replacement(
         return None, reason
     if replaced:
         reason = f"{reason}; replaces drops {replaced}"
-    return ReplanDecision(replaces=replaced, positions=positions, planned_ticks=None, bases=[],
+    # after the drops that are kept: a search drop without a time would be flown first and could keep
+    # them from ever being laid (each new search comes first again)
+    kept = [due_tick(t, tick) for t in open_tasks if t.task_id not in replaced]
+    kept = [k for k in kept if k is not None]
+    planned = [math.ceil(max(kept)) + 1] * len(positions) if kept else None
+    return ReplanDecision(replaces=replaced, positions=positions, planned_ticks=planned, bases=[],
                           revision=0, reason=reason, source="search"), reason

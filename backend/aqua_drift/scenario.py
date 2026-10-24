@@ -191,7 +191,7 @@ class ScenarioRun:
             for task in open_tasks:
                 if task.task_id in search.replaces:
                     task.status = "REPLACED"
-            self._queue(search.positions, None, [], 0, source="search", reason=search.reason)
+            self._queue(search.positions, search.planned_ticks, [], 0, source="search", reason=search.reason)
             return
         if replan is not None:  # first: do the open drops still match the estimate?
             decision, _ = plan_replacement(

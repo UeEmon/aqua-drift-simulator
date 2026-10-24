@@ -40,7 +40,7 @@ async def run() -> None:
             if search is not None:
                 request = DeploymentRequest(
                     tick=feed.tick, positions=search.positions, reason=search.reason,
-                    replaces=search.replaces, source=search.source,
+                    planned_ticks=search.planned_ticks, replaces=search.replaces, source=search.source,
                 )
                 result = await post(client, "/internal/deploy", request.model_dump(mode="json"), feed.generation)
                 if result.status_code == 409:  # a drop was laid or flown to meanwhile

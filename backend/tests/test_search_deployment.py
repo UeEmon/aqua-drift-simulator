@@ -112,7 +112,13 @@ def test_search_replaces_revisable_forward_drops_and_keeps_the_others() -> None:
                                           R_MAX_YD, 0, 0.0, None)
     assert decision is not None and decision.source == "search"
     assert decision.replaces == [1]  # the drop due soon stays: the head of the queue is laid
-    assert decision.positions and decision.planned_ticks is None
+    # and is flown first: the search drops are due after it (without a time they would come first
+    # and could keep it from ever being laid)
+    assert decision.positions and decision.planned_ticks
+    assert all(t > soon.planned_tick for t in decision.planned_ticks)
+    # nothing kept: as soon as possible
+    alone, _ = plan_search_replacement(TICK, lost(ring_cloud()), replan_feed(far), config, R_MAX_YD, 0, 0.0, None)
+    assert alone is not None and alone.planned_ticks is None
 
 
 def test_no_search_before_the_interval_or_while_search_drops_are_open() -> None:
