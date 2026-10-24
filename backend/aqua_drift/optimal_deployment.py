@@ -102,6 +102,7 @@ LINE_ACROSS = 0.5  # line laying: candidate lines along the track up to this x R
 # line laying: one pass (a loop of the layer, ~4 min) is the scarce resource, so the line is
 # filled up to max_per_drop while each observer still helps this much
 LINE_MIN_GAIN = 0.02
+LINE_CYCLE_MARGIN_S = 60.0  # added to the layer's loop between two passes
 CHUNK = 256  # candidates evaluated at once (bounds the memory of a plan)
 
 
@@ -404,6 +405,12 @@ class LayerAvailability:
     wind_mps: tuple[float, float] = (0.0, 0.0)
     drift_mps: tuple[float, float] = (0.0, 0.0)
 
+    def cycle_s(self) -> float:
+        """Time from one straight pass to the next: a loop at the bank limit, the level flight at
+        the drops and a margin (the next line starts where the target will be by then)."""
+        v = self.speed_kt * KNOT_TO_MPS
+        return 2.0 * math.pi * self.turn_radius_m() / v + self.straight_before_s + self.straight_after_s + LINE_CYCLE_MARGIN_S
+
     def turn_radius_m(self) -> float:
         v = self.speed_kt * KNOT_TO_MPS
         return v * v / (9.80665 * math.tan(math.radians(self.max_bank_deg)))
@@ -499,7 +506,9 @@ def plan_optimal_deployment(
     speed = (estimate.through_water_speed_kt or 0.0) * KNOT_TO_MPS
     vz = (estimate.vertical_rate_fps or 0.0) * FT_TO_M
     heading = math.radians(estimate.hdg_deg)
-    limit = min(config.max_per_drop, max(free_slots, 0))
+    lines = (layer is not None and config.line_laying and speed > 0
+             and r_max < layer.turn_radius_m())
+    limit = min(config.line_max_per_pass if lines else config.max_per_drop, max(free_slots, 0))
     if limit <= 0:
         return [], "no free observer slot", None
     horizon = float(config.horizon_s)
@@ -559,8 +568,6 @@ def plan_optimal_deployment(
     # observers of one plan can be laid in one straight pass
     ux, uy = math.sin(heading), math.cos(heading)
     travel = speed * horizon
-    lines = (layer is not None and config.line_laying and speed > 0
-             and r_max < layer.turn_radius_m())
     along = np.arange(0.25 * r_max, max(travel, 0.5 * r_max) + 1e-9, 0.25 * r_max)
     if lines:
         across = np.arange(-LINE_ACROSS, LINE_ACROSS + 1e-9, 0.25) * r_max
@@ -583,10 +590,12 @@ def plan_optimal_deployment(
     if lines:
         # the information counts from when the layer can be on the track (not only after the lead
         # time: a short-range field must be laid close ahead, where the estimate is still good) and
-        # for as long as one line of `limit` observers can hold the target (the next plan lays the
-        # next line), so the line is laid contiguous and not spread over the whole horizon
+        # until the next line can take over: the layer's next pass (its loop), the lead of a drop
+        # and one detection radius of overlap. The line must hold the target that long, so it is
+        # laid contiguous and not spread over the whole horizon
         t0 = min(max(float(np.min(earliest)), 0.0), float(steps[-1]))
-        evaluate = (steps >= t0) & (steps <= t0 + max((limit + 1) * r_max / speed, STEP_S))
+        hold = layer.cycle_s() + float(config.drop_lead_s) + r_max / speed
+        evaluate = (steps >= t0) & (steps <= t0 + max(hold, STEP_S))
     parts = [_measurement_info(grid[part], pos, vel, steps, earliest[part], sensor, r_max)
              for part in np.array_split(np.arange(len(grid)), math.ceil(len(grid) / CHUNK))]
     cand_meas = np.concatenate([p[0] for p in parts], axis=1)

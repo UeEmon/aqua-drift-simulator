@@ -95,6 +95,10 @@ def plan_forward_deployment_scheduled(
     origin = estimate.current_position
     covered = covered_count(estimate, [*observers, *pending], config, r_max)
     if config.strategy == "optimal":
+        if (not force and layer is not None and config.line_laying and r_max < layer.turn_radius_m()
+                and layer.ready_s > config.line_queue_ahead_s):
+            # line laying: one pass ahead only; the next line on the latest estimate
+            return [], f"layer busy for {layer.ready_s:.0f} s (line laying plans one pass ahead)", None
         if not force and estimate.uncertainty.horizontal_major_yd * YD_TO_M > config.optimal_max_sigma_fraction * r_max:
             return [], "estimate not yet converged enough for optimal placement", None
         positions, reason, report = plan_optimal_deployment(

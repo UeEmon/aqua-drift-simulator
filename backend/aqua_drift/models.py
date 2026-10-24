@@ -273,6 +273,13 @@ class ForwardDeploymentConfig(BaseModel):
     # detection range shorter than the layer's turn radius: the observers of one plan on one line
     # along the track, laid in one straight pass (aqua_drift.optimal_deployment)
     line_laying: bool = True
+    # line laying: one plan is one straight pass of the layer and must hold the target until the
+    # next pass (the layer's loop, about 4-5 min): up to line_max_per_pass observers on the line,
+    # and the next line is planned only when the layer is free within line_queue_ahead_s, on the
+    # latest estimate (lines queued far ahead were laid late, bunched and on a track the target had
+    # left: deployment_diagnosis, 2026-10-24)
+    line_max_per_pass: int = Field(default=8, ge=1, le=16)
+    line_queue_ahead_s: int = Field(default=60, ge=0, le=1800)
     drop_lead_s: int = Field(default=60, ge=0, le=1800)  # in the water this long before detection starts
     # maneuver-robust planning (optimal strategy): weighted course / speed / depth change
     # hypotheses, process noise in the information recursion, risk (CVaR) and coverage terms
