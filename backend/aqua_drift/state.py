@@ -355,6 +355,7 @@ class SimulationState:
             "layer_max_per_release": layer.max_per_release,
             "layer_straight_before_s": layer.straight_before_s,
             "layer_straight_after_s": layer.straight_after_s,
+            "layer_capture_m": layer.capture_radius_yd * 0.9144,
             "layer_fall_terminal_mps": self.config.wind.terminal_velocity_fps * FT_TO_M,
             "layer_ready_altitude_ft": layerlib.ready_altitude_ft(self.layer_state, layer, bool(queue)),
             "layer_cruise_altitude_ft": layer.cruise_altitude_ft,

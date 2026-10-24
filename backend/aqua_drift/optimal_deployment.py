@@ -103,6 +103,7 @@ LINE_ACROSS = 0.5  # line laying: candidate lines along the track up to this x R
 # filled up to max_per_drop while each observer still helps this much
 LINE_MIN_GAIN = 0.02
 LINE_CYCLE_MARGIN_S = 60.0  # added to the layer's loop between two passes
+ANY_HEADINGS = list(np.radians(np.arange(0.0, 360.0, 10.0)))  # earliest_s without a crossing heading
 LINE_CONTINUE_DEG = 5.0  # line laying: the layer's pass continues a line within this of the track
 # line laying after a maneuver: lines across the track, as wide as this share of the distance the
 # target covers while one line holds it (a 45 deg turn gets ~0.7 of it away), at most BARRIER_MAX_R x R_max
@@ -373,6 +374,7 @@ class LayerAvailability:
     max_per_release: int = 1  # observers one drop can release at once (stacked at one point)
     straight_before_s: float = 0.0  # wings level at a drop (LayerConfig.straight_before_s / after_s)
     straight_after_s: float = 0.0
+    capture_m: float = 150.0 * YD_TO_M  # the drop is made within this of the point (LayerConfig.capture_radius_yd)
     # where it is now and its open drops in flight order (planned drop time s from now, None:
     # at once): a new plan is routed on after them
     now_position: Position | None = None
@@ -445,13 +447,19 @@ class LayerAvailability:
         heading = np.full(n, math.radians(self.heading_deg))
         hold = self.straight_after_s * v if self.queue else 0.0  # free right after its last drop
         length = np.full(n, np.inf)
-        for approach in (approaches if approaches is not None else [None]):
+        # any heading: the shortest over headings round the compass. route.path_to without a heading
+        # only knows turn-then-straight, and a point inside the turning circle then costs a loop more
+        # than the guidance (which replans every second) takes
+        for approach in (approaches if approaches is not None else ANY_HEADINGS):
+            # as the layer itself predicts its arrival (layer._arrival_s): the guidance's loose path
+            # close to the point, and the drop once within the capture radius
             _, trial, _ = routelib.path_to(
                 delta[:, 0], delta[:, 1], heading, None if approach is None else np.full(n, approach), radius,
-                before_m=self.straight_before_s * v, hold_m=hold)
+                loose=True, capture_m=self.capture_m, before_m=self.straight_before_s * v, hold_m=hold)
             length = np.minimum(length, trial)
         loop = 2.0 * math.pi * radius + np.linalg.norm(delta, axis=1)  # no path found: a loop and the way there
-        return self.ready_s + np.where(np.isfinite(length), length, loop) / v
+        length = np.where(np.isfinite(length), np.maximum(length - self.capture_m, 0.0), loop)
+        return self.ready_s + length / v
 
 
 def drop_times(
@@ -855,6 +863,7 @@ def availability_from_feed(feed) -> LayerAvailability | None:
         heading_deg=feed.layer_ready_heading_deg,
         straight_before_s=feed.layer_straight_before_s,
         straight_after_s=feed.layer_straight_after_s,
+        capture_m=feed.layer_capture_m,
         now_position=feed.layer_position,
         now_heading_deg=feed.layer_heading_deg,
         queue=[(p, None if t is None else float(t - feed.tick))

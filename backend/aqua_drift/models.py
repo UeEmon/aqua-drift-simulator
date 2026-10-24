@@ -685,6 +685,7 @@ class DeploymentFeed(BaseModel):
     layer_max_per_release: int = 1  # observers one drop can release at once (LayerConfig.max_per_release)
     layer_straight_before_s: float = 0.0  # LayerConfig.straight_before_s
     layer_straight_after_s: float = 0.0  # LayerConfig.straight_after_s
+    layer_capture_m: float = 150.0 * 0.9144  # LayerConfig.capture_radius_yd
     # the observer's fall from the release altitude to the sea surface (drop time = in the water
     # less the fall): the layer's altitude when free (ready tick) and LayerConfig's altitudes
     layer_fall_terminal_mps: float | None = None  # WindConfig.terminal_velocity_fps (None: no fall)
