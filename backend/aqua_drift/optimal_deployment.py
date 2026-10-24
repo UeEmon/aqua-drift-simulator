@@ -621,20 +621,14 @@ def plan_optimal_deployment(
                 continuing_lane = len(across)
                 lane_dir.append(hl)
     if lines and maneuver_now:
-        # after a maneuver the target leaves a line along the old track within minutes: lines across
-        # the track ahead (barriers, crossed by the straight and the +-45 deg tracks) and lines along
-        # it far to either side (crossed by the +-90 deg tracks), as far as a turned track gets in
-        # one line's holding time; ahead only that far (keeps the plan small)
+        # lines across the track ahead (barriers): after a turn the target leaves any line along the
+        # old track within minutes, while a line across it ahead is crossed by the straight and the
+        # turned tracks alike. As wide as a turned track gets away in one line's holding time
+        # (lines along the track far to either side, for +-90 deg turns, did not help in the closed
+        # loop and made depth changes worse: deployment_diagnosis, 2026-10-24)
         hold_m = speed * (layer.cycle_s() + float(config.drop_lead_s)) + r_max
         width = max(0.75 * r_max, min(BARRIER_WIDTH * hold_m, BARRIER_MAX_R * r_max))
         offsets = np.arange(-width, width + 1e-9, 0.25 * r_max)
-        side = np.arange(LINE_ACROSS * r_max + 0.5 * r_max, width + 1e-9, 0.5 * r_max)
-        if len(side):
-            near_along = along[along <= hold_m + r_max]
-            rows = [[ux * a + uy * x, uy * a - ux * x, len(lane_dir) + j]
-                    for j, x in enumerate(np.concatenate([-side[::-1], side])) for a in near_along]
-            spots = np.vstack([spots, np.array(rows)]) if rows else spots
-            lane_dir += [heading] * (2 * len(side))
         first = len(lane_dir)
         barriers = [b for b in np.arange(0.5 * r_max, max(hold_m, r_max) + 1e-9, 0.5 * r_max)]
         rows = [[ux * b + uy * c, uy * b - ux * c, first + j] for j, b in enumerate(barriers) for c in offsets]
