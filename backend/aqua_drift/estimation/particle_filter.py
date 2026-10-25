@@ -86,7 +86,7 @@ class DopplerParticleFilter:
         move_mismatch_chi2: float = 4.0,
         move_maneuver_cut_fraction: float = 0.5,
         maneuver_respread_fraction: float = 0.0,
-        move_turn_mode: str = "off",
+        move_turn_mode: str = "after_maneuver",
         move_turn_hold_s: int = 300,
         move_turn_prior: float = 0.2,
         move_turn_hypotheses: int = 2,

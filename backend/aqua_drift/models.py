@@ -416,7 +416,7 @@ class EstimatorConfig(BaseModel):
     # turn model of the move step: the window fit also tries a turn at a constant rate since an
     # onset time and averages it with constant velocity (prior move_turn_prior). "after_maneuver":
     # for move_turn_hold_s after a detected maneuver; "always": at every move step
-    move_turn_mode: Literal["off", "after_maneuver", "always"] = "off"
+    move_turn_mode: Literal["off", "after_maneuver", "always"] = "after_maneuver"
     move_turn_hold_s: int = Field(default=300, ge=0, le=3600)
     move_turn_prior: float = Field(default=0.2, gt=0, lt=1)
     move_turn_hypotheses: int = Field(default=2, ge=1, le=6)
