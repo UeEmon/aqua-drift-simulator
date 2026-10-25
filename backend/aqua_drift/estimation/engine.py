@@ -158,6 +158,10 @@ class TrackingEngine:
             move_mismatch_chi2=e.move_mismatch_chi2,
             move_maneuver_cut_fraction=e.move_maneuver_cut_fraction,
             maneuver_respread_fraction=e.maneuver_respread_fraction,
+            move_turn_mode=e.move_turn_mode,
+            move_turn_hold_s=e.move_turn_hold_s,
+            move_turn_prior=e.move_turn_prior,
+            move_turn_hypotheses=e.move_turn_hypotheses,
             use_bearing=e.use_bearing,
             bearing_sigma_rad=math.radians(e.bearing_sigma_deg),
             propagation_delay=self.settings.propagation_delay,
@@ -191,6 +195,10 @@ class TrackingEngine:
         pf.move_mismatch_chi2 = e.move_mismatch_chi2
         pf.move_maneuver_cut_fraction = e.move_maneuver_cut_fraction
         pf.maneuver_respread_fraction = e.maneuver_respread_fraction
+        pf.move_turn_mode = e.move_turn_mode
+        pf.move_turn_hold_s = e.move_turn_hold_s
+        pf.move_turn_prior = e.move_turn_prior
+        pf.move_turn_hypotheses = e.move_turn_hypotheses
         pf.use_bearing = e.use_bearing
         pf.bearing_sigma = math.radians(e.bearing_sigma_deg)
         pf.delay = settings.propagation_delay

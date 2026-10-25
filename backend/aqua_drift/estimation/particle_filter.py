@@ -42,6 +42,12 @@ from aqua_drift.estimation.move import (
 
 RESPREAD_TURN = math.pi / 2  # rad either way (see DopplerParticleFilter._respread_velocity)
 RESPREAD_SPEED = (0.7, 1.3)
+# turn model of the move step (see DopplerParticleFilter._turn_modes)
+TURN_START_RATE = math.radians(1.0)  # rad/s, both ways
+TURN_START_DURATIONS = (30.0, 90.0)  # s, turning until the last detection
+TURN_MIN_RATE = math.radians(0.05)  # slower fitted turns are left to the constant-velocity model
+TURN_MIN_DURATION = 5.0  # s
+TURN_MIN_GAIN = 0.5  # cost (-log likelihood) by which the turn fit must beat constant velocity
 
 
 @dataclass
@@ -80,6 +86,10 @@ class DopplerParticleFilter:
         move_mismatch_chi2: float = 4.0,
         move_maneuver_cut_fraction: float = 0.5,
         maneuver_respread_fraction: float = 0.0,
+        move_turn_mode: str = "off",
+        move_turn_hold_s: int = 300,
+        move_turn_prior: float = 0.2,
+        move_turn_hypotheses: int = 2,
         use_bearing: bool = True,
         bearing_sigma_rad: float = math.radians(15.0),
         propagation_delay: bool = False,
@@ -101,6 +111,12 @@ class DopplerParticleFilter:
         self.move_mismatch_chi2 = move_mismatch_chi2
         self.move_maneuver_cut_fraction = move_maneuver_cut_fraction
         self.maneuver_respread_fraction = maneuver_respread_fraction
+        self.move_turn_mode = move_turn_mode
+        self.move_turn_hold_s = move_turn_hold_s
+        self.move_turn_prior = move_turn_prior
+        self.move_turn_hypotheses = move_turn_hypotheses
+        self._turn_prev: np.ndarray | None = None  # best turn fit [state(7), omega, onset]
+        self._turn_tick = 0
         self.use_bearing = use_bearing
         self.bearing_sigma = bearing_sigma_rad
         self.delay = propagation_delay
@@ -529,7 +545,9 @@ class DopplerParticleFilter:
 
         The window is adaptive: if even the best constant-velocity fit is inconsistent with
         the data (a maneuver inside the window), the window is shortened; it then grows back
-        towards the configured length while the fit stays consistent."""
+        towards the configured length while the fit stays consistent. With the turn model
+        (move_turn_mode) the target averages the constant-velocity likelihood with fitted turn
+        hypotheses (a turn at constant rate since an onset time, see move._turn_back)."""
         full = float(self.epochs.window_s)
         window = full
         if self.maneuver_cut_tick is not None:
@@ -558,14 +576,9 @@ class DopplerParticleFilter:
         win = Window.build(now, sample, relevant)
         timing = [e for e in timing or [] if e.first >= now - self.move_window_eff]
 
-        def loglik(states: np.ndarray) -> np.ndarray:
-            return window_loglik(states, win, current, prm) + self.timing_loglik(
-                states, timing, current
-            )
-
         if self.ess() < 0.999 * self.n:
             self._apply_resample(self._systematic_resample())
-        ll = loglik(self.x)
+        ll = window_loglik(self.x, win, current, prm) + self.timing_loglik(self.x, timing, current)
         finite = np.isfinite(ll)
         order = np.argsort(np.where(finite, ll, -np.inf))[::-1]
         chosen: list[int] = []
@@ -593,17 +606,39 @@ class DopplerParticleFilter:
             self.maneuver_cut_tick = int(now - max(self.move_min_window_s,
                                                    self.move_maneuver_cut_fraction * self.move_window_eff))
             self.maneuver_detected_tick = int(now)
+        turn_modes = self._turn_modes(modes, win, current, prm, now)
+        # target: the window likelihood averaged over the constant-velocity model and the fitted
+        # turn hypotheses [omega, end, duration], weighted by their prior
+        hypotheses: list[tuple[np.ndarray | None, float]] = [(None, 0.0)]
+        if turn_modes:
+            share = math.log(self.move_turn_prior / len(turn_modes))
+            hypotheses = [(None, math.log(1.0 - self.move_turn_prior))]
+            hypotheses += [(m[0][7:10].copy(), share) for m in turn_modes]
+
+        def loglik(states: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            parts = np.array([
+                prior + window_loglik(states, win, current, prm, turn) for turn, prior in hypotheses
+            ])
+            with np.errstate(invalid="ignore"):
+                total = np.logaddexp.reduce(parts, axis=0) if len(parts) > 1 else parts[0]
+            return total + self.timing_loglik(states, timing, current), parts
+
+        if len(hypotheses) > 1:
+            ll, parts = loglik(self.x)
+        else:
+            parts = ll[None, :].copy()
         accepted_ind = 0.0
         if modes:
-            mixture = GaussianMixture(modes)
+            mixture = GaussianMixture(modes + turn_modes)
             proposal = mixture.sample(self.n, self.rng)
-            ll_prop = loglik(proposal)
+            ll_prop, parts_prop = loglik(proposal)
             with np.errstate(invalid="ignore"):
                 log_alpha = (ll_prop - ll) + (mixture.logpdf(self.x) - mixture.logpdf(proposal))
             log_alpha = np.where(np.isfinite(ll), log_alpha, np.where(np.isfinite(ll_prop), 0.0, -np.inf))
             accept = np.log(self.rng.uniform(size=self.n)) < np.nan_to_num(log_alpha, nan=-np.inf)
             self.x[accept] = proposal[accept]
             ll[accept] = ll_prop[accept]
+            parts[:, accept] = parts_prop[:, accept]
             accepted_ind = float(accept.mean())
         # random-walk MH within each cluster
         labels = self.clusters()
@@ -622,11 +657,12 @@ class DopplerParticleFilter:
         proposal = self.x + step
         if self.bias_sigma == 0:
             proposal[:, 6] = 0.0
-        ll_prop = loglik(proposal)
+        ll_prop, parts_prop = loglik(proposal)
         with np.errstate(invalid="ignore"):
             delta = np.nan_to_num(ll_prop - ll, nan=-np.inf)
         accept = np.log(self.rng.uniform(size=self.n)) < delta
         self.x[accept] = proposal[accept]
+        parts[:, accept] = parts_prop[:, accept]
         self.ground_v = self.x[:, 3:6] + current.velocity(self.x[:, 0:3])
         if chi2 > self.move_mismatch_chi2 and self.maneuver_respread_fraction > 0:
             self._respread_velocity(self.maneuver_respread_fraction)
@@ -637,7 +673,71 @@ class DopplerParticleFilter:
             "move_window_s": float(self.move_window_eff),
             "move_fit_chi2": float(chi2),
         }
+        if turn_modes:
+            with np.errstate(invalid="ignore"):
+                resp = np.exp(parts - np.logaddexp.reduce(parts, axis=0))
+            resp = np.nan_to_num(resp).mean(axis=1)
+            omega = np.array([0.0] + [h[0][0] for h in hypotheses[1:]])
+            self.move_info.update({
+                "move_turn_weight": float(resp[1:].sum()),
+                "move_turn_rate_dps": float(math.degrees(resp @ omega / max(resp.sum(), 1e-12))),
+                "move_turn_end_s": float(turn_modes[0][0][8]),
+                "move_turn_duration_s": float(turn_modes[0][0][9]),
+                "move_turn_chi2": float(2.0 * turn_modes[0][2] / max(doppler_rows, 1.0)),
+            })
         return self.move_info
+
+    def _turn_active(self, now: int) -> bool:
+        if self.move_turn_mode == "always":
+            return True
+        if self.move_turn_mode != "after_maneuver" or self.maneuver_detected_tick is None:
+            return False
+        return now - self.maneuver_detected_tick <= self.move_turn_hold_s
+
+    def _turn_modes(
+        self, modes: list[tuple[np.ndarray, np.ndarray, float]], win: Window, current: CurrentFit,
+        prm: MoveParams, now: int,
+    ) -> list[tuple[np.ndarray, np.ndarray, float]]:
+        """Turn-model fits [state(7), omega, end, duration] that explain the window better than
+        the best constant-velocity fit; at most move_turn_hypotheses, distinct in omega. The turn
+        ends no later than the last detection: without data the course is held, not turned."""
+        if not modes or not self._turn_active(now):
+            self._turn_prev = None
+            return []
+        detected = win.dt[win.w_dop > 0]
+        first = float(detected.min()) if len(detected) else 0.0
+        top = float(self.move_window_eff)
+        if top - first < 2 * TURN_MIN_DURATION:
+            self._turn_prev = None
+            return []
+        starts = [
+            np.r_[mode[0], sign * TURN_START_RATE, first, min(duration, top - first)]
+            for mode in modes[:2] for sign in (1.0, -1.0) for duration in TURN_START_DURATIONS
+        ]
+        if self._turn_prev is not None:  # warm start: the previous best turn carried on to now
+            prev = self._turn_prev.copy()
+            dt = now - self._turn_tick
+            prev[0:3] += (prev[3:6] + current.velocity(prev[0:3])) * dt
+            prev[8] = max(prev[8] + dt, first)
+            prev[9] = min(prev[9], top - prev[8])
+            starts.append(prev)
+            if prev[8] - dt <= first + 1.0:  # it was still turning: maybe it still is
+                still = prev.copy()
+                ue, un = still[3], still[4]
+                heading = still[7] * dt
+                still[3] = ue * math.cos(heading) - un * math.sin(heading)
+                still[4] = un * math.cos(heading) + ue * math.sin(heading)
+                still[8], still[9] = first, min(self._turn_prev[9] + dt, top - first)
+                starts.append(still)
+        fits = find_modes(np.array(starts), win, current, prm, turn_span=(first, top))
+        best_cv = modes[0][2]
+        kept = [
+            m for m in fits
+            if abs(m[0][7]) > TURN_MIN_RATE and m[0][9] > TURN_MIN_DURATION and m[2] < best_cv - TURN_MIN_GAIN
+        ][: self.move_turn_hypotheses]
+        self._turn_prev = kept[0][0].copy() if kept else None
+        self._turn_tick = now
+        return kept
 
     def _respread_velocity(self, fraction: float) -> None:
         """After a detected maneuver: a share of the particles take another course (up to

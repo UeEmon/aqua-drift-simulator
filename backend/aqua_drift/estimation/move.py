@@ -57,6 +57,9 @@ class MoveParams:
     # the resample-move target so that the rejuvenation keeps the depth information
     depth_fix: tuple[float, float] | None = None
     delay: bool = False  # the received sound left the target r/c earlier
+    # turn model (see _turn_back): largest turn rate and the prior sigma of the rate [rad/s]
+    turn_max: float = 0.0524  # 3 deg/s
+    turn_sigma: float = 0.0349  # 2 deg/s
 
 
 class EpochStore:
@@ -177,19 +180,58 @@ def _subset(win: Window, cols: np.ndarray) -> Window:
     )
 
 
+def _turn_back(
+    u: np.ndarray, dt: np.ndarray, turn: np.ndarray | None
+) -> tuple[np.ndarray, np.ndarray]:
+    """(displacement over the last dt (M,K,3), velocity dt ago (M,K,3)) through the water.
+
+    turn (3,) or (M,3) = [omega rad/s, end s, duration s]: the target turned at omega (positive:
+    starboard, heading increasing) with constant speed and vertical rate (coordinated turn) from
+    end + duration until end seconds before now, and held a constant velocity before and after.
+    None: constant velocity."""
+    if turn is None:
+        return u[:, None, :] * dt[None, :, None], np.broadcast_to(u[:, None, :], (len(u), len(dt), 3))
+    turn = np.broadcast_to(np.asarray(turn, dtype=float), (len(u), 3))
+    omega, end, duration = turn[:, 0:1], turn[:, 1:2], turn[:, 2:3]
+    tau = dt[None, :]
+    recent = np.minimum(tau, end)  # (M,K) straight time after the turn
+    s = np.clip(tau - end, 0.0, duration)  # time spent turning
+    before = np.maximum(tau - end - duration, 0.0)  # straight time before the turn
+    a = omega * s  # heading change over the turning part
+    ue, un = u[:, 0:1], u[:, 1:2]
+    c1 = np.sinc(a / np.pi)  # sin a / a
+    c2 = np.sin(0.5 * a) * np.sinc(a / (2.0 * np.pi))  # (1 - cos a) / a
+    cos_a, sin_a = np.cos(a), np.sin(a)
+    a0 = omega * duration  # whole turn: the velocity held before it
+    ve0 = ue * np.cos(a0) - un * np.sin(a0)
+    vn0 = un * np.cos(a0) + ue * np.sin(a0)
+    disp = np.empty((len(u), len(dt), 3))
+    disp[..., 0] = ue * recent + s * (ue * c1 - un * c2) + ve0 * before
+    disp[..., 1] = un * recent + s * (un * c1 + ue * c2) + vn0 * before
+    disp[..., 2] = u[:, 2:3] * tau
+    vel = np.empty_like(disp)
+    vel[..., 0] = ue * cos_a - un * sin_a
+    vel[..., 1] = un * cos_a + ue * sin_a
+    vel[..., 2] = u[:, 2:3]
+    return disp, vel
+
+
 def _geometry(
-    states: np.ndarray, win: Window, current: CurrentFit, delay_c: float | None = None
+    states: np.ndarray, win: Window, current: CurrentFit, delay_c: float | None = None,
+    turn: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """(los (M,K,3), dist (M,K), rdot (M,K)) with positions back-propagated to each row time
-    under constant through-water velocity in the linear current (2nd order in the gradient).
-    With delay_c (sound speed) the position is taken at the emission time, r/c before the row."""
+    under constant through-water velocity (or the turn of _turn_back) in the linear current
+    (2nd order in the gradient). With delay_c (sound speed) the position is taken at the
+    emission time, r/c before the row."""
     p = states[:, 0:3]
     u = states[:, 3:6]
-    g = u + current.velocity(p)  # (M,3)
-    gg = g @ current.gradient.T  # (M,3)
+    cur = current.velocity(p)
+    gg = (u + cur) @ current.gradient.T  # (M,3)
     dt = win.dt[None, :, None]
-    q = p[:, None, :] - g[:, None, :] * dt + 0.5 * dt * dt * gg[:, None, :]
-    gq = g[:, None, :] - gg[:, None, :] * dt
+    disp, u_back = _turn_back(u, win.dt, turn)
+    q = p[:, None, :] - disp - cur[:, None, :] * dt + 0.5 * dt * dt * gg[:, None, :]
+    gq = u_back + cur[:, None, :] - gg[:, None, :] * dt
     los = q - win.pos[None, :, :]
     if delay_c:
         los -= gq * (np.linalg.norm(los, axis=2) / delay_c)[:, :, None]
@@ -207,14 +249,17 @@ def window_loglik(
     win: Window,
     current: CurrentFit,
     prm: MoveParams,
+    turn: np.ndarray | None = None,
 ) -> np.ndarray:
+    """Window log-likelihood of states at now; turn (2,) is one turn hypothesis for every state
+    (see _turn_back), None the constant-velocity model."""
     total = np.empty(len(states))
     delay_c = prm.c if prm.delay else None
     sigma2 = _sigma2(win, prm)
     chunk = int(max(64, LOGLIK_CHUNK_ELEMENTS // max(len(win.dt), 1)))
     for begin in range(0, len(states), chunk):
         part = states[begin : begin + chunk]
-        _, dist, rdot = _geometry(part, win, current, delay_c)
+        _, dist, rdot = _geometry(part, win, current, delay_c, turn)
         margin = (prm.max_range - dist) / prm.gate_soft
         gate = np.where(win.det[None, :], -np.logaddexp(0.0, -margin), -np.logaddexp(0.0, margin))
         pred = (win.rec[None, :] - part[:, 6:7]) * (1.0 - rdot / prm.c)
@@ -222,7 +267,7 @@ def window_loglik(
         total[begin : begin + chunk] = gate.sum(axis=1) - 0.5 * dop.sum(axis=1)
         if win.w_brg is not None and win.w_brg.any():
             cols = win.w_brg > 0
-            los, _, _ = _geometry(part, _subset(win, cols), current, delay_c)
+            los, _, _ = _geometry(part, _subset(win, cols), current, delay_c, turn)
             diff = _wrap(np.arctan2(los[..., 0], los[..., 1]) - win.brg[cols][None, :])
             total[begin : begin + chunk] -= 0.5 * np.sum((diff / prm.bearing_sigma) ** 2, axis=1)
     if prm.bias_sigma > 0:
@@ -236,14 +281,16 @@ def window_loglik(
 
 
 def _residuals(x: np.ndarray, win: Window, current: CurrentFit, prm: MoveParams) -> np.ndarray:
+    """x: the 7 state elements, plus [omega, end, duration] for the turn model (_turn_back)."""
     delay_c = prm.c if prm.delay else None
-    _, dist, rdot = _geometry(x[None, :], win, current, delay_c)
+    turn = x[7:10] if len(x) > 7 else None
+    _, dist, rdot = _geometry(x[None, 0:7], win, current, delay_c, turn)
     dist, rdot = dist[0], rdot[0]
     margin = (prm.max_range - dist) / prm.gate_soft
     soft = np.where(win.det, np.logaddexp(0.0, -margin), np.logaddexp(0.0, margin))
     pred = (win.rec - x[6]) * (1.0 - rdot / prm.c)
     if win.w_brg is not None and win.w_brg.any():
-        los, _, _ = _geometry(x[None, :], win, current, delay_c)
+        los, _, _ = _geometry(x[None, 0:7], win, current, delay_c, turn)
         diff = _wrap(np.arctan2(los[0, :, 0], los[0, :, 1]) - win.brg)
         bearing_part = win.w_brg * diff / prm.bearing_sigma
     else:
@@ -257,6 +304,8 @@ def _residuals(x: np.ndarray, win: Window, current: CurrentFit, prm: MoveParams)
     ]
     if prm.depth_fix is not None:
         parts.append(np.array([(x[2] - prm.depth_fix[0]) / prm.depth_fix[1]]))
+    if turn is not None and prm.turn_sigma > 0:
+        parts.append(np.array([x[7] / prm.turn_sigma]))
     return np.concatenate(parts)
 
 
@@ -266,33 +315,46 @@ def find_modes(
     current: CurrentFit,
     prm: MoveParams,
     max_nfev: int = 40,
+    turn_span: tuple[float, float] | None = None,
 ) -> list[tuple[np.ndarray, np.ndarray, float]]:
-    """Multi-start trust-region least squares. Returns [(mean, cov, cost)], duplicates merged."""
+    """Multi-start trust-region least squares. Returns [(mean, cov, cost)], duplicates merged.
+
+    10-element starts fit the turn model as well ([omega, end, duration], see _turn_back);
+    turn_span = (earliest end, latest start) in seconds before now."""
     lower = np.array([-np.inf, -np.inf, 0.0, -prm.max_speed, -prm.max_speed, -2.0, -np.inf])
     upper = np.array([np.inf, np.inf, prm.max_depth, prm.max_speed, prm.max_speed, 2.0, np.inf])
+    scale = np.array([300.0, 300.0, 30.0, 0.5, 0.5, 0.05, 0.05])
+    jitter = np.array([1e-8, 1e-8, 1e-6, 1e-4, 1e-4, 1e-2, 1e-2])
     if prm.bias_sigma > 0:
         lower[6], upper[6] = -6 * prm.bias_sigma, 6 * prm.bias_sigma
     else:
         lower[6], upper[6] = -1e-9, 1e-9
+    turn = starts.shape[1] > 7
+    if turn:
+        first, top = turn_span if turn_span is not None else (0.0, float(win.dt.max(initial=0.0)))
+        top = max(top, first + 1.0)
+        lower = np.append(lower, [-prm.turn_max, first, 0.0])
+        upper = np.append(upper, [prm.turn_max, top, top - first])
+        scale = np.append(scale, [0.005, 30.0, 30.0])
+        jitter = np.append(jitter, [1e-8, 1.0, 1.0])
     modes: list[tuple[np.ndarray, np.ndarray, float]] = []
     for start in starts:
         x0 = np.clip(start, lower + 1e-6, upper - 1e-6)
         try:
             sol = least_squares(
                 _residuals, x0, args=(win, current, prm), bounds=(lower, upper),
-                x_scale=np.array([300.0, 300.0, 30.0, 0.5, 0.5, 0.05, 0.05]),
-                max_nfev=max_nfev,
+                x_scale=scale, max_nfev=max_nfev,
             )
         except ValueError:
             continue
         jtj = sol.jac.T @ sol.jac
-        cov = np.linalg.pinv(jtj + np.diag([1e-8, 1e-8, 1e-6, 1e-4, 1e-4, 1e-2, 1e-2]))
+        cov = np.linalg.pinv(jtj + np.diag(jitter))
         cov = 0.5 * (cov + cov.T)
         duplicate = False
         for index, (mean, _, cost) in enumerate(modes):
             if np.linalg.norm(mean[0:3] - sol.x[0:3]) < 50.0 and np.linalg.norm(
                 mean[3:5] - sol.x[3:5]
-            ) < 0.2:
+            ) < 0.2 and (not turn or abs(mean[7] - sol.x[7]) < 0.002):
                 duplicate = True
                 if sol.cost < cost:
                     modes[index] = (sol.x, cov, float(sol.cost))
@@ -306,10 +368,11 @@ def find_modes(
 
 class GaussianMixture:
     def __init__(self, modes: list[tuple[np.ndarray, np.ndarray, float]], inflate: float = 1.5):
-        self.means = np.array([m[0] for m in modes])
+        # modes of the turn model propose their 7 state elements
+        self.means = np.array([m[0][0:7] for m in modes])
         covs = []
         for _, cov, _ in modes:
-            c = cov * inflate + np.diag([25.0, 25.0, 9.0, 0.01, 0.01, 1e-4, 1e-4])
+            c = cov[0:7, 0:7] * inflate + np.diag([25.0, 25.0, 9.0, 0.01, 0.01, 1e-4, 1e-4])
             w, v = np.linalg.eigh(c)
             covs.append((v * np.maximum(w, 1e-9)) @ v.T)
         self.covs = np.array(covs)

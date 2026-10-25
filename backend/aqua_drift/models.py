@@ -7,7 +7,7 @@ separate models so that the estimator can be fed observations only.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -409,6 +409,13 @@ class EstimatorConfig(BaseModel):
     # a detected maneuver gives this share of the particles another course (up to +-90 deg) and
     # speed (x0.7..1.3): the cloud otherwise stays sure of the old course while the target turns
     maneuver_respread_fraction: float = Field(default=0.0, ge=0, le=1)
+    # turn model of the move step: the window fit also tries a turn at a constant rate since an
+    # onset time and averages it with constant velocity (prior move_turn_prior). "after_maneuver":
+    # for move_turn_hold_s after a detected maneuver; "always": at every move step
+    move_turn_mode: Literal["off", "after_maneuver", "always"] = "off"
+    move_turn_hold_s: int = Field(default=300, ge=0, le=3600)
+    move_turn_prior: float = Field(default=0.2, gt=0, lt=1)
+    move_turn_hypotheses: int = Field(default=2, ge=1, le=6)
     use_bearing: bool = True
     bearing_sigma_deg: float = Field(default=15.0, gt=0, le=90)
     range_gate_softness_yd: float = Field(default=15.0, gt=0)
