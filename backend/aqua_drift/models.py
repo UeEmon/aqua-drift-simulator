@@ -341,6 +341,10 @@ class ForwardDeploymentConfig(BaseModel):
     # motion hypotheses that bring the target within R_max (+2 sigma) of it after its drop weigh less
     # than this (the proposal is withdrawn again above 2.5 x this)
     cancel_suggest_weight: float = Field(default=0.1, ge=0, le=1)
+    # with automatic approval, a maneuver detected after an open drop was planned lets the replanner
+    # withdraw it even when it would otherwise be kept (flown to, due soon, revised to the limit),
+    # once the target clearly no longer comes within detection range of it (as cancel_suggest_weight)
+    replan_obsolete_after_maneuver: bool = True
     # re-detection (再探知) after a lost contact (aqua_drift.search_deployment): while the estimate
     # is LOST the open automatic drops (planned on a track that no longer holds) are replaced and
     # search drops are laid where detection discs of search_radius_fraction x R_max cover the
@@ -690,6 +694,8 @@ class DeploymentRequest(BaseModel):
     # replanning: open drop tasks this plan replaces (all or nothing: rejected with 409 when one
     # of them is no longer revisable) and the revision of the new drops
     replaces: list[int] = Field(default_factory=list)
+    # open drops withdrawn after a maneuver (replanning.obsolete_drops; skipped when no longer open)
+    obsolete: list[int] = Field(default_factory=list)
     revision: int = 0
     source: str = "forward"  # forward | search (re-detection after a lost contact)
 

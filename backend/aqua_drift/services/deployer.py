@@ -61,7 +61,7 @@ async def run() -> None:
                     request = DeploymentRequest(
                         tick=feed.tick, positions=decision.positions, reason=decision.reason,
                         planned_ticks=decision.planned_ticks, bases=decision.bases,
-                        replaces=decision.replaces, revision=decision.revision,
+                        replaces=decision.replaces, obsolete=decision.obsolete, revision=decision.revision,
                     )
                     result = await post(client, "/internal/deploy", request.model_dump(mode="json"), feed.generation)
                     if result.status_code == 409:  # a drop was laid or flown to meanwhile

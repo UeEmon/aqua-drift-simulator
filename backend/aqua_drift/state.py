@@ -257,6 +257,7 @@ class SimulationState:
             self._check_generation(generation)
             if request.replaces:
                 self._replace_tasks(request.replaces)
+            self._withdraw_obsolete(request.obsolete)
             planned = request.planned_ticks or [None] * len(request.positions)
             bases = request.bases or [None] * len(request.positions)
             task_ids = []
@@ -274,7 +275,7 @@ class SimulationState:
             )
             self.deploy_history.append(record)
             self.last_deploy_tick = request.tick
-            if request.replaces:
+            if request.replaces or (request.obsolete and request.positions):
                 self.last_replan_tick = request.tick
             return record
 
@@ -288,6 +289,15 @@ class SimulationState:
             raise ReplanRejected(f"drops {refused} may no longer be replaced")
         for task_id in task_ids:
             by_id[task_id].status = "REPLACED"
+
+    def _withdraw_obsolete(self, task_ids: list[int]) -> None:
+        """Drops withdrawn after a maneuver (replanning.obsolete_drops): automatic approval only;
+        those laid or no longer open meanwhile are skipped."""
+        if not task_ids or self.config.layer.approval != "auto":
+            return
+        for task in self.tasks:
+            if task.task_id in task_ids and task.status in ("PROPOSED", "APPROVED") and task.source == "forward":
+                task.status = "REPLACED"
 
     async def deployment_feed(self) -> DeploymentFeed:
         async with self.lock:
