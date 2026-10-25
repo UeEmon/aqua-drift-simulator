@@ -48,6 +48,7 @@ TURN_START_DURATIONS = (30.0, 90.0)  # s, turning until the last detection
 TURN_MIN_RATE = math.radians(0.05)  # slower fitted turns are left to the constant-velocity model
 TURN_MIN_DURATION = 5.0  # s
 TURN_MIN_GAIN = 0.5  # cost (-log likelihood) by which the turn fit must beat constant velocity
+TURN_MAX_COST_GAP = 5.0  # a turn hypothesis this much costlier than the best one is left out
 
 
 @dataclass
@@ -710,10 +711,14 @@ class DopplerParticleFilter:
         if top - first < 2 * TURN_MIN_DURATION:
             self._turn_prev = None
             return []
-        starts = [
-            np.r_[mode[0], sign * TURN_START_RATE, first, min(duration, top - first)]
-            for mode in modes[:2] for sign in (1.0, -1.0) for duration in TURN_START_DURATIONS
-        ]
+        if self._turn_prev is None:  # a fresh search from the constant-velocity fits
+            starts = [
+                np.r_[mode[0], sign * TURN_START_RATE, first, min(duration, top - first)]
+                for mode in modes[:2] for sign in (1.0, -1.0) for duration in TURN_START_DURATIONS
+            ]
+        else:  # the previous turn carried on (below) plus one turn either way from the best fit
+            starts = [np.r_[modes[0][0], sign * TURN_START_RATE, first,
+                            min(TURN_START_DURATIONS[-1], top - first)] for sign in (1.0, -1.0)]
         if self._turn_prev is not None:  # warm start: the previous best turn carried on to now
             prev = self._turn_prev.copy()
             dt = now - self._turn_tick
@@ -734,7 +739,9 @@ class DopplerParticleFilter:
         kept = [
             m for m in fits
             if abs(m[0][7]) > TURN_MIN_RATE and m[0][9] > TURN_MIN_DURATION and m[2] < best_cv - TURN_MIN_GAIN
-        ][: self.move_turn_hypotheses]
+        ]
+        # a hypothesis far less likely than the best adds nothing to the mixture but its cost
+        kept = [m for m in kept if m[2] < kept[0][2] + TURN_MAX_COST_GAP][: self.move_turn_hypotheses]
         self._turn_prev = kept[0][0].copy() if kept else None
         self._turn_tick = now
         return kept
