@@ -12,7 +12,9 @@ Kept (never replaced):
     * a drop replaced replan_max_revisions times already (each slot settles after a few revisions),
     * operator / manual drops and drops without a plan basis,
     * with manual approval, drops the operator has approved.
-  So the head of the queue is always laid, whatever the estimate does.
+  So the head of the queue is always laid, whatever the estimate does -- with one exception: with
+  automatic approval, a drop planned before a detected maneuver is withdrawn (obsolete_drops) once
+  the target clearly no longer comes within detection range of it, even if it would be kept.
 
 Trigger (hysteresis 1): every automatic drop carries the estimate it was planned on (PlanBasis:
 the drop point relative to the estimated target, water frame, and the estimated heading and
@@ -36,7 +38,7 @@ layer's free time / position with only the kept drops comes from layer.ready_pos
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -76,6 +78,7 @@ class ReplanDecision:
     revision: int
     reason: str
     source: str = "forward"  # "search": re-detection drops (plan_search_replacement)
+    obsolete: list[int] = field(default_factory=list)  # kept drops withdrawn after a maneuver
 
 
 def flying_task_id(state: LayerState | None) -> int | None:
@@ -149,6 +152,30 @@ def estimate_change(estimate: TrackEstimate, drops: list[DropTask],
     return None
 
 
+def obsolete_drops(tick: int, estimate: TrackEstimate, replan: ReplanFeed, config: ForwardDeploymentConfig,
+                   max_slant_range_yd: float, max_depth_ft: float, skip: set[int]) -> list[int]:
+    """Open automatic drops planned before the latest detected maneuver that the target will
+    clearly no longer come near (detection_weight below cancel_suggest_weight on the current,
+    converged estimate). With automatic approval they are withdrawn even when the replanner would
+    keep them: after a turn the layer otherwise lays the line planned on the old course."""
+    if not config.replan_obsolete_after_maneuver or replan.layer.approval != "auto":
+        return []
+    maneuver = (estimate.metadata or {}).get("maneuver_detected_tick")
+    if maneuver is None:
+        return []
+    out = []
+    for task in replan.tasks:
+        if task.status not in ("PROPOSED", "APPROVED") or task.source != "forward" or task.basis is None \
+                or task.task_id in skip or maneuver <= task.basis.tick:
+            continue
+        due = due_tick(task, tick)
+        drop_s = max((due if due is not None else tick) - estimate.tick, 0.0)
+        if detection_weight(estimate, task.position, drop_s, config, max_slant_range_yd,
+                            max_depth_ft) < config.cancel_suggest_weight:
+            out.append(task.task_id)
+    return out
+
+
 def layer_availability(replan: ReplanFeed, kept: list[DropTask], tick: int) -> LayerAvailability:
     """When / where the layer is free for new drops with only the kept drops in its queue."""
     queue = sorted(kept, key=lambda t: t.flight_key())
@@ -208,7 +235,7 @@ def plan_replacement(
     open_tasks = [t for t in replan.tasks if t.status in ("PROPOSED", "APPROVED")]
     auto = replan.layer.approval == "auto"
     revisable = [t for t in open_tasks if is_revisable(t, tick, config, flying, auto)]
-    if not revisable:
+    if not revisable and not (config.replan_obsolete_after_maneuver and auto):
         return None, "no revisable drop"
     if estimate is None or estimate.current_position is None or estimate.uncertainty is None:
         return None, "no estimate"
@@ -222,22 +249,39 @@ def plan_replacement(
         return None, "estimate not converged enough to replan"
     if (estimate.through_water_speed_kt or 0.0) < config.min_speed_kt:
         return None, "target (nearly) stationary in the water"
-    why = estimate_change(estimate, revisable, config, r_max)
+    ids = {t.task_id for t in revisable}
+    obsolete = obsolete_drops(tick, estimate, replan, config, max_slant_range_yd, max_depth_ft, ids)
+    if not revisable and not obsolete:
+        return None, "no revisable drop"
+    why = estimate_change(estimate, revisable, config, r_max) if revisable else None
+    if obsolete:
+        why = f"{why}; " if why else ""
+        why += f"after the maneuver the target no longer comes near drops {obsolete}"
     if why is None:
         return None, "open drops still match the estimate"
     maneuver = (estimate.metadata or {}).get("maneuver_detected_tick")
     last = replan.last_replan_tick
     new_maneuver = maneuver is not None and (last is None or maneuver > last)
-    if last is not None and tick - last < config.replan_min_interval_s and not new_maneuver:
+    if last is not None and tick - last < config.replan_min_interval_s and not new_maneuver and not obsolete:
         return None, f"{why}; replanned {tick - last} s ago (< {config.replan_min_interval_s} s)"
 
-    ids = {t.task_id for t in revisable}
-    kept = [t for t in open_tasks if t.task_id not in ids]
+    withdrawn = [t for t in open_tasks if t.task_id in obsolete]
+
+    def only_withdraw(note: str) -> tuple[ReplanDecision | None, str]:
+        if not obsolete:
+            return None, f"{why}; {note}"
+        reason = f"replan: {why}; drops {obsolete} withdrawn ({note})"
+        return ReplanDecision(replaces=[], positions=[], planned_ticks=None, bases=[], revision=0,
+                              reason=reason, obsolete=obsolete), reason
+
+    gone = ids | set(obsolete)
+    revisable = [*revisable, *withdrawn]
+    kept = [t for t in open_tasks if t.task_id not in gone]
     kept_pending = [*other_pending, *(t.position for t in kept)]
     keep_cost = plan_cost_yd(estimate, observers, [*kept_pending, *(t.position for t in revisable)],
                              config, max_slant_range_yd, sensor, max_depth_ft)
     if keep_cost is None:
-        return None, f"{why}; the open drops cannot be evaluated"
+        return only_withdraw("the open drops cannot be evaluated")
     covered = covered_count(estimate, [*observers, *kept_pending], config, r_max)
     positions, plan_reason, report = plan_optimal_deployment(
         estimate, observers, kept_pending, config, max_slant_range_yd, free_slots + len(revisable),
@@ -246,12 +290,12 @@ def plan_replacement(
         sensor=sensor, max_depth_ft=max_depth_ft, maneuver_now=is_maneuver_now(estimate, config),
     )
     if not positions:
-        return None, f"{why}; kept the open drops (a fresh plan adds none: {plan_reason})"
+        return only_withdraw(f"kept the open drops (a fresh plan adds none: {plan_reason})")
     new_cost = plan_cost_yd(estimate, observers, [*kept_pending, *positions],
                             config, max_slant_range_yd, sensor, max_depth_ft)
     if new_cost is None or new_cost > (1.0 - config.replan_min_improvement) * keep_cost:
-        return None, (f"{why}; kept the open drops (fresh plan {new_cost or float('nan'):.0f} YD vs "
-                      f"{keep_cost:.0f} YD: < {config.replan_min_improvement * 100:.0f} % better)")
+        return only_withdraw(f"kept the open drops (fresh plan {new_cost or float('nan'):.0f} YD vs "
+                             f"{keep_cost:.0f} YD: < {config.replan_min_improvement * 100:.0f} % better)")
     replaced = sorted(ids)
     reason = (f"replan: {why}; drops {replaced} replaced, predicted error {keep_cost:.0f} -> "
               f"{new_cost:.0f} YD; {plan_reason}")
@@ -259,7 +303,7 @@ def plan_replacement(
     return ReplanDecision(
         replaces=replaced, positions=positions, planned_ticks=planned,
         bases=[basis_for(estimate, p) for p in positions],
-        revision=1 + max(t.revision for t in revisable), reason=reason,
+        revision=1 + max(t.revision for t in revisable), reason=reason, obsolete=obsolete,
     ), reason
 
 
@@ -353,16 +397,23 @@ def plan_search_replacement(
         flying = flying_task_id(replan.layer_state)
         auto = replan.layer.approval == "auto"
         replaced = [t.task_id for t in open_tasks if is_revisable(t, tick, config, flying, auto)]
-    positions, reason = plan_search_drops(
-        estimate, config, max_slant_range_yd, free_slots + len(replaced), ready_in_s)
+    kept_tasks = [t for t in open_tasks if t.task_id not in replaced]
+    # routed and timed from where and when the layer is free after the drops it keeps
+    layer = layer_availability(replan, kept_tasks, tick) if replan is not None else None
+    positions, reason, times = plan_search_drops(
+        estimate, config, max_slant_range_yd, free_slots + len(replaced), ready_in_s, layer)
     if not positions:
         return None, reason
     if replaced:
         reason = f"{reason}; replaces drops {replaced}"
     # after the drops that are kept: a search drop without a time would be flown first and could keep
     # them from ever being laid (each new search comes first again)
-    kept = [due_tick(t, tick) for t in open_tasks if t.task_id not in replaced]
+    kept = [due_tick(t, tick) for t in kept_tasks]
     kept = [k for k in kept if k is not None]
-    planned = [math.ceil(max(kept)) + 1] * len(positions) if kept else None
+    after = math.ceil(max(kept)) + 1 if kept else None
+    if times:
+        planned = [max(tick + math.ceil(t), after or 0) for t in times]
+    else:
+        planned = [after] * len(positions) if after is not None else None
     return ReplanDecision(replaces=replaced, positions=positions, planned_ticks=planned, bases=[],
                           revision=0, reason=reason, source="search"), reason

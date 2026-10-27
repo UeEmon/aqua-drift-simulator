@@ -200,12 +200,14 @@ class ScenarioRun:
                 self.config.max_slant_range_yd, free_slots, sensor, self.config.estimator.max_target_depth_ft,
             )
             if decision is not None:
+                gone = {*decision.replaces, *decision.obsolete}
                 for task in open_tasks:
-                    if task.task_id in decision.replaces:
+                    if task.task_id in gone:
                         task.status = "REPLACED"
                 self._queue(decision.positions, decision.planned_ticks, decision.bases, decision.revision)
-                self.replans.append((self.tick, decision.replaces))
-                self.last_replan_tick = self.tick
+                self.replans.append((self.tick, sorted(gone)))
+                if decision.positions:
+                    self.last_replan_tick = self.tick
                 return
         positions, _, planned = plan_forward_deployment_scheduled(
             self.tick,

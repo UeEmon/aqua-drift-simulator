@@ -246,3 +246,51 @@ async def test_state_keeps_flying_a_proposed_drop_until_the_operator_cancels() -
     assert task.cancel_suggested_tick == TICK
     await state.cancel_tasks([1])
     assert task.status == "CANCELLED"
+
+
+def test_maneuver_withdraws_the_kept_drop_on_the_old_course() -> None:
+    """After a detected turn, the drop the layer is flying to on the old course is withdrawn too
+    (automatic approval only); a kept drop the target still comes near stays."""
+    tasks = east_plan()
+    north = estimate(hdg=0.0)
+    north.metadata["maneuver_detected_tick"] = TICK + 5
+    decision, reason = replan(north, tasks, layer_state=flying_to(2))
+    assert decision is not None, reason
+    assert decision.obsolete == [2] and decision.replaces == [1, 3]
+    assert "no longer comes near drops [2]" in reason
+    # drop 1 (4,000 YD east, within R_max of the new track) is kept while flown to
+    decision, reason = replan(north, tasks, layer_state=flying_to(1))
+    assert decision is not None and decision.obsolete == [] and decision.replaces == [2, 3]
+    # without the maneuver, or with the setting off, the drop flown to is kept as before
+    plain, _ = replan(estimate(hdg=0.0), tasks, layer_state=flying_to(2))
+    assert plain is not None and plain.obsolete == []
+    off = ForwardDeploymentConfig(replan_obsolete_after_maneuver=False)
+    kept, _ = replan(north, tasks, layer_state=flying_to(2), config=off)
+    assert kept is not None and kept.obsolete == []
+    # manual approval: the operator decides (cancel_suggestions proposes it)
+    manual = plan_replacement(TICK, north, BEHIND, [], ReplanFeed(
+        tasks=tasks, layer_state=flying_to(2), layer=LayerConfig(enabled=True, approval="manual"),
+        datum=ORIGIN), ForwardDeploymentConfig(), R_MAX_YD, 99, SensorModel())[0]
+    assert manual is None or manual.obsolete == []
+
+
+def test_drop_flown_to_is_withdrawn_even_when_nothing_else_is_open() -> None:
+    north = estimate(hdg=0.0)
+    north.metadata["maneuver_detected_tick"] = TICK + 5
+    only = [drop(3, offset(14000, 1500), 100, EAST)]  # due soon and flown to: otherwise kept
+    decision, reason = replan(north, only, layer_state=flying_to(3))
+    assert decision is not None, reason
+    assert decision.obsolete == [3] and decision.replaces == []
+
+
+def test_server_withdraws_obsolete_drops_with_automatic_approval_only() -> None:
+    config = ScenarioConfig()
+    config.layer.enabled = True
+    state = SimulationState(config)
+    state.tasks = east_plan()
+    state.layer_state = flying_to(2)
+    state._withdraw_obsolete([2, 9])
+    assert [t.status for t in state.tasks] == ["APPROVED", "REPLACED", "APPROVED"]
+    config.layer.approval = "manual"
+    state._withdraw_obsolete([3])
+    assert state.tasks[2].status == "APPROVED"

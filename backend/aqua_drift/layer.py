@@ -255,6 +255,10 @@ def step(
 
 
 GUIDANCE_SLACK_M = 5.0  # a fresh plan up to this much longer than the path being flown replaces it
+# the path being flown is kept while it still ends this close to the point (x the capture radius):
+# the point drifts in the estimated current and a tight approach planned a minute before can end
+# some 70 m off by the last seconds; at half the capture radius the layer then went round once
+KEEP_PATH_FRACTION = 0.8
 
 
 def _guidance(east: float, north: float, heading: float, approach: float | None, radius: float,
@@ -266,7 +270,7 @@ def _guidance(east: float, north: float, heading: float, approach: float | None,
 
     Every second the shortest path is planned afresh (it follows the point as it drifts). The
     path being flown (`flown`: sides, remaining lengths m) is kept instead when the fresh plan
-    is longer and the path still ends within half the capture radius of the point: the motion
+    is longer and the path still ends within KEEP_PATH_FRACTION of the capture radius of the point: the motion
     is exact along the path, but at the joins of its segments a tiny error can make the exact
     plan jump to another, longer path (a degenerate turn-turn path, or a last turn that has
     become a whisker too tight: a loop). Close to the point, when the fresh plan is a loop and
@@ -282,7 +286,7 @@ def _guidance(east: float, north: float, heading: float, approach: float | None,
     if flown is not None and sum(flown[1]) > v * dt and float(length) > sum(flown[1]) + GUIDANCE_SLACK_M:
         sides_n, lengths_n = tuple(flown[0]), tuple(x / radius for x in flown[1])
         _, end_e, end_n = routelib.motion(sides_n, lengths_n, heading, radius, sum(lengths_n))
-        if math.hypot(float(end_e) - east, float(end_n) - north) <= config.capture_radius_yd * YD_TO_M / 2.0:
+        if math.hypot(float(end_e) - east, float(end_n) - north) <= KEEP_PATH_FRACTION * config.capture_radius_yd * YD_TO_M:
             path, length, kept = flown, sum(flown[1]), True
             turn, step_e, step_n = routelib.motion(sides_n, lengths_n, heading, radius, v * dt / radius)
     if not kept and approach is not None and float(length) > math.hypot(east, north) + math.pi * radius:
@@ -305,6 +309,10 @@ def drift(position: Position, east_kt: float, north_kt: float, dt: float = 1.0) 
 
 LOOKAHEAD_S = 400  # longest stretch of the orbit over which the layer looks for the best departure
 DEPART_TIE_S = 2.0  # a later departure must be this much closer to the planned time to wait for it
+# a timed drop the layer will pass within the capture radius flying straight on: taken on the way
+# when it arrives no more than this early (the guidance finds no turn-limited path to a point inside
+# both turning circles, and waiting for one went round the orbit once, ~250 s at 200 kt)
+PASS_AHEAD_EARLY_S = 10.0
 APPROACH_TOLERANCE_S = 5.0  # on the way, a new approach heading may make the drop this much later
 # a new wind estimate (the splash of the drop before) moves the release point by up to some 100 m
 # across; within this of the release the layer could not turn for it and would go round once
@@ -400,6 +408,21 @@ def departure(state: LayerState, config: LayerConfig, point: Position, left: flo
     if best is None:
         return "wait"
     return "leave" if abs(now - left) <= float(best[0][0]) + DEPART_TIE_S else "wait"
+
+
+def passes_ahead(state: LayerState, config: LayerConfig, point: Position, left: float) -> bool:
+    """Will the layer pass the point within the capture radius flying straight on, and get there no
+    more than PASS_AHEAD_EARLY_S before the planned time (left s from now)?"""
+    v = max(state.speed_kt, 1.0) * KNOT_TO_MPS
+    east, north, _ = local_offset_m(state.position, point)
+    heading = math.radians(state.heading_deg)
+    along = east * math.sin(heading) + north * math.cos(heading)
+    across = abs(east * math.cos(heading) - north * math.sin(heading))
+    if along <= 0.0 or across > config.capture_radius_yd * YD_TO_M:
+        return False
+    if along > v * max(state.straight_s, 0.0) + 2.0 * orbit_radius_m(config, state.speed_kt):
+        return False  # far ahead: the turn-limited path reaches it, departure decides
+    return along / v >= left - PASS_AHEAD_EARLY_S
 
 
 def _departure_errors(state: LayerState, config: LayerConfig, point: Position, left: float, datum: Position,
@@ -862,6 +885,8 @@ def advance(feed: LayerFeed, state: LayerState, rng: random.Random) -> tuple[Lay
                 near = eta_to(state, config, point) <= left + 600
                 decision = (departure(state, config, point, left, datum, approach, (-wind[0], -wind[1]))
                             if near else "wait")
+                if decision == "wait" and passes_ahead(state, config, point, left):
+                    decision = "leave"  # right ahead (the next drop of a line): not round the orbit
             if decision == "leave":
                 target, task_id = point, task.task_id
         to_drop = target is not None
