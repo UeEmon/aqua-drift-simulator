@@ -76,9 +76,9 @@ def test_cloud_drifts_with_its_through_water_velocity() -> None:
 
 def test_plan_needs_a_lost_estimate_and_a_cloud() -> None:
     config = ForwardDeploymentConfig()
-    positions, why = plan_search_drops(lost(ring_cloud(), "COASTING_TRACKING"), config, R_MAX_YD, 4, 0.0)
+    positions, why, _ = plan_search_drops(lost(ring_cloud(), "COASTING_TRACKING"), config, R_MAX_YD, 4, 0.0)
     assert not positions and "not lost" in why
-    positions, why = plan_search_drops(lost(None), config, R_MAX_YD, 4, 0.0)
+    positions, why, _ = plan_search_drops(lost(None), config, R_MAX_YD, 4, 0.0)
     assert not positions and "no particle cloud" in why
     config.search_enabled = False
     assert not plan_search_drops(lost(ring_cloud()), config, R_MAX_YD, 4, 0.0)[0]
@@ -86,7 +86,7 @@ def test_plan_needs_a_lost_estimate_and_a_cloud() -> None:
 
 def test_plan_places_drops_around_the_estimate_within_the_free_slots() -> None:
     config = ForwardDeploymentConfig()
-    positions, reason = plan_search_drops(lost(ring_cloud()), config, R_MAX_YD, 2, 0.0)
+    positions, reason, _ = plan_search_drops(lost(ring_cloud()), config, R_MAX_YD, 2, 0.0)
     assert len(positions) == 2 and "search" in reason
     for p in positions:
         east, north, _ = local_offset_m(ORIGIN, p)
@@ -116,9 +116,9 @@ def test_search_replaces_revisable_forward_drops_and_keeps_the_others() -> None:
     # and could keep it from ever being laid)
     assert decision.positions and decision.planned_ticks
     assert all(t > soon.planned_tick for t in decision.planned_ticks)
-    # nothing kept: as soon as possible
+    # nothing kept: planned for when the layer can be there (routed from where it is free)
     alone, _ = plan_search_replacement(TICK, lost(ring_cloud()), replan_feed(far), config, R_MAX_YD, 0, 0.0, None)
-    assert alone is not None and alone.planned_ticks is None
+    assert alone is not None and alone.planned_ticks and all(t >= TICK for t in alone.planned_ticks)
 
 
 def test_no_search_before_the_interval_or_while_search_drops_are_open() -> None:
@@ -182,3 +182,27 @@ def test_no_maneuver_hypotheses_when_disabled_or_when_the_cloud_is_still() -> No
     a = predicted_positions(cloud, 100.0, 0.0, 300.0, np.random.default_rng(1))
     b = predicted_positions(cloud, 100.0, 0.8, 300.0, np.random.default_rng(1))
     assert np.allclose(a, b)
+
+
+def test_search_drops_are_routed_and_timed_along_the_layers_flight() -> None:
+    """With the layer's availability each next drop is planned for when the layer gets there
+    from the one before (not all for one time) and where the cloud will be then."""
+    from aqua_drift.optimal_deployment import LayerAvailability
+    from aqua_drift.search_deployment import search_points_routed
+
+    cloud = ring_cloud()
+    n = len(cloud["east_m"])
+    cloud["vel_east_mps"] = [4.0] * n  # the whole cloud moves east at 4 m/s
+    cloud["vel_north_mps"] = [0.0] * n
+    layer = LayerAvailability(ready_s=30.0, position=_offset(ORIGIN, -6000.0, 0.0, 0.0), speed_kt=200.0,
+                              max_bank_deg=15.0, heading_deg=90.0, straight_after_s=5.0)
+    points, times, covered = search_points_routed(cloud, layer, ORIGIN, 40.0, 0.8 * R_MAX_M, 0.95, 4,
+                                                  np.random.default_rng(1))
+    assert len(points) >= 2 and covered > 0.5
+    assert times[0] >= 30.0 + 6000.0 / (200 * 0.5144) - 20.0  # the flight from where the layer is free
+    assert np.all(np.diff(times) > 0.0)  # one after another along the route
+    # each point lies on the cloud as predicted for its own drop time (+ fall): the ring moved east
+    ring = np.hypot(np.asarray(cloud["east_m"]), np.asarray(cloud["north_m"])).mean()
+    for (east, north), t in zip(points, times, strict=True):
+        moved = np.hypot(east - 4.0 * (t + 40.0), north)
+        assert abs(moved - ring) < 0.5 * ring

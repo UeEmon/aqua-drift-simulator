@@ -397,16 +397,23 @@ def plan_search_replacement(
         flying = flying_task_id(replan.layer_state)
         auto = replan.layer.approval == "auto"
         replaced = [t.task_id for t in open_tasks if is_revisable(t, tick, config, flying, auto)]
-    positions, reason = plan_search_drops(
-        estimate, config, max_slant_range_yd, free_slots + len(replaced), ready_in_s)
+    kept_tasks = [t for t in open_tasks if t.task_id not in replaced]
+    # routed and timed from where and when the layer is free after the drops it keeps
+    layer = layer_availability(replan, kept_tasks, tick) if replan is not None else None
+    positions, reason, times = plan_search_drops(
+        estimate, config, max_slant_range_yd, free_slots + len(replaced), ready_in_s, layer)
     if not positions:
         return None, reason
     if replaced:
         reason = f"{reason}; replaces drops {replaced}"
     # after the drops that are kept: a search drop without a time would be flown first and could keep
     # them from ever being laid (each new search comes first again)
-    kept = [due_tick(t, tick) for t in open_tasks if t.task_id not in replaced]
+    kept = [due_tick(t, tick) for t in kept_tasks]
     kept = [k for k in kept if k is not None]
-    planned = [math.ceil(max(kept)) + 1] * len(positions) if kept else None
+    after = math.ceil(max(kept)) + 1 if kept else None
+    if times:
+        planned = [max(tick + math.ceil(t), after or 0) for t in times]
+    else:
+        planned = [after] * len(positions) if after is not None else None
     return ReplanDecision(replaces=replaced, positions=positions, planned_ticks=planned, bases=[],
                           revision=0, reason=reason, source="search"), reason
