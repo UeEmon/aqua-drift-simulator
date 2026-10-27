@@ -255,6 +255,10 @@ def step(
 
 
 GUIDANCE_SLACK_M = 5.0  # a fresh plan up to this much longer than the path being flown replaces it
+# the path being flown is kept while it still ends this close to the point (x the capture radius):
+# the point drifts in the estimated current and a tight approach planned a minute before can end
+# some 70 m off by the last seconds; at half the capture radius the layer then went round once
+KEEP_PATH_FRACTION = 0.8
 
 
 def _guidance(east: float, north: float, heading: float, approach: float | None, radius: float,
@@ -266,7 +270,7 @@ def _guidance(east: float, north: float, heading: float, approach: float | None,
 
     Every second the shortest path is planned afresh (it follows the point as it drifts). The
     path being flown (`flown`: sides, remaining lengths m) is kept instead when the fresh plan
-    is longer and the path still ends within half the capture radius of the point: the motion
+    is longer and the path still ends within KEEP_PATH_FRACTION of the capture radius of the point: the motion
     is exact along the path, but at the joins of its segments a tiny error can make the exact
     plan jump to another, longer path (a degenerate turn-turn path, or a last turn that has
     become a whisker too tight: a loop). Close to the point, when the fresh plan is a loop and
@@ -282,7 +286,7 @@ def _guidance(east: float, north: float, heading: float, approach: float | None,
     if flown is not None and sum(flown[1]) > v * dt and float(length) > sum(flown[1]) + GUIDANCE_SLACK_M:
         sides_n, lengths_n = tuple(flown[0]), tuple(x / radius for x in flown[1])
         _, end_e, end_n = routelib.motion(sides_n, lengths_n, heading, radius, sum(lengths_n))
-        if math.hypot(float(end_e) - east, float(end_n) - north) <= config.capture_radius_yd * YD_TO_M / 2.0:
+        if math.hypot(float(end_e) - east, float(end_n) - north) <= KEEP_PATH_FRACTION * config.capture_radius_yd * YD_TO_M:
             path, length, kept = flown, sum(flown[1]), True
             turn, step_e, step_n = routelib.motion(sides_n, lengths_n, heading, radius, v * dt / radius)
     if not kept and approach is not None and float(length) > math.hypot(east, north) + math.pi * radius:
