@@ -8,6 +8,7 @@ from aqua_drift.layer import (
     advance,
     initial_state,
     orbit_radius_m,
+    passes_ahead,
     planned_path,
     step,
     turn_radius_m,
@@ -15,6 +16,7 @@ from aqua_drift.layer import (
 from aqua_drift.models import (
     DeploymentRequest,
     LayerConfig,
+    LayerState,
     ObserverPlacement,
     Position,
     ScenarioConfig,
@@ -553,3 +555,17 @@ def test_arrival_after_a_drop_flies_straight_on_to_the_next_point_on_the_line() 
     point = _offset(state.position, -40.0, 350.0, 0.0)
     v = state.speed_kt * 0.514444
     assert _arrival_s(state, config, point, 0.0) < 350.0 / v + 2.0
+
+
+def test_next_drop_right_ahead_is_taken_on_the_way() -> None:
+    """Just after a drop, the next drop of a line a few seconds ahead lies inside both turning
+    circles: the layer takes it flying straight on instead of going round the orbit (~250 s)."""
+    config = LayerConfig()
+    origin = Position(latitude=35.0, longitude=140.0, depth_ft=0.0)
+    state = LayerState(tick=0, position=origin, heading_deg=0.0, speed_kt=200.0, mode="ORBIT",
+                       straight_s=5.0)
+    ahead = _offset(origin, 40.0, 230.0, 0.0)  # 230 m ahead, 40 m to the side
+    assert passes_ahead(state, config, ahead, left=2.0)
+    assert not passes_ahead(state, config, ahead, left=200.0)  # far too early: wait on the orbit
+    assert not passes_ahead(state, config, _offset(origin, 300.0, 230.0, 0.0), left=2.0)  # abeam
+    assert not passes_ahead(state, config, _offset(origin, 0.0, -230.0, 0.0), left=2.0)  # behind
