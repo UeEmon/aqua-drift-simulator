@@ -154,19 +154,24 @@ def estimate_change(estimate: TrackEstimate, drops: list[DropTask],
 
 def obsolete_drops(tick: int, estimate: TrackEstimate, replan: ReplanFeed, config: ForwardDeploymentConfig,
                    max_slant_range_yd: float, max_depth_ft: float, skip: set[int]) -> list[int]:
-    """Open automatic drops planned before the latest detected maneuver that the target will
-    clearly no longer come near (detection_weight below cancel_suggest_weight on the current,
-    converged estimate). With automatic approval they are withdrawn even when the replanner would
-    keep them: after a turn the layer otherwise lays the line planned on the old course."""
+    """Open automatic drops the target will clearly no longer come near (detection_weight below
+    cancel_suggest_weight on the current, converged estimate): forward drops planned before the
+    latest detected maneuver, and search drops once the contact is no longer lost. With automatic
+    approval they are withdrawn even when the replanner would keep them: after a turn the layer
+    otherwise lays the line planned on the old course, and after the target is found again the
+    search drops planned on the lost cloud (minutes ahead), the next line waiting behind them."""
     if not config.replan_obsolete_after_maneuver or replan.layer.approval != "auto":
         return []
     maneuver = (estimate.metadata or {}).get("maneuver_detected_tick")
-    if maneuver is None:
-        return []
+    found = estimate.observability_status != "LOST"
     out = []
     for task in replan.tasks:
-        if task.status not in ("PROPOSED", "APPROVED") or task.source != "forward" or task.basis is None \
-                or task.task_id in skip or maneuver <= task.basis.tick:
+        if task.status not in ("PROPOSED", "APPROVED") or task.task_id in skip:
+            continue
+        if task.source == "search":
+            if not found:
+                continue
+        elif task.source != "forward" or task.basis is None or maneuver is None or maneuver <= task.basis.tick:
             continue
         due = due_tick(task, tick)
         drop_s = max((due if due is not None else tick) - estimate.tick, 0.0)
@@ -256,7 +261,7 @@ def plan_replacement(
     why = estimate_change(estimate, revisable, config, r_max) if revisable else None
     if obsolete:
         why = f"{why}; " if why else ""
-        why += f"after the maneuver the target no longer comes near drops {obsolete}"
+        why += f"the target no longer comes near drops {obsolete}"
     if why is None:
         return None, "open drops still match the estimate"
     maneuver = (estimate.metadata or {}).get("maneuver_detected_tick")

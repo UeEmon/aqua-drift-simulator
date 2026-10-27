@@ -296,7 +296,7 @@ class SimulationState:
         if not task_ids or self.config.layer.approval != "auto":
             return
         for task in self.tasks:
-            if task.task_id in task_ids and task.status in ("PROPOSED", "APPROVED") and task.source == "forward":
+            if task.task_id in task_ids and task.status in ("PROPOSED", "APPROVED") and task.source in ("forward", "search"):
                 task.status = "REPLACED"
 
     async def deployment_feed(self) -> DeploymentFeed:
