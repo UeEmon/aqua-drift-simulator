@@ -256,3 +256,21 @@ def test_schedule_routes_with_the_observers_fall_and_the_wind() -> None:
     assert times == [leg.drop_s for leg in legs]
     _, still = schedule(east, north, 0.0, speed, bank, [0.0, 0.0], orders=[[0, 1]], before_s=2.0, after_s=5.0)
     assert still != times
+
+
+def test_schedule_starts_with_the_leg_being_flown() -> None:
+    """The layer is on its way to a queued drop (51 s ahead): a line planned after it is routed on
+    from that leg as it is flown. Re-planned from the layer's position the first leg came out a
+    loop for a heading a fraction of a degree off, and the line ~3 min late (closed loop S0)."""
+    from aqua_drift.route import schedule
+
+    east = [4159.0, 4388.0, 5074.0, 5302.0, 5645.0, 5874.0, 6103.0]
+    north = [-3396.0] * 7
+    prefix = ([3662.6], [-3264.4], [51.0])
+    common = {"start_s": 0.0, "prefix": prefix, "before_s": 2.0, "after_s": 5.0,
+              "orders": [list(range(7)), list(range(7))[::-1]]}
+    _, free = schedule(east, north, math.radians(169.205), 200.0, 15.0, [280.0] * 7, **common)
+    _, flown = schedule(east, north, math.radians(169.205), 200.0, 15.0, [280.0] * 7, **common,
+                        first_s=np.array([51.0]), first_headings=np.array([math.radians(105.0)]))
+    assert min(free) > 400.0  # the first leg re-planned as a loop
+    assert min(flown) < 360.0  # on from the drop the layer is flying to

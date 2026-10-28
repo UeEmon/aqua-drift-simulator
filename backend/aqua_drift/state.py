@@ -296,7 +296,7 @@ class SimulationState:
         if not task_ids or self.config.layer.approval != "auto":
             return
         for task in self.tasks:
-            if task.task_id in task_ids and task.status in ("PROPOSED", "APPROVED") and task.source == "forward":
+            if task.task_id in task_ids and task.status in ("PROPOSED", "APPROVED") and task.source in ("forward", "search"):
                 task.status = "REPLACED"
 
     async def deployment_feed(self) -> DeploymentFeed:
@@ -360,6 +360,8 @@ class SimulationState:
             "layer_heading_deg": self.layer_state.heading_deg if self.layer_state is not None else None,
             "layer_queue": [t.position for t in queue],
             "layer_queue_ticks": [t.planned_tick for t in queue],
+            **dict(zip(("layer_eta_s", "layer_approach_deg"), layerlib.committed_leg(self.layer_state, queue),
+                       strict=True)),
             "layer_speed_kt": layer.speed_kt,
             "layer_max_bank_deg": layer.max_bank_deg,
             "layer_max_per_release": layer.max_per_release,

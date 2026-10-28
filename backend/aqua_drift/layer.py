@@ -667,6 +667,16 @@ def ready_altitude_ft(state: LayerState | None, config: LayerConfig, queued: boo
     return state.altitude_ft if state is not None else config.cruise_altitude_ft
 
 
+def committed_leg(state: LayerState | None, queue: list) -> tuple[float | None, float | None]:
+    """(flight time s, approach heading deg) to the first drop of the queue (in flight order) when
+    the layer is on its way to it, else (None, None): a plan routed on after the queue starts with
+    that leg as it is flown (re-planned from the layer's position it could come out a loop)."""
+    if state is None or state.mode != "TRANSIT" or not queue or queue[0].task_id != state.task_id \
+            or state.eta_s is None or not math.isfinite(state.eta_s):
+        return None, None
+    return float(state.eta_s), state.approach_deg
+
+
 def ready_pose(state: LayerState | None, config: LayerConfig, tasks: list, tick: int,
                default: Position) -> tuple[int, Position, float | None]:
     """When, where and on which heading (deg, None: unknown) the layer is free for a new drop:

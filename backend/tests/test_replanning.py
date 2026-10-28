@@ -294,3 +294,19 @@ def test_server_withdraws_obsolete_drops_with_automatic_approval_only() -> None:
     config.layer.approval = "manual"
     state._withdraw_obsolete([3])
     assert state.tasks[2].status == "APPROVED"
+
+
+def test_search_drops_are_withdrawn_once_the_target_is_found_again() -> None:
+    """Search drops planned on the lost cloud (minutes ahead) are withdrawn when the estimate is no
+    longer lost and the target will not come near them, even while flown to: the next line waits
+    behind them otherwise. One the target still comes near stays."""
+    found = estimate(hdg=0.0)
+    far = drop(1, offset(14000, 1500), 100, EAST, source="search")
+    near = drop(2, offset(0, 3000), 400, EAST, source="search")
+    decision, reason = replan(found, [far, near], layer_state=flying_to(1))
+    assert decision is not None, reason
+    assert decision.obsolete == [1]
+    assert "no longer comes near drops [1]" in reason
+    lost = estimate(hdg=0.0)
+    lost.observability_status = "LOST"
+    assert replan(lost, [far, near], layer_state=flying_to(1))[0] is None
