@@ -831,6 +831,9 @@ def plan_optimal_deployment(
             orders=line_orders, before_s=layer.straight_before_s, after_s=layer.straight_after_s,
             release=routelib.release_table(layer.release_east_m, layer.release_north_m) if layer.release_east_m else None,
             drift=layer.drift_mps, wind=layer.wind_mps, **first,
+            # every leg as the guidance flies it, like earliest_s: the exact path of a later leg came
+            # out a loop (~4 min) longer than the flight, and the drop was laid behind the target
+            capture_m=layer.capture_m, loose_all=True,
         )
     else:
         group_times = [group_times[g] for g in order]

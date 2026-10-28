@@ -408,7 +408,7 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
           hold_s: float = 0.0,
           release: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None,
           keep: float | None = None, drift: tuple[float, float] = (0.0, 0.0),
-          wind: tuple[float, float] = (0.0, 0.0)) -> list[Leg]:
+          wind: tuple[float, float] = (0.0, 0.0), loose_all: bool = False) -> list[Leg]:
     """The route through points (east, north m from the start) in order: the approach heading,
     arrival and drop time (s) of each.
 
@@ -419,7 +419,8 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
     time, see layer.departure), else at the arrival; the path itself is never lengthened to keep a
     planned time. The next leg starts at the point on the approach heading.
     The first leg is flown as the guidance flies it (path_to loose, capture_m): close to the point
-    a small offset from the path is not a loop.
+    a small offset from the path is not a loop. loose_all: every leg so (each is the first when it
+    is flown; the exact path of a later leg could come out a loop longer than the flight).
 
     first_s: the flight time to the first point per approach heading (first_headings, default
     approach_headings(east, north, 0)) when the layer is already on its way to it: it is dropped
@@ -475,8 +476,8 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
         start = drop[:, None] - start_s  # s from the start: where the points are
         if last:
             last_leg = partial(_last_leg_to, east[k], north[k], xs, ys, pose, drift, radius, release,
-                               {"prefer": prefer, "margin_m": margin_m, "loose": k == 0, "capture_m": capture_m,
-                                **straight})
+                               {"prefer": prefer, "margin_m": margin_m, "loose": k == 0 or loose_all,
+                                "capture_m": capture_m, **straight})
 
             if moving:  # from the straight-line meeting (a path along a line closes on it at once)
                 t0 = start[:, 0] + intercept_s(east[k] + drift[0] * start[:, 0] - xs,
@@ -497,7 +498,8 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
             base_e, base_n = east[k] + de, north[k] + dn  # the release point per approach heading, at the start
             leg = partial(_leg_to, base_e[None, :], base_n[None, :], xs[:, None], ys[:, None],
                           np.repeat(pose[:, None], len(headings), axis=1), headings[None, :], drift, radius,
-                          {"prefer": prefer, "margin_m": margin_m, "loose": k == 0, "capture_m": capture_m, **straight})
+                          {"prefer": prefer, "margin_m": margin_m, "loose": k == 0 or loose_all, "capture_m": capture_m,
+                           **straight})
             when = np.broadcast_to(start, (len(pose), len(headings)))
             if moving:  # from the straight-line meeting (a path along a line closes on it at once)
                 when = when + intercept_s(base_e[None, :] + drift[0] * when - xs[:, None],
@@ -510,7 +512,7 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
                 late = start + length / v - when
                 length = np.where(late < -MEET_MISS_S, v * (when - start), length)
                 length = np.where(late > MEET_MISS_S, length + TWO_PI * radius, length)
-            if k == 0:  # flown as the guidance flies it: close to the point a turn-then-straight
+            if k == 0 or loose_all:  # flown as the guidance flies it: close to the point a turn-then-straight
                 # path may cross it up to LOOP_TOLERANCE off the approach, and the next leg starts there
                 crossed = leg(when, final=True)[1]
                 crossed = np.where(np.isfinite(crossed), crossed, headings[None, :])
@@ -536,7 +538,7 @@ def route(east: list[float], north: list[float], heading: float, speed_kt: float
         arrivals.append(arrive[best, cols])
         drops.append(drop)
         if not last:
-            pose = crossed[best, cols] if k == 0 else headings
+            pose = crossed[best, cols] if k == 0 or loose_all else headings
         if not last:  # the release point where it is at the drop
             here_e = base_e + drift[0] * np.where(np.isfinite(drop), drop - start_s, 0.0)
             here_n = base_n + drift[1] * np.where(np.isfinite(drop), drop - start_s, 0.0)
@@ -562,7 +564,8 @@ def schedule(east: list[float], north: list[float], heading: float | None, speed
              drift: tuple[float, float] = (0.0, 0.0),
              wind: tuple[float, float] = (0.0, 0.0),
              first_s: np.ndarray | None = None,
-             first_headings: np.ndarray | None = None) -> tuple[list[int], list[float]]:
+             first_headings: np.ndarray | None = None,
+             capture_m: float = 0.0, loose_all: bool = False) -> tuple[list[int], list[float]]:
     """Order and drop times for the drops of one plan: wanted_s are the optimal drop times
     (s from now; the layer is free at start_s at the origin on `heading`, None: unknown).
 
@@ -572,7 +575,8 @@ def schedule(east: list[float], north: list[float], heading: float | None, speed
     later. `orders`: only these orders (e.g. along a line, either way). before_s, after_s: wings
     level at the drops (see route). release, drift, wind: the observer's fall and the wind, as
     the layer flies (see route). first_s, first_headings: the leg to the first point (the
-    prefix's when given) when the layer is on its way to it (see route). Returns (order: indices
+    prefix's when given) when the layer is on its way to it; capture_m, loose_all: every leg as the
+    guidance flies it (see route). Returns (order: indices
     into the inputs, drop times in that order)."""
     n = len(east)
     if n == 0:
@@ -587,7 +591,8 @@ def schedule(east: list[float], north: list[float], heading: float | None, speed
         h = heading if heading is not None else _bearing(*((pe[0], pn[0]) if pe else (east[order[0]], north[order[0]])))
         legs = route([*pe, *(east[i] for i in order)], [*pn, *(north[i] for i in order)], h, speed_kt, bank_deg,
                      [*ps, *(wanted_s[i] for i in order)], start_s=start_s, before_s=before_s, after_s=after_s,
-                     release=release, drift=drift, wind=wind, first_s=first_s, first_headings=first_headings)
+                     release=release, drift=drift, wind=wind, first_s=first_s, first_headings=first_headings,
+                     capture_m=capture_m, loose_all=loose_all)
         drops = [leg.drop_s for leg in legs[len(pe):]]
         delay = sum(max(t - wanted_s[i], 0.0) for t, i in zip(drops, order, strict=True)) + sum(
             max(leg.drop_s - s, 0.0) for leg, s in zip(legs, ps) if s is not None)
