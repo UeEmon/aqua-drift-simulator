@@ -274,3 +274,19 @@ def test_schedule_starts_with_the_leg_being_flown() -> None:
                         first_s=np.array([51.0]), first_headings=np.array([math.radians(105.0)]))
     assert min(free) > 400.0  # the first leg re-planned as a loop
     assert min(flown) < 360.0  # on from the drop the layer is flying to
+
+
+def test_schedule_flies_every_leg_as_the_guidance_does() -> None:
+    """A drop after a queued line, behind its end and off its heading: the exact path of that leg
+    is a loop, but the guidance (loose path within the capture radius) gets there ~4 min sooner --
+    the layer did, and the drop timed on the exact path was laid behind the target (closed loop S0)."""
+    from aqua_drift.route import schedule
+
+    prefix = ([4213.6, 4442.1, 4670.7], [-2658.8, -2658.3, -2657.9], [49.0, 52.0, 54.0])
+    common = {"start_s": 0.0, "prefix": prefix, "before_s": 2.0, "after_s": 5.0, "orders": [[0]],
+              "first_s": np.array([52.7]), "first_headings": np.array([math.radians(90.0)])}
+    _, exact = schedule([4220.0], [-2893.0], math.radians(160.3), 200.0, 15.0, [317.0], **common)
+    _, guided = schedule([4220.0], [-2893.0], math.radians(160.3), 200.0, 15.0, [317.0], **common,
+                         capture_m=150 * 0.9144, loose_all=True)
+    assert exact[0] > 500.0
+    assert guided[0] < 360.0
