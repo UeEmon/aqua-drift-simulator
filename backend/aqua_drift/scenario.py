@@ -17,8 +17,8 @@ from aqua_drift.deployment import default_position
 from aqua_drift.estimation.engine import TrackingEngine
 from aqua_drift.forward_deployment import plan_forward_deployment_scheduled
 from aqua_drift.layer import advance as advance_layer
+from aqua_drift.layer import committed_leg, ready_pose
 from aqua_drift.layer import initial_state as initial_layer_state
-from aqua_drift.layer import ready_pose
 from aqua_drift.models import (
     DopplerBatch,
     DropTask,
@@ -154,6 +154,7 @@ class ScenarioRun:
             now_position=state.position if state is not None else None,
             now_heading_deg=state.heading_deg if state is not None else None,
             queue=[(t.position, None if t.planned_tick is None else float(t.planned_tick - self.tick)) for t in queue],
+            **dict(zip(("now_eta_s", "now_approach_deg"), committed_leg(state, queue), strict=True)),
             **layer_frame(state),
         )
 

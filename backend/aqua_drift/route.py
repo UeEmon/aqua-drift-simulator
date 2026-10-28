@@ -560,7 +560,9 @@ def schedule(east: list[float], north: list[float], heading: float | None, speed
              after_s: float = 0.0,
              release: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None,
              drift: tuple[float, float] = (0.0, 0.0),
-             wind: tuple[float, float] = (0.0, 0.0)) -> tuple[list[int], list[float]]:
+             wind: tuple[float, float] = (0.0, 0.0),
+             first_s: np.ndarray | None = None,
+             first_headings: np.ndarray | None = None) -> tuple[list[int], list[float]]:
     """Order and drop times for the drops of one plan: wanted_s are the optimal drop times
     (s from now; the layer is free at start_s at the origin on `heading`, None: unknown).
 
@@ -569,8 +571,9 @@ def schedule(east: list[float], north: list[float], heading: float | None, speed
     when the layer can be there after the previous drop (route along the order), whichever is
     later. `orders`: only these orders (e.g. along a line, either way). before_s, after_s: wings
     level at the drops (see route). release, drift, wind: the observer's fall and the wind, as
-    the layer flies (see route). Returns (order: indices into the inputs, drop times in that
-    order)."""
+    the layer flies (see route). first_s, first_headings: the leg to the first point (the
+    prefix's when given) when the layer is on its way to it (see route). Returns (order: indices
+    into the inputs, drop times in that order)."""
     n = len(east)
     if n == 0:
         return [], []
@@ -584,7 +587,7 @@ def schedule(east: list[float], north: list[float], heading: float | None, speed
         h = heading if heading is not None else _bearing(*((pe[0], pn[0]) if pe else (east[order[0]], north[order[0]])))
         legs = route([*pe, *(east[i] for i in order)], [*pn, *(north[i] for i in order)], h, speed_kt, bank_deg,
                      [*ps, *(wanted_s[i] for i in order)], start_s=start_s, before_s=before_s, after_s=after_s,
-                     release=release, drift=drift, wind=wind)
+                     release=release, drift=drift, wind=wind, first_s=first_s, first_headings=first_headings)
         drops = [leg.drop_s for leg in legs[len(pe):]]
         delay = sum(max(t - wanted_s[i], 0.0) for t, i in zip(drops, order, strict=True)) + sum(
             max(leg.drop_s - s, 0.0) for leg, s in zip(legs, ps) if s is not None)

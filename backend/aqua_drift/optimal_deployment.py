@@ -380,6 +380,10 @@ class LayerAvailability:
     now_position: Position | None = None
     now_heading_deg: float | None = None
     queue: list[tuple[Position, float | None]] = field(default_factory=list)
+    # when it is on its way to the first of them: the flight time and approach heading of that leg
+    # (layer.committed_leg; None: not on its way)
+    now_eta_s: float | None = None
+    now_approach_deg: float | None = None
     # the observer's free fall from the release altitude to the sea surface (terminal velocity
     # m/s; None: no fall, in the water at the drop) and the layer's altitudes (LayerConfig): its
     # altitude when free (ready_s), the cruise altitude it orbits at and the drop altitude it
@@ -811,16 +815,22 @@ def plan_optimal_deployment(
             ahead = sorted(range(len(heads)), key=lambda k: dx * grid[heads[k], 0] + dy * grid[heads[k], 1])
             forward = config.line_forward_only and abs(d - heading) < 1e-9 or int(lane[chosen[0]]) == continuing_lane
             line_orders = [ahead] if forward else [ahead, ahead[::-1]]
+        first = {}
         if queued:
             offsets = [local_offset_m(start, p) for p, _ in layer.queue]
             prefix = ([o[0] for o in offsets], [o[1] for o in offsets], [s for _, s in layer.queue])
+            if layer.now_eta_s is not None and layer.now_approach_deg is not None:
+                # the leg being flown, as it is flown (from the layer's position it can come out a
+                # loop, which put the next line ~3 min late: deployment_diagnosis S0, 2026-10-28)
+                first = {"first_s": np.array([layer.now_eta_s]),
+                         "first_headings": np.array([math.radians(layer.now_approach_deg)])}
         order, group_times = routelib.schedule(
             [float(grid[i, 0]) - start_e for i in heads], [float(grid[i, 1]) - start_n for i in heads],
             None if heading is None else math.radians(heading), layer.speed_kt,
             layer.max_bank_deg, group_times, start_s=0.0 if queued else layer.ready_s, prefix=prefix,
             orders=line_orders, before_s=layer.straight_before_s, after_s=layer.straight_after_s,
             release=routelib.release_table(layer.release_east_m, layer.release_north_m) if layer.release_east_m else None,
-            drift=layer.drift_mps, wind=layer.wind_mps,
+            drift=layer.drift_mps, wind=layer.wind_mps, **first,
         )
     else:
         group_times = [group_times[g] for g in order]
@@ -868,6 +878,7 @@ def availability_from_feed(feed) -> LayerAvailability | None:
         now_heading_deg=feed.layer_heading_deg,
         queue=[(p, None if t is None else float(t - feed.tick))
                for p, t in zip(feed.layer_queue, feed.layer_queue_ticks, strict=True)],
+        now_eta_s=feed.layer_eta_s, now_approach_deg=feed.layer_approach_deg,
         fall_terminal_mps=feed.layer_fall_terminal_mps,
         altitude_ft=feed.layer_ready_altitude_ft,
         cruise_altitude_ft=feed.layer_cruise_altitude_ft,

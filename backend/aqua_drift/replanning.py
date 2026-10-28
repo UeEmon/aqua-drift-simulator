@@ -195,6 +195,7 @@ def layer_availability(replan: ReplanFeed, kept: list[DropTask], tick: int) -> L
         now_position=state.position if state is not None else None,
         now_heading_deg=state.heading_deg if state is not None else None,
         queue=[(t.position, None if t.planned_tick is None else float(t.planned_tick - tick)) for t in queue],
+        **dict(zip(("now_eta_s", "now_approach_deg"), layerlib.committed_leg(state, queue), strict=True)),
         fall_terminal_mps=replan.fall_terminal_mps,
         altitude_ft=layerlib.ready_altitude_ft(state, replan.layer, bool(queue)),
         cruise_altitude_ft=replan.layer.cruise_altitude_ft, drop_altitude_ft=replan.layer.drop_altitude_ft,

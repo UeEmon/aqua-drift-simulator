@@ -726,6 +726,9 @@ class DeploymentFeed(BaseModel):
     layer_heading_deg: float | None = None
     layer_queue: list[Position] = Field(default_factory=list)
     layer_queue_ticks: list[int | None] = Field(default_factory=list)
+    # on its way to the first of them: the flight time (s) and approach heading of that leg
+    layer_eta_s: float | None = None
+    layer_approach_deg: float | None = None
     layer_speed_kt: float = 200.0
     layer_max_bank_deg: float = 15.0
     layer_max_per_release: int = 1  # observers one drop can release at once (LayerConfig.max_per_release)
