@@ -1,3 +1,4 @@
+import itertools
 import math
 import random
 
@@ -67,6 +68,13 @@ def test_layer_reaches_points_ahead_and_behind_with_bank_limit() -> None:
 
 
 
+def _segment_distance(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Distance (m) of the origin from the segment a-b."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    t = max(0.0, min(1.0, -(a[0] * dx + a[1] * dy) / max(dx * dx + dy * dy, 1e-9)))
+    return math.hypot(a[0] + t * dx, a[1] + t * dy)
+
+
 def test_planned_path_follows_the_turn_through_the_drop_points() -> None:
     config = LayerConfig()
     rng = random.Random(5)
@@ -77,7 +85,9 @@ def test_planned_path_follows_the_turn_through_the_drop_points() -> None:
     assert planned_path(start, config, []) == []
     assert path[0] == (round(start.position.latitude, 5), round(start.position.longitude, 5))
     assert path[-1] == (round(further.latitude, 5), round(further.longitude, 5))
-    assert (round(behind.latitude, 5), round(behind.longitude, 5)) in path
+    # through the first point: within the capture radius of the path (dropped on coming that close)
+    xy = [local_offset_m(behind, Position(latitude=lat, longitude=lon, depth_ft=0.0))[:2] for lat, lon in path]
+    assert min(_segment_distance(a, b) for a, b in itertools.pairwise(xy)) <= config.capture_radius_yd * 0.9144
     # a curved path, not straight legs: it starts along the current heading and turns
     first = local_offset_m(start.position, Position(latitude=path[1][0], longitude=path[1][1], depth_ft=0.0))
     heading = math.radians(start.heading_deg)
