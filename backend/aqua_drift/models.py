@@ -857,6 +857,13 @@ class LayerState(BaseModel):
     # planned flight path ahead (飛行予定経路): [latitude, longitude] from the current position
     # through the open drop points in order, along the turn-limited guidance path
     planned_path: list[tuple[float, float]] = Field(default_factory=list)
+    # the forecast the planned path is drawn from (layer.forecast): [tick, latitude, longitude] of
+    # the layer over the ground ahead, the drop points it was made for ([latitude, longitude] at
+    # its first tick) and what else it depends on (layer.forecast_key). Kept while the layer flies
+    # along it and none of that changes
+    forecast: list[tuple[int, float, float]] = Field(default_factory=list)
+    forecast_points: list[tuple[float, float]] = Field(default_factory=list)
+    forecast_key: str = ""
     # 3-D flight and the wind at the flight altitude
     altitude_ft: float = 0.0
     ground_speed_kt: float | None = None

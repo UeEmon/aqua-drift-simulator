@@ -201,7 +201,7 @@ class WireEncoder:
         layer = data["deployment"].pop("layer", None)
         path = None
         if layer is not None:  # the guidance' own path bookkeeping is not shown
-            for key in ("approach_key", "path_sides", "path_lengths_m"):
+            for key in ("approach_key", "path_sides", "path_lengths_m", "forecast", "forecast_points", "forecast_key"):
                 layer.pop(key, None)
             # the planned flight path (up to a few hundred points) changes only when the plan
             # does: sent separately, only when changed, instead of in every message
