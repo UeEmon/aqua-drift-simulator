@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 from aqua_drift.models import Position, ScenarioConfig, Velocity
-from aqua_drift.physics import YD_TO_M, move_position
+from aqua_drift.physics import FT_TO_M, YD_TO_M, move_position
 
 KNOT_TO_MPS = 0.5144444444444445
 
@@ -20,6 +20,23 @@ def _offset(origin: Position, east_m: float, north_m: float, depth_ft: float) ->
     return Position(latitude=moved.latitude, longitude=moved.longitude, depth_ft=depth_ft)
 
 
+def surround_radius_m(config: ScenarioConfig) -> float:
+    """Radius (m) of the four initial observers around the target's initial position:
+    surround_radius_yd, shortened so that every one of the four lies within
+    surround_range_fraction x the detection range (slant range R_max, including the depth
+    difference between the target and the observer) of the target's initial position."""
+    d = config.deployment
+    radius = d.surround_radius_yd * YD_TO_M
+    reach = d.surround_range_fraction * config.max_slant_range_yd * YD_TO_M
+    target_depth_ft = config.target.initial_position.depth_ft
+    for index in range(4):
+        observer_depth_ft = d.depth_ft + (index % 3) * d.depth_step_ft
+        dz = abs(target_depth_ft - observer_depth_ft) * FT_TO_M
+        horizontal = math.sqrt(max(reach * reach - dz * dz, 0.0))
+        radius = min(radius, horizontal)
+    return radius
+
+
 def default_position(config: ScenarioConfig, index: int, angle_hint: float = 0.0) -> Position:
     d = config.deployment
     origin = config.target.initial_position
@@ -29,8 +46,9 @@ def default_position(config: ScenarioConfig, index: int, angle_hint: float = 0.0
     spacing = d.spacing_yd * YD_TO_M
     if d.pattern == "surround":
         # first four: square around the target's initial position, diagonal to its heading;
-        # further observers: rings of eight at 1.6x, 2.2x ... the radius
-        radius = d.surround_radius_yd * YD_TO_M
+        # further observers: rings of eight at 1.6x, 2.2x ... the radius. The radius is kept
+        # within the detection range (surround_radius_m) so the target is detected from the start
+        radius = surround_radius_m(config)
         if index < 4:
             angle = hdg + math.radians(45.0 + 90.0 * index)
         else:

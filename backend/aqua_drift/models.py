@@ -369,11 +369,14 @@ class ObserverDeploymentConfig(BaseModel):
 
     `surround` (default): the first four observers surround the target's initial position
     (bearings HDG+45/135/225/315 deg at surround_radius_yd); further observers are added on a
-    wider ring."""
+    wider ring. The radius is shortened, when needed, so that each of the four lies within
+    surround_range_fraction x the detection range (max_slant_range_yd, slant range including
+    the depth difference) of the target's initial position."""
 
     pattern: str = Field(default="surround", pattern="^(surround|grid|line|ring|random)$")
     initial_count: int = Field(default=4, ge=1, le=100)  # further containers wait as standby
     surround_radius_yd: float = Field(default=3000.0, gt=0)
+    surround_range_fraction: float = Field(default=0.8, gt=0, le=1)  # x R_max cap on the radius
     spacing_yd: float = Field(default=3000.0, gt=0)
     line_bearing_deg: float = Field(default=0.0, ge=0, lt=360)
     offset_ahead_yd: float = Field(default=9000.0)
