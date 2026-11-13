@@ -47,7 +47,7 @@
 | 4.5 | **観測者は1〜99、番号は再利用可能**（以前の1〜100から変更） | ✅ | 観測者番号 obs-01〜obs-99（`observer_limit` 1..99）。観測を終えた番号（3時間経過・最古削除）は空きとなり、最も小さい空き番号から再利用。番号ごとに回数（session）を持ち、履歴は「obs-03#1」の形で区別して保持。終了した回の観測者からの送信は拒否 | `test_observer_slot_is_reused_with_new_session`、`test_orchestration.py`、CI（実コンテナで番号再利用を確認） |
 | 4.6 | 上限超過時は最古から削除、観測履歴は保持 | ✅ | `SimulationState.set_observer`／`evict_oldest`（FIFO）。99番まで埋まっている時に新たな観測者が必要になると、最古の観測者を削除して番号を空ける、DB `simulation_events` は追記のみ | 同上 |
 | 4.7 | 各観測者の観測時間は最大3時間 | ✅ | `max_observation_seconds = 10800`、超過で 410 → コンテナ終了 | `test_observer_expires_after_three_hours` |
-| 4.8 | **初期観測者は目標を囲む4点** | ✅ | 既定パターン `surround`：目標初期位置から半径 3000 YD、HDG±45°/135° の4点（深度は 200/350/500 Ft 交互）。5台目以降は外側のリング。再スタート時は新しい初期位置の周囲に再配置（選択可） | `test_default_observers_surround_target`, `test_reset_replaces_default_observers_around_new_target` |
+| 4.8 | **初期観測者は目標を囲む4点** | ✅ | 既定パターン `surround`：目標初期位置から半径 3000 YD、HDG±45°/135° の4点（深度は 200/350/500 Ft 交互）。探知距離が短いときは、4点とも目標初期位置から探知距離（斜距離）の 0.8 倍以内に入るよう半径を縮める（`deployment.surround_range_fraction`）。5台目以降は外側のリング。再スタート時は新しい初期位置の周囲に再配置（選択可） | `test_default_observers_surround_target`, `test_default_surround_within_detection_range`, `test_reset_replaces_default_observers_around_new_target` |
 | 4.11 | **コンテナの起動を可変にしてメモリ消費を抑える** | ✅ | `orchestrator` コンテナが Docker Engine API で観測者コンテナを必要時に起動（初期4台・前程配置・手動配置）し、観測終了後は自動削除。待機コンテナは既定で常駐させない（`OBSERVER_WARM_STANDBY`=0）。観測者コンテナにメモリ上限（`OBSERVER_MEMORY_MB`=192）。Docker ソケットを使わない静的構成（`--profile static-observers`）も選択可 | `test_orchestration.py`、CI（実コンテナの起動・停止とメモリ使用量を記録） |
 | 4.10 | **目標推定位置の前程に適宜観測者を配置** | ✅ | `forward_deployment.plan_forward_deployment`（推定値のみ使用、真値は不使用）。水の座標系で、推定位置＋対水速度×先行時間（既定600秒）の予測点を最小カバー数（既定2）未満の観測者しか覆っていなければ、推定針路の前方4000 YD・左右2000 YDに観測者を投入（既定2点）。`deployer` コンテナが5秒ごとに判断し、待機中の観測者コンテナを投入。状態がTRACKINGでない・不確かさが大きい・最短間隔内のときは配置しない。GUI から即時配置も可能 | `test_forward_deployment.py`、`test_standby_observers_take_forward_deployments`、`test_forward_deployment_keeps_target_in_detection`（固定4点では約1700秒で探知が途切れる条件で、2200秒時点も探知・追尾を継続）、E2E |
 | 4.12 | **観測者の自動投入アルゴリズム：ドップラー追尾が最適な位置に探知距離を勘案して投入し、本数と深度も最適値を計算** | ✅ | `optimal_deployment.plan_optimal_deployment`（前程配置の既定方式 `forward.strategy="optimal"`、推定値のみ使用）。水の座標系で、計画時間（既定1800秒）のドップラーのフィッシャー情報（上限斜距離以内だけ探知）から、先行時間後と計画終了時の予測誤差（水平＋重み付き深度）を最小化。候補＝前方×左右レーン×深度（60/200/500/1000/1500 Ft）、貪欲法で追加し、目標誤差（25 YD）到達・改善10%未満・上限本数・空き番号で本数を決定。（4.17 で機動対応・方位・探知境界・鏡像の評価に拡張）投入時期は探知範囲の不足、または予測誤差が目標超かつ改善30%以上。詳細は `docs/optimal-deployment.md` | `test_forward_deployment.py`（前方・一直線にしない・深度、目標誤差と空き番号による本数、十分なら投入しない、即時配置）。比較：3000秒で水平誤差RMS 8 YD・深度約20 Ft（固定方式 13 YD・約180 Ft）。E2E：即時配置が最適方式で計画され、画面に本数・深度・予測誤差を表示 |
@@ -194,6 +194,6 @@
 | 推定開始時に過去の観測を使うか | 使わない（開始時刻以降の観測のみ） |
 | 前程配置の既定値 | 方式「最適」（計画1800秒、目標誤差25 YD、上限4本、深度候補60〜1500 Ft）。固定方式は前方4000 YD・左右2000 YD・2点。共通：先行600秒、最短間隔120秒、最小カバー2 |
 | 待機観測者数 | 既定0（必要時に起動）。`OBSERVER_WARM_STANDBY` で常駐数を指定可 |
-| 周囲4点の半径・向き | 3000 YD、目標針路に対して斜め45°（設定 `deployment.surround_radius_yd`） |
+| 周囲4点の半径・向き | 3000 YD、目標針路に対して斜め45°（設定 `deployment.surround_radius_yd`）。ただし探知距離 × 0.8（斜距離、`deployment.surround_range_fraction`）を超えないよう縮める |
 | 位置・距離観測の誤差（比較用） | 位置 50 YD / 30 Ft、距離 2 %（比較ツールの仮定値） |
 | シミュレーター名称 | リポジトリ名に合わせ「AQUA-DRIFT」 |

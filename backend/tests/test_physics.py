@@ -200,3 +200,26 @@ def test_live_command_supersedes_legs_due_before_it() -> None:
     assert commanded_motion(target, 40, 0)[0] == 45.0
     assert commanded_motion(target, 60, 0)[0] == 270.0  # a later leg still does
     assert commanded_motion(target, 40, 0)[1:] == (target.desired_through_water_speed_kt, target.desired_depth_ft)
+
+
+@pytest.mark.parametrize("range_yd", [500.0, 1000.0, 2500.0, 6000.0])
+def test_default_surround_within_detection_range(range_yd: float) -> None:
+    """The four initial observers lie within surround_range_fraction x the detection range
+    (slant range) of the target's initial position, whatever the detection range."""
+    from aqua_drift.deployment import default_position
+    from aqua_drift.physics import local_offset_m
+
+    config = ScenarioConfig()
+    config.max_slant_range_yd = range_yd
+    origin = config.target.initial_position
+    limit = config.deployment.surround_range_fraction * range_yd * 0.9144
+    quadrants = set()
+    for index in range(4):
+        east, north, down = local_offset_m(origin, default_position(config, index))
+        assert math.sqrt(east * east + north * north + down * down) <= limit * 1.01
+        quadrants.add((east > 0, north > 0))
+    assert len(quadrants) == 4
+    if range_yd >= 6000.0:  # long range: the configured radius is kept
+        assert math.hypot(east, north) == pytest.approx(
+            config.deployment.surround_radius_yd * 0.9144, rel=0.01
+        )

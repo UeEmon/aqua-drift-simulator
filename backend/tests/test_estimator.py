@@ -22,6 +22,8 @@ def _config(**estimator) -> ScenarioConfig:
 def test_no_estimate_before_detection() -> None:
     config = _config()
     config.max_slant_range_yd = 500.0
+    # the default surround is kept within detection range: lay a line 9000 YD ahead instead
+    config.deployment.pattern = "line"
     run = ScenarioRun(config, 2)
     output = run.run(5)
     assert output.estimates[0].observability_status == "NO_DETECTION"
