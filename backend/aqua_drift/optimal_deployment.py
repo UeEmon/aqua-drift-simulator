@@ -62,6 +62,15 @@ from the release altitude to the sea surface, so the drop is that fall time earl
 altitude as the layer will have it: see LayerAvailability.fall_s). A later drop keeps the
 observer's 3 h observing time and its slot for when they are useful.
 
+Ahead of the target at the observation start: an observer starts observing observer_startup_s after it
+is in the water (the sensor's start-up and settling), and an observer that starts after the target has
+passed its closest point of approach (CPA) misses the Doppler's zero crossing and only sees the target
+going away. So each candidate's observation start (its earliest drop + fall + start-up) must come at
+least cpa_ahead_s (+ 2 sigma position / speed) before the CPA of the estimated track (cpa_s): candidates
+the layer cannot lay in time are left out, the information counts from the observation start, the drop
+time is never later than that, and an observer the layer's route would still lay too late is taken out
+of the plan (the route is planned again without it).
+
 Line laying (detection range shorter than the layer's turn radius, `line_laying`): the layer cannot
 fly between observers a few hundred metres apart without a loop each, so a plan is one line along
 the track: candidates only on lines parallel to the track (up to 0.5 R_max to either side), the
@@ -466,6 +475,15 @@ class LayerAvailability:
         return self.ready_s + length / v
 
 
+def cpa_s(points: np.ndarray, heading: float, speed: float) -> np.ndarray:
+    """Time (s from now) at which the estimated track (from the origin on `heading` at `speed`, water
+    frame) passes its closest point of approach (horizontal) to each point (N,>=2 metres from the
+    estimate); inf for a (nearly) stationary target."""
+    if speed < 0.1:
+        return np.full(len(points), np.inf)
+    return (points[:, 0] * math.sin(heading) + points[:, 1] * math.cos(heading)) / speed
+
+
 def drop_times(
     chosen_points: np.ndarray,  # (K,3)
     earliest: np.ndarray,  # (K,)
@@ -475,13 +493,17 @@ def drop_times(
     position_sigma_m: float,
     speed: float,
     fall_s=None,  # (earliest, drop_s) -> fall time s (LayerAvailability.fall_s; None: no fall)
+    startup_s: float = 0.0,  # from in the water to observing (ForwardDeploymentConfig.observer_startup_s)
+    latest_start: np.ndarray | None = None,  # (K,) latest observation start (s from now; ahead of the CPA)
 ) -> np.ndarray:
     """Optimal drop (release) time of each chosen observer (s from now): as late as possible
     without losing information -- the observer in the water just before the target (earliest
     over the hypotheses, less a position-uncertainty margin) comes within the detection range,
     so released its fall time before that -- but not before the layer can be there. A later
     drop keeps the observer's 3 h observing time and its slot for when they are useful and lets
-    the plan use the latest estimate."""
+    the plan use the latest estimate. The observer observes startup_s after it is in the water, and
+    starts observing no later than latest_start (the target still ahead of it), so it is released
+    that much earlier."""
     enter = np.full(len(chosen_points), np.inf)
     for pos in trajectories:
         r = np.linalg.norm(pos[None, :, :] - chosen_points[:, None, :], axis=2)  # (K,T)
@@ -489,7 +511,10 @@ def drop_times(
         first = np.where(inside.any(axis=1), inside.argmax(axis=1) * FINE_S, np.inf)
         enter = np.minimum(enter, first)
     margin = lead_s + 2.0 * position_sigma_m / max(speed, 0.1)
-    splash = np.where(np.isfinite(enter), enter - margin, earliest)  # in the water by then
+    observe = np.where(np.isfinite(enter), enter - margin, np.inf)  # observing by then
+    if latest_start is not None:
+        observe = np.minimum(observe, latest_start)
+    splash = np.where(np.isfinite(observe), observe - startup_s, earliest)  # in the water by then
     times = np.maximum(earliest, splash)
     if fall_s is not None:
         # the fall time depends on the release altitude, which depends on the drop time (how long
@@ -672,22 +697,41 @@ def plan_optimal_deployment(
             earliest[members] = layer.earliest_s(origin, grid[members], ways)
     else:
         earliest = layer.earliest_s(origin, grid)
+    # the observation start of each candidate (its earliest drop + the fall + the sensor's start-up) must
+    # come before the estimated track's CPA to it, with a margin: the observer ahead of the target
+    startup = float(config.observer_startup_s)
+    fall_at = layer.fall_s if layer is not None else None
+    sigma_m = estimate.uncertainty.horizontal_major_yd * YD_TO_M
+    ahead_margin = float(config.cpa_ahead_s) + 2.0 * sigma_m / max(speed, 0.1)
+
+    def observation_start(idx: np.ndarray, drop_s: np.ndarray) -> np.ndarray:
+        fall = fall_at(earliest[idx], drop_s) if fall_at is not None else 0.0
+        return drop_s + fall + startup
+
+    cpa = cpa_s(grid, heading, speed)
+    observe = observation_start(np.arange(len(grid)), earliest)
+    before_cpa = observe <= cpa - ahead_margin
+    grid, earliest, observe, cpa = grid[before_cpa], earliest[before_cpa], observe[before_cpa], cpa[before_cpa]
+    lane, spot = lane[before_cpa], spot[before_cpa]
+    if not len(grid):
+        return [], "optimal: the layer cannot lay an observer ahead of the target before its CPA", None
     if lines:
         # the information counts from when the layer can be on the track (not only after the lead
         # time: a short-range field must be laid close ahead, where the estimate is still good) and
         # until the next line can take over: the layer's next pass (its loop), the lead of a drop
         # and one detection radius of overlap. The line must hold the target that long, so it is
         # laid contiguous and not spread over the whole horizon
-        t0 = min(max(float(np.min(earliest)), 0.0), float(steps[-1]))
+        t0 = min(max(float(np.min(observe)), 0.0), float(steps[-1]))
         hold = layer.cycle_s() + float(config.drop_lead_s) + r_max / speed
         evaluate = (steps >= t0) & (steps <= t0 + max(hold, STEP_S))
-    parts = [_measurement_info(grid[part], pos, vel, steps, earliest[part], sensor, r_max)
+    parts = [_measurement_info(grid[part], pos, vel, steps, observe[part], sensor, r_max)
              for part in np.array_split(np.arange(len(grid)), math.ceil(len(grid) / CHUNK))]
     cand_meas = np.concatenate([p[0] for p in parts], axis=1)
     cand_det = np.concatenate([p[1] for p in parts], axis=1)
     del parts
     useful = cand_det.any(axis=(0, 2))
     grid, earliest, lane, spot = grid[useful], earliest[useful], lane[useful], spot[useful]
+    observe, cpa = observe[useful], cpa[useful]
     cand_meas, cand_det = cand_meas[:, useful], cand_det[:, useful]
     if not len(grid):
         return [], "optimal: the layer cannot lay an observer before the target passes", None
@@ -697,13 +741,13 @@ def plan_optimal_deployment(
     def mirror(chosen_idx: list[int], extra: np.ndarray | None) -> np.ndarray:
         """Mirror cost of existing + chosen (+ each extra candidate)."""
         fixed = np.vstack([detecting_existing, grid[chosen_idx]]) if chosen_idx else detecting_existing
-        fixed_start = np.concatenate([np.zeros(len(detecting_existing)), earliest[chosen_idx]])
+        fixed_start = np.concatenate([np.zeros(len(detecting_existing)), observe[chosen_idx]])
         if extra is None:
             sets, start = fixed[None], fixed_start[None]
         else:
             m = len(extra)
             sets = np.concatenate([np.broadcast_to(fixed, (m, *fixed.shape)), grid[extra][:, None, :]], axis=1)
-            start = np.concatenate([np.broadcast_to(fixed_start, (m, len(fixed_start))), earliest[extra][:, None]], axis=1)
+            start = np.concatenate([np.broadcast_to(fixed_start, (m, len(fixed_start))), observe[extra][:, None]], axis=1)
         if sets.shape[1] < 2:
             return np.zeros(sets.shape[0])
         return _mirror_cost(sets, start, pos[central], vel[central], steps, evaluate, sensor, r_max)
@@ -788,17 +832,22 @@ def plan_optimal_deployment(
         times = drop_times(
             grid[chosen], earliest[chosen], [h.pos for h in hyps], r_max, float(config.drop_lead_s),
             estimate.uncertainty.horizontal_major_yd * YD_TO_M, speed,
-            layer.fall_s if layer is not None else None,
+            layer.fall_s if layer is not None else None, startup_s=startup,
+            latest_start=cpa[chosen] - ahead_margin,
         )
     else:
         times = earliest[chosen]
     # observers stacked at one drop point are released together (one pass): at the earliest of
     # their times; the drop points are routed, each with its observers
     groups = [[k for k, i in enumerate(chosen) if spot[i] == p] for p in dict.fromkeys(int(spot[i]) for i in chosen)]
-    heads = [chosen[g[0]] for g in groups]
-    group_times = [min(float(times[k]) for k in g) for g in groups]
-    order = list(range(len(groups)))
-    if layer is not None:
+    wanted = [min(float(times[k]) for k in g) for g in groups]
+
+    def route(keep: list[int]) -> tuple[list[int], list[float]]:
+        """Flight order (indices into groups) and drop times of the groups `keep`."""
+        heads = [chosen[groups[g][0]] for g in keep]
+        group_times = [wanted[g] for g in keep]
+        if layer is None:
+            return list(keep), group_times
         # the layer lays them one after the other: the order with the least delay and the times
         # it can keep along its route (each drop crossed lined up for the next one)
         # (after its open drops when they are known: the approach to the last one is chosen
@@ -832,8 +881,23 @@ def plan_optimal_deployment(
             release=routelib.release_table(layer.release_east_m, layer.release_north_m) if layer.release_east_m else None,
             drift=layer.drift_mps, wind=layer.wind_mps, **first,
         )
-    else:
-        group_times = [group_times[g] for g in order]
+        return [keep[k] for k in order], [float(t) for t in group_times]
+
+    # a drop point the route reaches too late to start observing ahead of the target (before its CPA,
+    # with the margin) is taken out and the rest is routed again (its observers would only see the
+    # target going away)
+    keep = list(range(len(groups)))
+    while True:
+        order, group_times = route(keep)
+        heads = np.array([chosen[groups[g][0]] for g in order], dtype=int)
+        late_mask = observation_start(heads, np.array(group_times)) > cpa[heads] - ahead_margin + 1.0
+        if not late_mask.any():
+            break
+        late = {g for g, bad in zip(order, late_mask, strict=True) if bad}
+        keep = [g for g in keep if g not in late]
+        if not keep:
+            return [], "optimal: the layer cannot lay an observer ahead of the target before its CPA", report
+    removed = sum(len(g) for g in groups) - sum(len(groups[g]) for g in keep)
     flat = [k for g in order for k in groups[g]]
     times = [t for g, t in zip(order, group_times, strict=True) for _ in groups[g]]
     chosen = [chosen[k] for k in flat]
@@ -841,7 +905,8 @@ def plan_optimal_deployment(
     positions = [_offset(origin, float(grid[i, 0]), float(grid[i, 1]), float(grid[i, 2] / FT_TO_M)) for i in chosen]
     report.drop_times_s = [float(t) for t in times]
     why = "operator request" if force else ("coverage" if coverage_short else "information gain")
-    points_note = f" at {len(groups)} drop points" if len(groups) < len(chosen) else ""
+    report.count = len(chosen)
+    points_note = f" at {len(order)} drop points" if len(order) < len(chosen) else ""
     reason = (
         f"optimal ({why}): {len(chosen)} observers{points_note}, depths {report.depths_ft} Ft; predicted error "
         f"{report.cost_before_yd:.0f} -> {report.cost_after_yd:.0f} YD (horizontal "
@@ -850,6 +915,8 @@ def plan_optimal_deployment(
         f"coverage gaps {100 * loss0:.0f} -> {100 * loss1:.0f} %); "
         f"drop in {[round(t) for t in report.drop_times_s]} s"
     )
+    if removed:
+        reason += f"; {removed} observers left out (the layer would lay them after the target passes)"
     return positions, reason, report
 
 
