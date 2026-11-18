@@ -1718,6 +1718,17 @@ function regionExtent(polygon) {
   return { major, minor, bearing };
 }
 
+// label colour by the component's probability mass: high (>= 50 %) the region's own magenta in
+// bold, middle (20-50 %) light pink, low (< 20 %) grey, so the likely part stands out
+const REGION_LABEL_TIERS = [
+  { min: 50, color: Cesium.Color.fromCssColorString("#ff4fd8"), weight: "bold " },
+  { min: 20, color: Cesium.Color.fromCssColorString("#ffb3ee"), weight: "" },
+  { min: -Infinity, color: Cesium.Color.fromCssColorString("#9c93a8"), weight: "" },
+];
+const regionTier = (pct) => REGION_LABEL_TIERS.find((t) => (pct ?? 0) >= t.min);
+const regionLabelColor = (pct) => regionTier(pct).color;
+const regionLabelFont = (pct) => `${regionTier(pct).weight}12px sans-serif`;
+
 // label of one presence-region component: probability mass, horizontal (YD) and vertical (FT) extent
 function regionLabelText(component) {
   const pct = `${fmt(component.probability_mass_pct, 0)}%`;
@@ -1898,8 +1909,8 @@ function updateRegion(estimate) {
       gpu.regionLabels.add({
         position: north ? cart(north[0], north[1], component.centroid.depth_ft) : cartOf(component.centroid),
         text: regionLabelText(component),
-        font: "12px sans-serif",
-        fillColor: COLORS.region,
+        font: regionLabelFont(component.probability_mass_pct),
+        fillColor: regionLabelColor(component.probability_mass_pct),
         ...(values ? { ...LABEL_PLATE, verticalOrigin: Cesium.VerticalOrigin.BOTTOM, pixelOffset: new Cesium.Cartesian2(0, -6) } : {}),
       });
     }
