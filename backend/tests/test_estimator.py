@@ -217,3 +217,25 @@ def test_predicted_regions_move_ahead_with_the_track() -> None:
         expected = estimate.ground_speed_kt * 2025.4 * p.horizon_s / 3600.0
         assert math.hypot(east, north) == pytest.approx(expected, rel=0.25)
     assert shifts[1][0] > shifts[0][0] > 0
+
+
+def test_detection_range_estimated_from_detections_and_losses() -> None:
+    """500 YD true range, prior centred on 800 YD (400 .. 1600 YD): the losses of contact of the
+    initial observers pin the range down."""
+    config = _config(estimate_detection_range=True, detection_range_prior_yd=800.0)
+    config.max_slant_range_yd = 500.0
+    run = ScenarioRun(config, 4)
+    output = run.run(300)
+    estimate = output.estimates[0]
+    assert estimate.detection_range_events >= 1
+    assert estimate.detection_range_yd == pytest.approx(500.0, rel=0.15)
+    assert estimate.uncertainty.detection_range_sigma_yd < 60.0
+
+
+def test_detection_range_known_when_estimation_off() -> None:
+    config = _config(estimate_detection_range=False)
+    config.max_slant_range_yd = 500.0
+    run = ScenarioRun(config, 4)
+    estimate = run.run(60).estimates[0]
+    assert estimate.detection_range_yd is None
+    assert estimate.uncertainty.detection_range_sigma_yd is None

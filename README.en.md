@@ -23,6 +23,11 @@ common maximum slant range, and the exact time/position/depth of each drifting o
 - per-observer closest-approach time, slant range and relative speed with error from the
   source-frequency error and the speed error
 - the common source-frequency recognition bias and the linear current field
+- the detection range (common max slant range): not known but estimated from each observer's
+  detections and losses of contact (a range per particle, weighted by the detected / not-detected range
+  gate; the error against the truth is shown in the estimate comparison).
+  Enabled by `estimator.estimate_detection_range=true` (default off: the range is known); while no
+  contact has been lost yet the range has no upper bound, so the position track is less accurate
 
 Documentation:
 
@@ -144,6 +149,8 @@ stays in the database. Each observer observes for at most three hours.
 - Common maximum slant range (YD), presence probability (%), past-track recomputation window (s)
 - Observer limit, source frequency, common frequency-recognition bias (Hz)
 - Truth current field (base vector and gradient), estimator settings (particles, bias prior …)
+- Detection-range estimate: on / off, prior value (YD; empty: the max slant range as the nominal value),
+  prior width (factor: log-uniform over prior / factor .. prior x factor)
 
 ## Offline runs and analysis
 

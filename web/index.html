@@ -310,6 +310,9 @@
               <label class="check span2"><input id="use-bearing" type="checkbox" />推定に方位情報を使用する</label>
               <label>推定側の方位σ (度)<input id="est-bearing-sigma" type="number" min="0.1" max="90" step="0.1" required /></label>
               <label>推定側の偏り事前σ (Hz)<input id="bias-sigma" type="number" min="0" step="0.01" required /></label>
+              <label class="check span2" title="探知距離を既知とせず、各観測者の探知・失探知（探知の有無が変わった時点）から推定器で推定する。オフで上の探知距離を既知として使う"><input id="estimate-range" type="checkbox" />探知距離を探知・失探知から推定する</label>
+              <label title="推定の事前分布の中心（空欄：上の探知距離を公称値とする）。この値の 1/倍率〜倍率倍の範囲を対数一様に仮定">探知距離の事前値 (YD)<input id="range-prior" type="number" min="1" step="1" placeholder="探知距離と同じ" /></label>
+              <label title="事前分布の幅：事前値の 1/倍率〜倍率倍">探知距離の事前幅 (倍)<input id="range-prior-factor" type="number" min="1" max="10" step="0.1" required /></label>
               <label title="推定器が想定する放射周波数の揺らぎ 1σ（全観測者に共通の誤差として扱う）">推定側の周波数安定度 σ (Hz)<input id="est-stability" type="number" min="0" step="0.001" required /></label>
               <label class="check span2" title="変針・変速でドップラーが変化し始める時刻の観測者間の差（伝搬遅延の差）を推定に使う（伝搬遅延の模擬が必要）"><input id="use-maneuver-timing" type="checkbox" />変針・変速の到達時間差を推定に使う</label>
               <label>存在確率 (%)<input id="probability" type="number" min="1" max="99.9" step="0.1" required /></label>

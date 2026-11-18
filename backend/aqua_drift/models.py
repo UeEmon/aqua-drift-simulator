@@ -435,6 +435,15 @@ class EstimatorConfig(BaseModel):
     use_bearing: bool = True
     bearing_sigma_deg: float = Field(default=15.0, gt=0, le=90)
     range_gate_softness_yd: float = Field(default=15.0, gt=0)
+    # detection range (探知距離) estimated from the detections and losses of contact instead of
+    # being known: every particle carries its own range, with a log-uniform prior over
+    # detection_range_prior_yd / factor .. x factor (prior None: the scenario's range as the
+    # nominal value). Off (default): the scenario's range is used as known. On, the position
+    # track is less accurate while the range is still open (no loss of contact yet), e.g. in the
+    # Doppler-only and bias tests of test_estimator at 6000 YD
+    estimate_detection_range: bool = False
+    detection_range_prior_yd: float | None = Field(default=None, gt=0)
+    detection_range_prior_factor: float = Field(default=2.0, ge=1.0, le=10.0)
     current_gradient_ridge: float = Field(default=1e-6, ge=0)
     track_store_slots: int = Field(default=360, ge=10, le=2000)
     cpa_fit_half_window_s: int = Field(default=600, ge=30, le=3600)
@@ -1025,6 +1034,7 @@ class Uncertainty(BaseModel):
     cog_sigma_deg: float
     hdg_sigma_deg: float
     bias_sigma_hz: float
+    detection_range_sigma_yd: float | None = None  # None: the detection range is not estimated
 
 
 class TrackPoint(BaseModel):
@@ -1090,6 +1100,10 @@ class TrackEstimate(BaseModel):
     cog_deg: float | None = None
     vertical_rate_fps: float | None = None
     source_bias_hz: float | None = None
+    # estimated detection range (slant range, None: not estimated) and the number of detections /
+    # losses of contact (an observer's detection flag changing) it was learnt from
+    detection_range_yd: float | None = None
+    detection_range_events: int = 0
     uncertainty: Uncertainty | None = None
     presence_region: PresenceRegion
     predicted_regions: list[PredictedRegion] = Field(default_factory=list)

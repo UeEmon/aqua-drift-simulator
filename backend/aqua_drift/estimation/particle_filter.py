@@ -93,6 +93,8 @@ class DopplerParticleFilter:
         use_bearing: bool = True,
         bearing_sigma_rad: float = math.radians(15.0),
         propagation_delay: bool = False,
+        range_prior_m: tuple[float, float] | None = None,
+        range_jitter: float = 1e-4,
     ) -> None:
         self.n = particle_count
         self.max_range = max_range_m
@@ -120,6 +122,13 @@ class DopplerParticleFilter:
         self.use_bearing = use_bearing
         self.bearing_sigma = bearing_sigma_rad
         self.delay = propagation_delay
+        # detection range estimated per particle (None: the common max_range is known). The
+        # prior is log-uniform over range_prior_m; range_jitter is the smallest relative kernel
+        # jitter of log r at each roughening
+        self.range_prior = range_prior_m
+        self.range_jitter = range_jitter
+        self.r: np.ndarray | None = None
+        self.range_seed: np.ndarray | None = None  # posterior r of a previous filter (re-init)
         self.move_window_eff: float | None = None
         self.maneuver_cut_tick: int | None = None
         self.maneuver_detected_tick: int | None = None  # last time a maneuver was detected
@@ -192,20 +201,23 @@ class DopplerParticleFilter:
             return False
         anchor = min(detecting, key=lambda row: 0 if row.observer_id in previously_seen else 1)
         shell = anchor.observer_id in previously_seen
-        inner = max(0.0, self.max_range - (self.max_speed + 3.0) * 2.0) if shell else 0.0
         accepted: list[np.ndarray] = []
+        accepted_r: list[np.ndarray] = []
         need = self.n
         for _ in range(200):
             m = need * 6
+            r = self._sample_range(m)
+            inner = np.maximum(0.0, r - (self.max_speed + 3.0) * 2.0) if shell else np.zeros_like(r)
             direction = self.rng.normal(size=(m, 3))
             direction /= np.linalg.norm(direction, axis=1, keepdims=True)
-            radius = np.cbrt(self.rng.uniform(inner**3, self.max_range**3, size=m))
+            radius = np.cbrt(self.rng.uniform(inner**3, r**3, size=m))
             pos = anchor.position + direction * radius[:, None]
             ok = (pos[:, 2] >= 0.0) & (pos[:, 2] <= self.max_depth)
             for row in rows:
                 dist = np.linalg.norm(pos - row.position, axis=1)
-                ok &= (dist <= self.max_range) if row.detected else (dist > self.max_range)
+                ok &= (dist <= r) if row.detected else (dist > r)
             pos = pos[ok]
+            r = r[ok]
             if len(pos) == 0:
                 continue
             speed = self.max_speed * np.sqrt(self.rng.uniform(0, 1, size=len(pos)))
@@ -229,21 +241,57 @@ class DopplerParticleFilter:
             fast = np.linalg.norm(water[:, :2], axis=1) <= self.max_speed
             states = np.hstack([pos, water, bias[:, None]])[fast]
             accepted.append(states)
+            accepted_r.append(r[fast])
             need -= len(states)
             if need <= 0:
                 break
         if not accepted:
             return False
         states = np.vstack(accepted)
+        ranges = np.concatenate(accepted_r)
         if len(states) < self.n:
-            states = states[self.rng.integers(0, len(states), size=self.n)]
+            pick = self.rng.integers(0, len(states), size=self.n)
+            states, ranges = states[pick], ranges[pick]
         self.x = states[: self.n].copy()
+        self.r = ranges[: self.n].copy() if self.range_prior is not None else None
         self.w = np.full(self.n, 1.0 / self.n)
         self.tick = tick
         self.ground_v = self.x[:, 3:6] + current.velocity(self.x[:, 0:3])
         self.initialized = True
         self._clear_history()
         return True
+
+    # ------------------------------------------------------------------ detection range
+    def _sample_range(self, m: int) -> np.ndarray:
+        """Detection ranges for m new particles: the known max_range, the posterior of a
+        previous filter (after a re-initialization), or the log-uniform prior."""
+        if self.range_prior is None:
+            return np.full(m, self.max_range)
+        if self.range_seed is not None and len(self.range_seed):
+            seed = self.range_seed[self.rng.integers(0, len(self.range_seed), size=m)]
+            return self._within_prior(seed * np.exp(self.rng.normal(0.0, self.range_jitter, size=m)))
+        lo, hi = self.range_prior
+        return np.exp(self.rng.uniform(math.log(lo), math.log(hi), size=m))
+
+    def _within_prior(self, r: np.ndarray) -> np.ndarray:
+        """Ranges reflected back into the prior bounds (in log r): without detections or losses
+        of contact the jitter would otherwise random-walk the ranges without limit."""
+        lo, hi = (math.log(v) for v in self.range_prior)
+        log_r = np.log(r)
+        log_r = np.where(log_r > hi, 2 * hi - log_r, log_r)
+        log_r = np.where(log_r < lo, 2 * lo - log_r, log_r)
+        return np.exp(np.clip(log_r, lo, hi))
+
+    def gate_range(self) -> np.ndarray | float:
+        """Detection range used by the range gate: per particle when estimated."""
+        return self.r if self.r is not None else self.max_range
+
+    def range_estimate(self) -> tuple[float, float] | None:
+        """Weighted mean and 1 sigma of the estimated detection range [m] (None: known)."""
+        if self.r is None:
+            return None
+        mean = float(self.w @ self.r)
+        return mean, math.sqrt(max(float(self.w @ (self.r - mean) ** 2), 0.0))
 
     # ------------------------------------------------------------------ predict / update
     def predict(self, dt: float, current: CurrentFit) -> None:
@@ -299,13 +347,14 @@ class DopplerParticleFilter:
         chi2 = np.zeros(len(x))  # sum e^2 / v
         cross = np.zeros(len(x))  # sum e s / v
         common = 0.0  # sum s^2 / v
+        gate = self.gate_range()
         for row in rows:
             los = pos - row.position
             dist = np.linalg.norm(los, axis=1)
             if self.delay:
                 los = los - ground * (dist / self.c)[:, None]
                 dist = np.linalg.norm(los, axis=1)
-            margin = (self.max_range - dist) / self.gate_soft
+            margin = (gate - dist) / self.gate_soft
             if row.detected:
                 total += -np.logaddexp(0.0, -margin)  # log sigmoid(margin)
                 if row.frequency is not None:
@@ -389,6 +438,8 @@ class DopplerParticleFilter:
 
     def _apply_resample(self, index: np.ndarray) -> None:
         self.x = self.x[index]
+        if self.r is not None:
+            self.r = self.r[index]
         self.ground_v = self.ground_v[index]
         self.w = np.full(self.n, 1.0 / self.n)
         # row by row: a temporary of one row instead of a copy of the whole history
@@ -431,6 +482,17 @@ class DopplerParticleFilter:
                 chol = np.diag(np.sqrt(np.maximum(np.diag(cov), 1e-9)))
             noise[members] = self.rng.normal(size=(count, d)) @ chol.T
         self.x += noise * h
+        if self.r is not None:
+            # log r is a static parameter: Liu-West shrinkage kernel (keeps the mean and the
+            # spread, so repeated resampling neither inflates nor random-walks the range and what
+            # a detection / loss of contact taught is not forgotten later)
+            log_r = np.log(self.r)
+            mean = float(np.mean(log_r))
+            spread = float(np.std(log_r))
+            a = math.sqrt(max(1.0 - h * h, 0.0))
+            jitter = np.maximum(h * spread, self.range_jitter)
+            self.r = self._within_prior(
+                np.exp(a * log_r + (1.0 - a) * mean + self.rng.normal(size=self.n) * jitter))
         self._limit_speed()
         self._reflect_depth()
         if self.bias_sigma == 0:
@@ -460,8 +522,10 @@ class DopplerParticleFilter:
         )
 
     def _move_params(self) -> MoveParams:
+        estimate = self.range_estimate()
         return MoveParams(
-            max_range=self.max_range,
+            max_range=estimate[0] if estimate else self.max_range,
+            particle_range=self.r,
             gate_soft=self.gate_soft,
             c=self.c,
             sigma_f=self.sigma_f,
@@ -569,7 +633,7 @@ class DopplerParticleFilter:
             within max range of at that time."""
             if not epoch.transition and epoch.tick not in coarse:
                 return np.zeros(len(epoch.det), dtype=bool)
-            reach = self.max_range + (self.max_speed + 2.0) * (now - epoch.tick) + 300.0
+            reach = float(np.max(self.gate_range())) + (self.max_speed + 2.0) * (now - epoch.tick) + 300.0
             nearest = np.clip(epoch.pos, lo, hi)
             return np.linalg.norm(epoch.pos - nearest, axis=1) <= reach
 

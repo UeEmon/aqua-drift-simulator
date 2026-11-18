@@ -45,7 +45,7 @@ class Epoch:
 
 @dataclass
 class MoveParams:
-    max_range: float
+    max_range: float  # mode fits (find_modes); window_loglik uses particle_range when it has one
     gate_soft: float
     c: float
     sigma_f: float
@@ -60,6 +60,9 @@ class MoveParams:
     # turn model (see _turn_back): largest turn rate and the prior sigma of the rate [rad/s]
     turn_max: float = 0.0524  # 3 deg/s
     turn_sigma: float = 0.0349  # 2 deg/s
+    # detection range per particle (estimated detection range), aligned with the states passed to
+    # window_loglik; None: max_range for every state
+    particle_range: np.ndarray | None = None
 
 
 class EpochStore:
@@ -257,10 +260,12 @@ def window_loglik(
     delay_c = prm.c if prm.delay else None
     sigma2 = _sigma2(win, prm)
     chunk = int(max(64, LOGLIK_CHUNK_ELEMENTS // max(len(win.dt), 1)))
+    per_state = prm.particle_range is not None and len(prm.particle_range) == len(states)
     for begin in range(0, len(states), chunk):
         part = states[begin : begin + chunk]
         _, dist, rdot = _geometry(part, win, current, delay_c, turn)
-        margin = (prm.max_range - dist) / prm.gate_soft
+        rmax = prm.particle_range[begin : begin + chunk, None] if per_state else prm.max_range
+        margin = (rmax - dist) / prm.gate_soft
         gate = np.where(win.det[None, :], -np.logaddexp(0.0, -margin), -np.logaddexp(0.0, margin))
         pred = (win.rec[None, :] - part[:, 6:7]) * (1.0 - rdot / prm.c)
         dop = win.w_dop[None, :] * (pred - win.freq[None, :]) ** 2 / sigma2

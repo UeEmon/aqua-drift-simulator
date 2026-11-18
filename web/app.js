@@ -2353,6 +2353,8 @@ function updateComparison(snapshot, estimate) {
   const stwErr = estimate.through_water_speed_kt - target.through_water_speed_kt;
   const sogErr = estimate.ground_speed_kt - target.ground_speed_kt;
   const biasErr = estimate.source_bias_hz - trueBias;
+  const trueRange = snapshot.config.max_slant_range_yd;
+  const rangeErr = estimate.detection_range_yd == null ? null : estimate.detection_range_yd - trueRange;
   const last = state.history[state.history.length - 1];
   if (!last || last.tick !== estimate.tick) { // the error history is kept even when hidden
     state.history.push({ tick: estimate.tick, h: hErr, hs: u.horizontal_major_yd, d: depthErr, ds: u.depth_sigma_ft });
@@ -2387,6 +2389,16 @@ function updateComparison(snapshot, estimate) {
     card("周波数偏り", `${signed(biasErr, 3)} <small>Hz</small>`, judge(biasErr, u.bias_sigma_hz), [
       ["推定", `${fmt(estimate.source_bias_hz, 3)} Hz`], ["真値", `${fmt(trueBias, 3)} Hz`], ["1σ", `${fmt(u.bias_sigma_hz, 3)} Hz`],
     ]),
+    rangeErr == null
+      ? card("探知距離", `-- <small>YD</small>`, { cls: "s-none", text: "既知（推定オフ）" }, [
+        ["使用値", `${fmt(trueRange, 0)} YD`],
+      ])
+      : card("探知距離", `${signed(rangeErr, 0)} <small>YD</small>`, judge(rangeErr, u.detection_range_sigma_yd), [
+        ["推定", `${fmt(estimate.detection_range_yd, 0)} YD`], ["真値", `${fmt(trueRange, 0)} YD`],
+        ["1σ", `${fmt(u.detection_range_sigma_yd, 0)} YD`],
+        ["誤差率", `${signed(100 * rangeErr / trueRange, 1)} %`],
+        ["探知・失探知", `${estimate.detection_range_events ?? 0} 回`],
+      ]),
   ];
   setHtml(container, cards.join(""));
 
@@ -2679,6 +2691,8 @@ function populateForms(config) {
     g11: config.current_field.gradient_per_nm[1][1],
     "est-bearing-sigma": config.estimator.bearing_sigma_deg,
     "bias-sigma": config.estimator.assumed_bias_sigma_hz,
+    "range-prior": config.estimator.detection_range_prior_yd ?? "",
+    "range-prior-factor": config.estimator.detection_range_prior_factor,
     probability: config.presence_probability_pct,
     "smoothing-window": config.smoothing_window_seconds,
     particles: config.estimator.particle_count,
@@ -2709,6 +2723,7 @@ function populateForms(config) {
   $("use-bearing").checked = config.estimator.use_bearing;
   $("propagation-delay").checked = config.source.propagation_delay;
   $("use-maneuver-timing").checked = config.estimator.use_maneuver_timing;
+  $("estimate-range").checked = config.estimator.estimate_detection_range;
   const lay = config.layer;
   if (lay) {
     $("layer-enabled").checked = lay.enabled;
@@ -2812,6 +2827,9 @@ $("config-form").addEventListener("submit", (event) => {
     next.estimator.use_bearing = checked("use-bearing");
     next.estimator.bearing_sigma_deg = num("est-bearing-sigma");
     next.estimator.assumed_bias_sigma_hz = num("bias-sigma");
+    next.estimator.estimate_detection_range = checked("estimate-range");
+    next.estimator.detection_range_prior_yd = $("range-prior").value.trim() === "" ? null : num("range-prior");
+    next.estimator.detection_range_prior_factor = num("range-prior-factor");
     next.presence_probability_pct = num("probability");
     next.smoothing_window_seconds = num("smoothing-window");
     next.estimator.particle_count = num("particles");

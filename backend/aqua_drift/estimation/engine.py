@@ -110,6 +110,8 @@ class TrackingEngine:
         self.lost = False  # latched lost contact (see _update_contact)
         self.lost_count = 0
         self.nondetect_tick: dict[str, int] = {}
+        self.last_detected: dict[str, bool] = {}
+        self.range_events = 0  # detections / losses of contact seen (detection-range evidence)
         self.online_track: list[TrackPoint] = []
         self.smoothed_track: dict[int, TrackPoint] = {}
         self.divergence = 0
@@ -128,8 +130,30 @@ class TrackingEngine:
     def _timing_args(self) -> tuple:
         e = self.settings.estimator
         return (e.maneuver_timing_window_s, e.maneuver_timing_chi2, e.maneuver_timing_sigma_s,
-                e.maneuver_timing_min_slope_hz_s, self.settings.max_slant_range_yd * YD_TO_M,
+                e.maneuver_timing_min_slope_hz_s, self._nominal_range_m(upper=True),
                 self.settings.sound_speed_mps)
+
+    def _range_prior(self) -> tuple[float, float] | None:
+        """Bounds [m] of the log-uniform detection-range prior (None: the range is known)."""
+        e = self.settings.estimator
+        if not e.estimate_detection_range:
+            return None
+        nominal = (e.detection_range_prior_yd or self.settings.max_slant_range_yd) * YD_TO_M
+        factor = e.detection_range_prior_factor
+        return nominal / factor, nominal * factor
+
+    def _nominal_range_m(self, upper: bool = False) -> float:
+        """Detection range before any estimate: the known range, or the prior's nominal value
+        (upper: the prior's largest value, for the grouping of maneuver-timing onsets)."""
+        prior = self._range_prior()
+        if prior is None:
+            return self.settings.max_slant_range_yd * YD_TO_M
+        return prior[1] if upper else math.sqrt(prior[0] * prior[1])
+
+    def range_m(self) -> float:
+        """Detection range in use: the estimate (once the filter has one) or the setting."""
+        estimate = self.pf.range_estimate() if self.pf.initialized else None
+        return estimate[0] if estimate else self._nominal_range_m()
 
     def _new_timing(self) -> ManeuverTiming:
         return ManeuverTiming(*self._timing_args())
@@ -141,7 +165,7 @@ class TrackingEngine:
         e = self.settings.estimator
         pf = DopplerParticleFilter(
             particle_count=e.particle_count,
-            max_range_m=self.settings.max_slant_range_yd * YD_TO_M,
+            max_range_m=self._nominal_range_m(),
             sound_speed=self.settings.sound_speed_mps,
             model_sigma_hz=e.model_frequency_sigma_hz,
             bias_sigma_hz=e.assumed_bias_sigma_hz,
@@ -165,6 +189,7 @@ class TrackingEngine:
             use_bearing=e.use_bearing,
             bearing_sigma_rad=math.radians(e.bearing_sigma_deg),
             propagation_delay=self.settings.propagation_delay,
+            range_prior_m=self._range_prior(),
         )
         pf.configure_history(self.settings.smoothing_window_seconds, e.track_store_slots)
         return pf
@@ -175,11 +200,16 @@ class TrackingEngine:
         old = self.settings
         self.settings = settings
         e = settings.estimator
-        if e.particle_count != old.estimator.particle_count or e.random_seed != old.estimator.random_seed:
+        range_keys = ("estimate_detection_range", "detection_range_prior_yd", "detection_range_prior_factor")
+        if (e.particle_count != old.estimator.particle_count or e.random_seed != old.estimator.random_seed
+                or any(getattr(e, k) != getattr(old.estimator, k) for k in range_keys)
+                or (e.estimate_detection_range and e.detection_range_prior_yd is None
+                    and settings.max_slant_range_yd != old.max_slant_range_yd)):
             self.pf = self._new_filter()  # re-initializes on next detection
             return
         pf = self.pf
-        pf.max_range = settings.max_slant_range_yd * YD_TO_M
+        if pf.r is None:
+            pf.max_range = settings.max_slant_range_yd * YD_TO_M
         pf.c = settings.sound_speed_mps
         pf.sigma_f = e.model_frequency_sigma_hz
         pf.bias_sigma = e.assumed_bias_sigma_hz
@@ -209,7 +239,7 @@ class TrackingEngine:
     def detectable_time_s(self) -> float:
         """Detectable time = detectable distance / target speed (used as the period over
         which the current field is treated as linear)."""
-        r = self.settings.max_slant_range_yd * YD_TO_M
+        r = self.range_m()
         if self.pf.initialized:
             speed = float(self.pf.w @ np.linalg.norm(self.pf.x[:, 3:5], axis=1))
         else:
@@ -290,6 +320,11 @@ class TrackingEngine:
                 and obs.observed_frequency_hz is not None
             ):
                 self.lloyd.add(obs.observer_id, batch.tick, point, obs.received_level_db, obs.observed_frequency_hz)
+        for row in rows:
+            before = self.last_detected.get(row.observer_id)
+            if before is not None and before != row.detected:
+                self.range_events += 1
+            self.last_detected[row.observer_id] = row.detected
         previously_watching = {
             row.observer_id
             for row in rows
@@ -327,7 +362,9 @@ class TrackingEngine:
             if self.divergence >= 3:
                 self.reinitializations += 1
                 self.divergence = 0
+                previous_r = self.pf.r
                 self.pf = self._new_filter()
+                self.pf.range_seed = previous_r
                 self.online_track.append(self._track_point())  # keep last pre-reset point
                 if self.pf.initialize(batch.tick, rows, self.current_fit, previously_watching):
                     self.pf.update(rows, self.current_fit)
@@ -343,6 +380,8 @@ class TrackingEngine:
                                  [ev for ev in self.timing.events if ev.used] if timing else None)
                 )
 
+        if self.pf.r is not None and self.pf.initialized:
+            self.pf.max_range = self.range_m()  # clusters, LOST, densest part: estimated range
         self._lloyd_step(batch.tick)
         for row in rows:
             if not row.detected:
@@ -636,6 +675,7 @@ class TrackingEngine:
         hdg, hdg_std = _circular_mean_std(np.arctan2(x[:, 3], x[:, 4]), w)
         g_mean = float(w @ g_speed)
         u_mean = float(w @ w_speed)
+        range_est = pf.range_estimate()
         uncertainty = Uncertainty(
             horizontal_major_yd=math.sqrt(max(evals[1], 0.0)) / YD_TO_M,
             horizontal_minor_yd=math.sqrt(max(evals[0], 0.0)) / YD_TO_M,
@@ -648,6 +688,7 @@ class TrackingEngine:
             cog_sigma_deg=cog_std,
             hdg_sigma_deg=hdg_std,
             bias_sigma_hz=math.sqrt(max(float(w @ (x[:, 6] - mean[6]) ** 2), 0.0)),
+            detection_range_sigma_yd=range_est[1] / YD_TO_M if range_est else None,
         )
         region = presence_region(
             self.frame, x[:, 0:3], w, self.settings.presence_probability_pct
@@ -670,7 +711,7 @@ class TrackingEngine:
         coasting = self._coasting(self.tick)
         if region.disconnected:
             status = "AMBIGUOUS"
-        elif uncertainty.horizontal_major_yd < 0.25 * self.settings.max_slant_range_yd:
+        elif uncertainty.horizontal_major_yd < 0.25 * self.range_m() / YD_TO_M:
             status = "TRACKING"
         else:
             status = "LOW_CONFIDENCE"
@@ -710,6 +751,8 @@ class TrackingEngine:
             "cog_deg": cog,
             "vertical_rate_fps": float(mean[5] / FT_TO_M),
             "source_bias_hz": float(mean[6]),
+            "detection_range_yd": range_est[0] / YD_TO_M if range_est else None,
+            "detection_range_events": self.range_events,
             "uncertainty": uncertainty,
             "presence_region": region,
             "predicted_regions": predicted,
