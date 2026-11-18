@@ -517,6 +517,13 @@
             <label class="check"><input id="show-online" type="checkbox" checked />推定（過去航跡非更新）</label>
             <label class="check"><input id="show-smoothed" type="checkbox" checked />推定（過去航跡更新）</label>
             <label class="check"><input id="show-region" type="checkbox" checked />推定存在圏</label>
+            <label class="check" title="推定存在圏の各領域の広がり（水平：長径×短径 YD と長径の向き、垂直：深度の範囲 FT）と、推定位置の針路（°）・速力（kt）を推定値 ±1σ で地図に表示する"><input id="show-est-values" type="checkbox" checked />存在圏の広がり・針路速力の数値</label>
+            <label>針路・速力の基準
+              <select id="course-basis">
+                <option value="ground" selected>対地（COG・SOG）</option>
+                <option value="water">対水（HDG・STW）</option>
+              </select>
+            </label>
             <label class="check"><input id="show-voxels" type="checkbox" checked />存在圏ボクセル</label>
             <label class="check" title="推定の針路・速力と推定した潮流で粒子を先へ進めた存在圏（機動は仮定しない）。時間は「観測・推定」の条件と同じ確率"><input id="show-predicted" type="checkbox" checked />予測存在圏（10・20・30 分後）</label>
             <label>ボクセルの描き方

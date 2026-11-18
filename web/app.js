@@ -241,16 +241,23 @@ function labelMetrics(label) {
   if (width === undefined) {
     if (textWidths.size > 2000) textWidths.clear();
     measureCtx.font = label.font;
-    width = measureCtx.measureText(label.text).width;
+    width = Math.max(...label.text.split("\n").map((line) => measureCtx.measureText(line).width));
     textWidths.set(key, width);
   }
   const size = Number((/([\d.]+)px/.exec(label.font) || [0, 12])[1]) * label.scale;
   const ascent = 0.92 * size;
-  const h = ascent + 0.28 * size;
+  // multi-line labels: Cesium spaces the lines 1.2 x the font size; with the BASELINE origin the
+  // last line sits on the anchor and the others above it
+  const extra = 1.2 * size * (label.text.split("\n").length - 1);
+  const h = ascent + 0.28 * size + extra;
   const w = width * label.scale;
   const fx = label.horizontalOrigin === Cesium.HorizontalOrigin.LEFT ? 0 : label.horizontalOrigin === Cesium.HorizontalOrigin.RIGHT ? 1 : 0.5;
   const v = label.verticalOrigin;
-  const top = v === Cesium.VerticalOrigin.TOP ? 0 : v === Cesium.VerticalOrigin.CENTER ? -h / 2 : v === Cesium.VerticalOrigin.BOTTOM ? -h : -ascent;
+  const top = v === Cesium.VerticalOrigin.TOP ? 0 : v === Cesium.VerticalOrigin.CENTER ? -h / 2 : v === Cesium.VerticalOrigin.BOTTOM ? -h : -(ascent + extra);
+  if (label.showBackground) { // the plate reaches past the text by the padding on every side
+    const pad = label.backgroundPadding;
+    return { w: w + 2 * pad.x, h: h + 2 * pad.y, fx, top: top - pad.y };
+  }
   return { w, h, fx, top };
 }
 
@@ -1601,7 +1608,8 @@ function estimateGraphics(mode) {
   const color = mode === "ONLINE" ? COLORS.online : COLORS.smoothed;
   const graphics = new Marker(
     gpu.points.add({ pixelSize: 11, color, outlineColor: Cesium.Color.BLACK, outlineWidth: 2, id: `estimate-${mode}` }),
-    ranked(gpu.labels.add({ text: mode === "ONLINE" ? "EST" : "", font: "12px sans-serif", fillColor: color, pixelOffset: new Cesium.Cartesian2(0, 20) }), 95),
+    ranked(gpu.labels.add({ text: mode === "ONLINE" ? "EST" : "", font: "12px sans-serif", fillColor: color, pixelOffset: new Cesium.Cartesian2(0, 9),
+      verticalOrigin: Cesium.VerticalOrigin.TOP, ...LABEL_PLATE }), 95),
     `est:${mode}`,
   );
   state.estimates[mode] = graphics;
@@ -1617,11 +1625,109 @@ function updateEstimateLayers(estimates) {
     marker.show(visible && has);
     if (tracks.has(`est:${mode}`)) tracks.get(`est:${mode}`).setVisible(visible);
     if (has) marker.set(cartOf(estimate.current_position));
+    // the panel's mode carries the course and speed (estimate ±1σ) under its marker
+    const head = mode === "ONLINE" ? "EST" : "";
+    const lines = has && mode === selectedMode() && checked("show-est-values") ? courseSpeedLines(estimate) : [];
+    marker.label.text = lines.length ? [head, ...lines].filter(Boolean).join("\n") : head;
   }
   if (!state.errorLine) {
     state.errorLine = gpu.lines.add({ positions: [], width: 1.5, material: colorMaterial(COLORS.error.withAlpha(0.75)) });
   }
   updateErrorLine();
+}
+
+const YD_PER_DEG_LAT = 111320 / YD_TO_M; // close enough for the extent of a presence region
+const ydText = (value) => Math.round(value).toLocaleString("ja-JP");
+
+// standard normal quantile (Acklam's rational approximation, |error| < 1.2e-9)
+function normalQuantile(p) {
+  const a = [-3.969683028665376e1, 2.209460984245205e2, -2.759285104469687e2, 1.38357751867269e2, -3.066479806614716e1, 2.506628277459239];
+  const b = [-5.447609879822406e1, 1.615858368580409e2, -1.556989798598866e2, 6.680131188771972e1, -1.328068155288572e1];
+  const c = [-7.784894002430293e-3, -3.223964580411365e-1, -2.400758277161838, -2.549732539343734, 4.374664141464968, 2.938163982698783];
+  const d = [7.784695709041462e-3, 3.224671290700398e-1, 2.445134137142996, 3.754408661907416];
+  const lo = 0.02425;
+  if (p < lo) {
+    const q = Math.sqrt(-2 * Math.log(p));
+    return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
+  }
+  if (p > 1 - lo) return -normalQuantile(1 - p);
+  const q = p - 0.5;
+  const r = q * q;
+  return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
+}
+// half-width of the two-sided normal interval holding `pct` % (95 % -> 1.96 σ)
+const intervalZ = (pct) => normalQuantile(0.5 + Math.min(Math.max(pct, 1), 99.9) / 200);
+
+// course (°) and speed (kt) of an estimate with the range holding the same probability (%) as the
+// presence region (normal, from the 1σ), over the ground (COG, SOG) or through the water (HDG,
+// STW) as chosen in the display tab
+function courseSpeedLines(estimate) {
+  const u = estimate.uncertainty;
+  const water = $("course-basis")?.value === "water";
+  const course = water ? estimate.hdg_deg : estimate.cog_deg;
+  const speed = water ? estimate.through_water_speed_kt : estimate.ground_speed_kt;
+  if (course == null || speed == null) return [];
+  const courseSigma = u ? (water ? u.hdg_sigma_deg : u.cog_sigma_deg) : null;
+  const speedSigma = u ? (water ? u.through_water_speed_sigma_kt : u.ground_speed_sigma_kt) : null;
+  const pct = estimate.presence_region?.probability_pct ?? state.latestConfig?.presence_probability_pct ?? 95;
+  const z = intervalZ(pct);
+  const p = `${fmt(pct, 0)}%`;
+  let courseRange = "";
+  if (courseSigma != null && Number.isFinite(courseSigma)) {
+    const half = z * courseSigma;
+    courseRange = half >= 180 ? `（全周・${p}）` : `（${pad3(course - half)}–${pad3(course + half)}°・${p}）`;
+  }
+  let speedRange = "";
+  if (speedSigma != null && Number.isFinite(speedSigma)) {
+    speedRange = `（${fmt(Math.max(0, speed - z * speedSigma), 1)}–${fmt(speed + z * speedSigma, 1)} kt・${p}）`;
+  }
+  return [
+    `針路 ${pad3(course)}° ${water ? "HDG" : "COG"}${courseRange}`,
+    `速力 ${fmt(speed, 1)} kt ${water ? "STW" : "SOG"}${speedRange}`,
+  ];
+}
+
+// text on a dark translucent plate, so that labels stay legible over the region and one another
+const LABEL_PLATE = { showBackground: true, backgroundColor: Cesium.Color.fromCssColorString("#050b14").withAlpha(0.78),
+  backgroundPadding: new Cesium.Cartesian2(5, 3),
+  disableDepthTestDistance: Number.POSITIVE_INFINITY }; // drawn over the sea surface and the region, not behind them
+
+// horizontal extent of one region component: the longest chord of its outline (長径), the width
+// across it (短径) in yards and the bearing of the longest chord (0-179°)
+function regionExtent(polygon) {
+  if (!polygon || polygon.length < 2) return null;
+  const lat0 = polygon.reduce((a, p) => a + p[1], 0) / polygon.length;
+  const k = Math.cos(lat0 * Math.PI / 180);
+  const xy = polygon.map(([lon, lat]) => [lon * k * YD_PER_DEG_LAT, lat * YD_PER_DEG_LAT]);
+  let major = 0;
+  let axis = [0, 1];
+  for (let i = 0; i < xy.length; i += 1) {
+    for (let j = i + 1; j < xy.length; j += 1) {
+      const dx = xy[j][0] - xy[i][0];
+      const dy = xy[j][1] - xy[i][1];
+      const d = Math.hypot(dx, dy);
+      if (d > major) {
+        major = d;
+        axis = [dx / d, dy / d];
+      }
+    }
+  }
+  const across = xy.map(([x, y]) => -axis[1] * x + axis[0] * y);
+  const minor = Math.max(...across) - Math.min(...across);
+  const bearing = ((Math.atan2(axis[0], axis[1]) * 180 / Math.PI) + 180) % 180;
+  return { major, minor, bearing };
+}
+
+// label of one presence-region component: probability mass, horizontal (YD) and vertical (FT) extent
+function regionLabelText(component) {
+  const pct = `${fmt(component.probability_mass_pct, 0)}%`;
+  if (!checked("show-est-values")) return pct;
+  const e = regionExtent(component.polygon);
+  const lines = [e ? `${pct}  水平 ${ydText(e.major)}×${ydText(e.minor)} YD（長径 ${pad3(e.bearing)}°）` : pct];
+  if (component.min_depth_ft != null && component.max_depth_ft != null) {
+    lines.push(`垂直 ${fmt(component.min_depth_ft, 0)}–${fmt(component.max_depth_ft, 0)} FT（幅 ${fmt(component.max_depth_ft - component.min_depth_ft, 0)} FT）`);
+  }
+  return lines.join("\n");
 }
 
 function updateErrorLine() {
@@ -1753,7 +1859,7 @@ function regionPrimitives(region, withBoxes = true) {
 function updateRegion(estimate) {
   const region = estimate?.presence_region;
   const voxelStyle = $("voxel-style") ? $("voxel-style").value : "box";
-  const settings = `${estimate?.mode}-${checked("show-region")}-${checked("show-voxels")}-${voxelStyle}-${exaggeration()}-${state.runKey}-q${quality.level}`;
+  const settings = `${estimate?.mode}-${checked("show-region")}-${checked("show-est-values")}-${checked("show-voxels")}-${voxelStyle}-${exaggeration()}-${state.runKey}-q${quality.level}`;
   const key = `${estimate?.tick}-${settings}`;
   if (key === state.lastRegionKey) return;
   // display settings changed -> rebuild now; new estimate only -> at most every REGION_REBUILD_MS
@@ -1786,11 +1892,15 @@ function updateRegion(estimate) {
   }
   if (checked("show-region")) {
     for (const component of region.components) {
+      // above the outline's northmost point, clear of the estimate marker and its label at the centre
+      const values = checked("show-est-values") && component.polygon.length > 2;
+      const north = values ? component.polygon.reduce((a, b) => (b[1] > a[1] ? b : a)) : null;
       gpu.regionLabels.add({
-        position: cartOf(component.centroid),
-        text: `${fmt(component.probability_mass_pct, 0)}%`,
+        position: north ? cart(north[0], north[1], component.centroid.depth_ft) : cartOf(component.centroid),
+        text: regionLabelText(component),
         font: "12px sans-serif",
         fillColor: COLORS.region,
+        ...(values ? { ...LABEL_PLATE, verticalOrigin: Cesium.VerticalOrigin.BOTTOM, pixelOffset: new Cesium.Cartesian2(0, -6) } : {}),
       });
     }
   }
@@ -2913,7 +3023,7 @@ $("depth-exaggeration").addEventListener("change", () => {
   }
   if (state.latestSnapshot) render(state.latestSnapshot);
 });
-for (const id of ["show-truth", "show-online", "show-smoothed", "show-region", "show-voxels", "show-predicted", "show-range", "show-bearing", "show-error-line", "show-drops", "show-forces", "show-layer-hud"]) {
+for (const id of ["show-truth", "show-online", "show-smoothed", "show-region", "show-voxels", "show-predicted", "show-est-values", "course-basis", "show-range", "show-bearing", "show-error-line", "show-drops", "show-forces", "show-layer-hud"]) {
   $(id).addEventListener("change", () => {
     state.lastRegionKey = "";
     if (state.latestSnapshot) render(state.latestSnapshot);
@@ -3505,4 +3615,4 @@ const stream = (() => {
   } };
 })();
 
-window.aquaDrift = { viewer, state, declutter, applyView, centerOn, cameraInfo, renderFaults, quality, telemetry, gpu, baseMap, setBaseMap, tracks, anim, updateLayer }; // diagnostics / E2E
+window.aquaDrift = { viewer, state, declutter, render, updateEstimateLayers, updateRegion, applyView, centerOn, cameraInfo, renderFaults, quality, telemetry, gpu, baseMap, setBaseMap, tracks, anim, updateLayer }; // diagnostics / E2E
