@@ -31,7 +31,7 @@ def test_no_estimate_before_detection() -> None:
 
 
 def test_doppler_only_track_converges_through_observer_field() -> None:
-    config = _config(use_bearing=False)
+    config = _config(use_bearing=False, estimate_detection_range=False)  # accuracy with the range known
     config.deployment.pattern = "grid"
     run = ScenarioRun(config, 4)
     output = run.run(1300)
@@ -169,7 +169,7 @@ def test_track_recovers_after_maneuver() -> None:
 
 
 def test_bearings_resolve_collinear_mirror_ambiguity() -> None:
-    config = _config()
+    config = _config(estimate_detection_range=False)  # accuracy with the range known
     config.deployment.pattern = "line"
     config.deployment.depth_step_ft = 0.0
     run = ScenarioRun(config, 4)
