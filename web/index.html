@@ -517,15 +517,13 @@
             <label class="check"><input id="show-online" type="checkbox" checked />推定（過去航跡非更新）</label>
             <label class="check"><input id="show-smoothed" type="checkbox" checked />推定（過去航跡更新）</label>
             <label class="check"><input id="show-region" type="checkbox" checked />推定存在圏</label>
-            <label class="check" title="推定存在圏の各領域の広がり（水平：長径×短径 YD と長径の向き、垂直：深度の範囲 FT）と、推定位置の針路（°）・速力（kt）を推定値と存在圏と同じ確率の範囲で地図に表示する。存在圏のラベルの色は領域の確率で変わる（下の緑・黄の確率を参照）"><input id="show-est-values" type="checkbox" checked />存在圏の広がり・針路速力の数値</label>
+            <label class="check" title="推定存在圏の各領域の広がり（水平：長径×短径 YD と長径の向き、垂直：深度の範囲 FT）と、推定位置の針路（°）・速力（kt）を推定値 ±1σ で地図に表示する"><input id="show-est-values" type="checkbox" checked />存在圏の広がり・針路速力の数値</label>
             <label>針路・速力の基準
               <select id="course-basis">
                 <option value="ground" selected>対地（COG・SOG）</option>
                 <option value="water">対水（HDG・STW）</option>
               </select>
             </label>
-            <label title="確率の高い領域から順に数えて、この確率（%）に達するまでに含まれる領域のラベルを緑（太字）にする。初期値 68.3%（1σ）">存在圏ラベル 緑の確率 (%)<input id="tier-green-pct" type="number" min="0.1" max="100" step="0.1" value="68.3" /></label>
-            <label title="確率の高い領域から順に数えて、この確率（%）に達するまでに含まれる残りの領域のラベルを黄にする。それ以外は灰色。初期値 95.4%（2σ）">存在圏ラベル 黄の確率 (%)<input id="tier-yellow-pct" type="number" min="0.1" max="100" step="0.1" value="95.4" /></label>
             <label class="check"><input id="show-voxels" type="checkbox" checked />存在圏ボクセル</label>
             <label class="check" title="推定の針路・速力と推定した潮流で粒子を先へ進めた存在圏（機動は仮定しない）。時間は「観測・推定」の条件と同じ確率"><input id="show-predicted" type="checkbox" checked />予測存在圏（10・20・30 分後）</label>
             <label>ボクセルの描き方
