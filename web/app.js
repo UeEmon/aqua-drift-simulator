@@ -1718,16 +1718,34 @@ function regionExtent(polygon) {
   return { major, minor, bearing };
 }
 
-// label colour by the component's probability mass: high (>= 50 %) the region's own magenta in
-// bold, middle (20-50 %) light pink, low (< 20 %) grey, so the likely part stands out
-const REGION_LABEL_TIERS = [
-  { min: 50, color: Cesium.Color.fromCssColorString("#ff4fd8"), weight: "bold " },
-  { min: 20, color: Cesium.Color.fromCssColorString("#ffb3ee"), weight: "" },
-  { min: -Infinity, color: Cesium.Color.fromCssColorString("#9c93a8"), weight: "" },
-];
-const regionTier = (pct) => REGION_LABEL_TIERS.find((t) => (pct ?? 0) >= t.min);
-const regionLabelColor = (pct) => regionTier(pct).color;
-const regionLabelFont = (pct) => `${regionTier(pct).weight}12px sans-serif`;
+// label colour by how likely the component is: taking the components from the most probable down,
+// those needed to hold the green probability (default 68.3 %, 1σ) are green (bold), those needed
+// for the yellow probability (default 95.4 %, 2σ) yellow, the rest grey. Both % are set in the
+// display tab
+const REGION_TIER_STYLE = {
+  green: { color: Cesium.Color.fromCssColorString("#4ade80"), font: "bold 12px sans-serif" },
+  yellow: { color: Cesium.Color.fromCssColorString("#facc15"), font: "12px sans-serif" },
+  grey: { color: Cesium.Color.fromCssColorString("#9ca3af"), font: "12px sans-serif" },
+};
+function regionTierLevels() {
+  const read = (id, fallback) => {
+    const v = Number($(id)?.value);
+    return Number.isFinite(v) && v > 0 && v <= 100 ? v : fallback;
+  };
+  const green = read("tier-green-pct", 68.3);
+  return { green, yellow: Math.max(green, read("tier-yellow-pct", 95.4)) };
+}
+// component -> "green" | "yellow" | "grey"
+function regionTiers(components) {
+  const { green, yellow } = regionTierLevels();
+  const tiers = new Map();
+  let before = 0; // probability mass of the more probable components
+  for (const c of [...components].sort((a, b) => b.probability_mass_pct - a.probability_mass_pct)) {
+    tiers.set(c, before < green ? "green" : before < yellow ? "yellow" : "grey");
+    before += c.probability_mass_pct;
+  }
+  return tiers;
+}
 
 // label of one presence-region component: probability mass, horizontal (YD) and vertical (FT) extent
 function regionLabelText(component) {
@@ -1870,7 +1888,7 @@ function regionPrimitives(region, withBoxes = true) {
 function updateRegion(estimate) {
   const region = estimate?.presence_region;
   const voxelStyle = $("voxel-style") ? $("voxel-style").value : "box";
-  const settings = `${estimate?.mode}-${checked("show-region")}-${checked("show-est-values")}-${checked("show-voxels")}-${voxelStyle}-${exaggeration()}-${state.runKey}-q${quality.level}`;
+  const settings = `${estimate?.mode}-${checked("show-region")}-${checked("show-est-values")}-${JSON.stringify(regionTierLevels())}-${checked("show-voxels")}-${voxelStyle}-${exaggeration()}-${state.runKey}-q${quality.level}`;
   const key = `${estimate?.tick}-${settings}`;
   if (key === state.lastRegionKey) return;
   // display settings changed -> rebuild now; new estimate only -> at most every REGION_REBUILD_MS
@@ -1902,15 +1920,17 @@ function updateRegion(estimate) {
     }
   }
   if (checked("show-region")) {
+    const tiers = regionTiers(region.components);
     for (const component of region.components) {
+      const style = REGION_TIER_STYLE[tiers.get(component)];
       // above the outline's northmost point, clear of the estimate marker and its label at the centre
       const values = checked("show-est-values") && component.polygon.length > 2;
       const north = values ? component.polygon.reduce((a, b) => (b[1] > a[1] ? b : a)) : null;
       gpu.regionLabels.add({
         position: north ? cart(north[0], north[1], component.centroid.depth_ft) : cartOf(component.centroid),
         text: regionLabelText(component),
-        font: regionLabelFont(component.probability_mass_pct),
-        fillColor: regionLabelColor(component.probability_mass_pct),
+        font: style.font,
+        fillColor: style.color,
         ...(values ? { ...LABEL_PLATE, verticalOrigin: Cesium.VerticalOrigin.BOTTOM, pixelOffset: new Cesium.Cartesian2(0, -6) } : {}),
       });
     }
@@ -3034,7 +3054,7 @@ $("depth-exaggeration").addEventListener("change", () => {
   }
   if (state.latestSnapshot) render(state.latestSnapshot);
 });
-for (const id of ["show-truth", "show-online", "show-smoothed", "show-region", "show-voxels", "show-predicted", "show-est-values", "course-basis", "show-range", "show-bearing", "show-error-line", "show-drops", "show-forces", "show-layer-hud"]) {
+for (const id of ["show-truth", "show-online", "show-smoothed", "show-region", "show-voxels", "show-predicted", "show-est-values", "course-basis", "tier-green-pct", "tier-yellow-pct", "show-range", "show-bearing", "show-error-line", "show-drops", "show-forces", "show-layer-hud"]) {
   $(id).addEventListener("change", () => {
     state.lastRegionKey = "";
     if (state.latestSnapshot) render(state.latestSnapshot);
