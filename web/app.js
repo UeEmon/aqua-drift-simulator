@@ -254,6 +254,10 @@ function labelMetrics(label) {
   const fx = label.horizontalOrigin === Cesium.HorizontalOrigin.LEFT ? 0 : label.horizontalOrigin === Cesium.HorizontalOrigin.RIGHT ? 1 : 0.5;
   const v = label.verticalOrigin;
   const top = v === Cesium.VerticalOrigin.TOP ? 0 : v === Cesium.VerticalOrigin.CENTER ? -h / 2 : v === Cesium.VerticalOrigin.BOTTOM ? -h : -(ascent + extra);
+  if (label.showBackground) { // the plate reaches past the text by the padding on every side
+    const pad = label.backgroundPadding;
+    return { w: w + 2 * pad.x, h: h + 2 * pad.y, fx, top: top - pad.y };
+  }
   return { w, h, fx, top };
 }
 
@@ -1605,7 +1609,7 @@ function estimateGraphics(mode) {
   const graphics = new Marker(
     gpu.points.add({ pixelSize: 11, color, outlineColor: Cesium.Color.BLACK, outlineWidth: 2, id: `estimate-${mode}` }),
     ranked(gpu.labels.add({ text: mode === "ONLINE" ? "EST" : "", font: "12px sans-serif", fillColor: color, pixelOffset: new Cesium.Cartesian2(0, 9),
-      verticalOrigin: Cesium.VerticalOrigin.TOP, outlineColor: Cesium.Color.BLACK, outlineWidth: 2, style: Cesium.LabelStyle.FILL_AND_OUTLINE }), 95),
+      verticalOrigin: Cesium.VerticalOrigin.TOP, ...LABEL_PLATE }), 95),
     `est:${mode}`,
   );
   state.estimates[mode] = graphics;
@@ -1635,8 +1639,28 @@ function updateEstimateLayers(estimates) {
 const YD_PER_DEG_LAT = 111320 / YD_TO_M; // close enough for the extent of a presence region
 const ydText = (value) => Math.round(value).toLocaleString("ja-JP");
 
-// course (°) and speed (kt) of an estimate with their 1σ, over the ground (COG, SOG) or through
-// the water (HDG, STW) as chosen in the display tab
+// standard normal quantile (Acklam's rational approximation, |error| < 1.2e-9)
+function normalQuantile(p) {
+  const a = [-3.969683028665376e1, 2.209460984245205e2, -2.759285104469687e2, 1.38357751867269e2, -3.066479806614716e1, 2.506628277459239];
+  const b = [-5.447609879822406e1, 1.615858368580409e2, -1.556989798598866e2, 6.680131188771972e1, -1.328068155288572e1];
+  const c = [-7.784894002430293e-3, -3.223964580411365e-1, -2.400758277161838, -2.549732539343734, 4.374664141464968, 2.938163982698783];
+  const d = [7.784695709041462e-3, 3.224671290700398e-1, 2.445134137142996, 3.754408661907416];
+  const lo = 0.02425;
+  if (p < lo) {
+    const q = Math.sqrt(-2 * Math.log(p));
+    return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
+  }
+  if (p > 1 - lo) return -normalQuantile(1 - p);
+  const q = p - 0.5;
+  const r = q * q;
+  return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
+}
+// half-width of the two-sided normal interval holding `pct` % (95 % -> 1.96 σ)
+const intervalZ = (pct) => normalQuantile(0.5 + Math.min(Math.max(pct, 1), 99.9) / 200);
+
+// course (°) and speed (kt) of an estimate with the range holding the same probability (%) as the
+// presence region (normal, from the 1σ), over the ground (COG, SOG) or through the water (HDG,
+// STW) as chosen in the display tab
 function courseSpeedLines(estimate) {
   const u = estimate.uncertainty;
   const water = $("course-basis")?.value === "water";
@@ -1645,11 +1669,28 @@ function courseSpeedLines(estimate) {
   if (course == null || speed == null) return [];
   const courseSigma = u ? (water ? u.hdg_sigma_deg : u.cog_sigma_deg) : null;
   const speedSigma = u ? (water ? u.through_water_speed_sigma_kt : u.ground_speed_sigma_kt) : null;
+  const pct = estimate.presence_region?.probability_pct ?? state.latestConfig?.presence_probability_pct ?? 95;
+  const z = intervalZ(pct);
+  const p = `${fmt(pct, 0)}%`;
+  let courseRange = "";
+  if (courseSigma != null && Number.isFinite(courseSigma)) {
+    const half = z * courseSigma;
+    courseRange = half >= 180 ? `（全周・${p}）` : `（${pad3(course - half)}–${pad3(course + half)}°・${p}）`;
+  }
+  let speedRange = "";
+  if (speedSigma != null && Number.isFinite(speedSigma)) {
+    speedRange = `（${fmt(Math.max(0, speed - z * speedSigma), 1)}–${fmt(speed + z * speedSigma, 1)} kt・${p}）`;
+  }
   return [
-    `針路 ${pad3(course)}°${courseSigma == null ? "" : ` ±${fmt(courseSigma, 0)}°`}  (${water ? "HDG" : "COG"}・1σ)`,
-    `速力 ${fmt(speed, 1)}${speedSigma == null ? "" : ` ±${fmt(speedSigma, 1)}`} kt  (${water ? "STW" : "SOG"}・1σ)`,
+    `針路 ${pad3(course)}° ${water ? "HDG" : "COG"}${courseRange}`,
+    `速力 ${fmt(speed, 1)} kt ${water ? "STW" : "SOG"}${speedRange}`,
   ];
 }
+
+// text on a dark translucent plate, so that labels stay legible over the region and one another
+const LABEL_PLATE = { showBackground: true, backgroundColor: Cesium.Color.fromCssColorString("#050b14").withAlpha(0.78),
+  backgroundPadding: new Cesium.Cartesian2(5, 3),
+  disableDepthTestDistance: Number.POSITIVE_INFINITY }; // drawn over the sea surface and the region, not behind them
 
 // horizontal extent of one region component: the longest chord of its outline (長径), the width
 // across it (短径) in yards and the bearing of the longest chord (0-179°)
@@ -1851,14 +1892,15 @@ function updateRegion(estimate) {
   }
   if (checked("show-region")) {
     for (const component of region.components) {
+      // above the outline's northmost point, clear of the estimate marker and its label at the centre
+      const values = checked("show-est-values") && component.polygon.length > 2;
+      const north = values ? component.polygon.reduce((a, b) => (b[1] > a[1] ? b : a)) : null;
       gpu.regionLabels.add({
-        position: cartOf(component.centroid),
+        position: north ? cart(north[0], north[1], component.centroid.depth_ft) : cartOf(component.centroid),
         text: regionLabelText(component),
         font: "12px sans-serif",
         fillColor: COLORS.region,
-        outlineColor: Cesium.Color.BLACK,
-        outlineWidth: 2,
-        style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+        ...(values ? { ...LABEL_PLATE, verticalOrigin: Cesium.VerticalOrigin.BOTTOM, pixelOffset: new Cesium.Cartesian2(0, -6) } : {}),
       });
     }
   }

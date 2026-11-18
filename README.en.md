@@ -54,7 +54,7 @@ Documentation:
   **Presence-region extent and course / speed values** (on by default): each part of the presence
   region is labelled with its horizontal extent (major x minor axis in YD and the major axis
   direction) and vertical extent (depth range and width in FT), and the estimate with its course (°)
-  and speed (kt) as estimate ±1σ, over the ground (COG, SOG) or through the water (HDG, STW)
+  and speed (kt) with the range holding the same probability (%) as the presence region (normal, from the 1σ), on a translucent plate, the region labels above the outline clear of the estimate's label, over the ground (COG, SOG) or through the water (HDG, STW)
 
 - **View toolbar (map, top right)**: oblique / top-down (vertical) / horizontal side view
   (direction selectable), orthographic top view, **centre on truth (default centre target)**,
