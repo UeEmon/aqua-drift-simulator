@@ -51,6 +51,10 @@ Documentation:
   regions**, bearing lines, error line) and observer placement. The predicted regions move the
   estimate's particles ahead with their own ground velocity (estimated course / speed + fitted
   current) for 10, 20 and 30 min, without a maneuver (`estimator.prediction_horizons_s`)
+  **Presence-region extent and course / speed values** (on by default): each part of the presence
+  region is labelled with its horizontal extent (major x minor axis in YD and the major axis
+  direction) and vertical extent (depth range and width in FT), and the estimate with its course (°)
+  and speed (kt) as estimate ±1σ, over the ground (COG, SOG) or through the water (HDG, STW)
 
 - **View toolbar (map, top right)**: oblique / top-down (vertical) / horizontal side view
   (direction selectable), orthographic top view, **centre on truth (default centre target)**,
