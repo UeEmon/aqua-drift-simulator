@@ -438,12 +438,15 @@ class EstimatorConfig(BaseModel):
     # detection range (探知距離) estimated from the detections and losses of contact instead of
     # being known: every particle carries its own range, with a log-uniform prior over
     # detection_range_prior_yd / factor .. x factor (prior None: the scenario's range as the
-    # nominal value). Off (default): the scenario's range is used as known. On, the position
-    # track is less accurate while the range is still open (no loss of contact yet), e.g. in the
-    # Doppler-only and bias tests of test_estimator at 6000 YD
-    estimate_detection_range: bool = False
+    # nominal value). Off: the scenario's range is used as known. With the range unknown a
+    # detection / loss of contact constrains range and position together instead of the position
+    # alone, so the track is less accurate until several have been seen (ring of observers at
+    # 6000 YD: ~200 YD instead of ~40 YD after 800 s). A wide prior (x/÷ 2) let Doppler-only
+    # tracking lock onto a far mirror solution with a matching larger range (10,300 YD, 4,000 YD
+    # position error); x/÷ 1.25 tracked about as well as the known range there
+    estimate_detection_range: bool = True
     detection_range_prior_yd: float | None = Field(default=None, gt=0)
-    detection_range_prior_factor: float = Field(default=2.0, ge=1.0, le=10.0)
+    detection_range_prior_factor: float = Field(default=1.25, ge=1.0, le=10.0)
     current_gradient_ridge: float = Field(default=1e-6, ge=0)
     track_store_slots: int = Field(default=360, ge=10, le=2000)
     cpa_fit_half_window_s: int = Field(default=600, ge=30, le=3600)
