@@ -65,11 +65,11 @@ observer's 3 h observing time and its slot for when they are useful.
 Ahead of the target at the observation start: an observer starts observing observer_startup_s after it
 is in the water (the sensor's start-up and settling), and an observer that starts after the target has
 passed its closest point of approach (CPA) misses the Doppler's zero crossing and only sees the target
-going away. So each candidate's observation start (its earliest drop + fall + start-up) must come at
-least cpa_ahead_s (+ 2 sigma position / speed) before the CPA of the estimated track (cpa_s): candidates
-the layer cannot lay in time are left out, the information counts from the observation start, the drop
-time is never later than that, and an observer the layer's route would still lay too late is taken out
-of the plan (the route is planned again without it).
+going away. So at least one observer of each plan (the first one picked) starts observing (its drop +
+fall + start-up) at least cpa_ahead_s (+ 2 sigma position / speed) before the CPA of the estimated track
+(cpa_s); the others may be anywhere. Its drop time is never later than that, and when the layer's route
+would still reach it too late, the drop points flown before it are taken out (the route is planned again
+without them). No plan when no observer can be laid ahead in time.
 
 Line laying (detection range shorter than the layer's turn radius, `line_laying`): the layer cannot
 fly between observers a few hundred metres apart without a loop each, so a plan is one line along
@@ -709,11 +709,10 @@ def plan_optimal_deployment(
         return drop_s + fall + startup
 
     cpa = cpa_s(grid, heading, speed)
-    observe = observation_start(np.arange(len(grid)), earliest)
-    before_cpa = observe <= cpa - ahead_margin
-    grid, earliest, observe, cpa = grid[before_cpa], earliest[before_cpa], observe[before_cpa], cpa[before_cpa]
-    lane, spot = lane[before_cpa], spot[before_cpa]
-    if not len(grid):
+    # a plan needs at least one observer ahead of the target (before its CPA) when it starts observing;
+    # the others may be anywhere
+    ahead_ok = observation_start(np.arange(len(grid)), earliest) <= cpa - ahead_margin
+    if not ahead_ok.any():
         return [], "optimal: the layer cannot lay an observer ahead of the target before its CPA", None
     if lines:
         # the information counts from when the layer can be on the track (not only after the lead
@@ -721,33 +720,35 @@ def plan_optimal_deployment(
         # until the next line can take over: the layer's next pass (its loop), the lead of a drop
         # and one detection radius of overlap. The line must hold the target that long, so it is
         # laid contiguous and not spread over the whole horizon
-        t0 = min(max(float(np.min(observe)), 0.0), float(steps[-1]))
+        t0 = min(max(float(np.min(earliest)), 0.0), float(steps[-1]))
         hold = layer.cycle_s() + float(config.drop_lead_s) + r_max / speed
         evaluate = (steps >= t0) & (steps <= t0 + max(hold, STEP_S))
-    parts = [_measurement_info(grid[part], pos, vel, steps, observe[part], sensor, r_max)
+    parts = [_measurement_info(grid[part], pos, vel, steps, earliest[part], sensor, r_max)
              for part in np.array_split(np.arange(len(grid)), math.ceil(len(grid) / CHUNK))]
     cand_meas = np.concatenate([p[0] for p in parts], axis=1)
     cand_det = np.concatenate([p[1] for p in parts], axis=1)
     del parts
     useful = cand_det.any(axis=(0, 2))
     grid, earliest, lane, spot = grid[useful], earliest[useful], lane[useful], spot[useful]
-    observe, cpa = observe[useful], cpa[useful]
+    cpa, ahead_ok = cpa[useful], ahead_ok[useful]
     cand_meas, cand_det = cand_meas[:, useful], cand_det[:, useful]
     if not len(grid):
         return [], "optimal: the layer cannot lay an observer before the target passes", None
+    if not ahead_ok.any():
+        return [], "optimal: the layer cannot lay an observer ahead of the target before its CPA", None
 
     detecting_existing = existing  # _mirror_cost keeps the observers that detect the track
 
     def mirror(chosen_idx: list[int], extra: np.ndarray | None) -> np.ndarray:
         """Mirror cost of existing + chosen (+ each extra candidate)."""
         fixed = np.vstack([detecting_existing, grid[chosen_idx]]) if chosen_idx else detecting_existing
-        fixed_start = np.concatenate([np.zeros(len(detecting_existing)), observe[chosen_idx]])
+        fixed_start = np.concatenate([np.zeros(len(detecting_existing)), earliest[chosen_idx]])
         if extra is None:
             sets, start = fixed[None], fixed_start[None]
         else:
             m = len(extra)
             sets = np.concatenate([np.broadcast_to(fixed, (m, *fixed.shape)), grid[extra][:, None, :]], axis=1)
-            start = np.concatenate([np.broadcast_to(fixed_start, (m, len(fixed_start))), observe[extra][:, None]], axis=1)
+            start = np.concatenate([np.broadcast_to(fixed_start, (m, len(fixed_start))), earliest[extra][:, None]], axis=1)
         if sets.shape[1] < 2:
             return np.zeros(sets.shape[0])
         return _mirror_cost(sets, start, pos[central], vel[central], steps, evaluate, sensor, r_max)
@@ -768,7 +769,8 @@ def plan_optimal_deployment(
             break
         if not chosen and not (force or coverage_short) and cost_now <= target:
             break  # the existing field already tracks well enough over the horizon
-        idx = np.flatnonzero(available)
+        # the first observer of the plan is one that starts observing ahead of the target
+        idx = np.flatnonzero(available if chosen else available & ahead_ok)
         if not len(idx):
             break
         trial, th, td, tl = (np.concatenate(part) for part in zip(*(
@@ -833,7 +835,7 @@ def plan_optimal_deployment(
             grid[chosen], earliest[chosen], [h.pos for h in hyps], r_max, float(config.drop_lead_s),
             estimate.uncertainty.horizontal_major_yd * YD_TO_M, speed,
             layer.fall_s if layer is not None else None, startup_s=startup,
-            latest_start=cpa[chosen] - ahead_margin,
+            latest_start=np.where(ahead_ok[chosen], cpa[chosen] - ahead_margin, np.inf),
         )
     else:
         times = earliest[chosen]
@@ -883,20 +885,21 @@ def plan_optimal_deployment(
         )
         return [keep[k] for k in order], [float(t) for t in group_times]
 
-    # a drop point the route reaches too late to start observing ahead of the target (before its CPA,
-    # with the margin) is taken out and the rest is routed again (its observers would only see the
-    # target going away)
+    # at least one drop point must still start observing ahead of the target (before its CPA, with the
+    # margin) at the time the route reaches it: else the drop points the route flies before the first
+    # one that can are taken out (they delay it) and the rest is routed again
     keep = list(range(len(groups)))
     while True:
         order, group_times = route(keep)
         heads = np.array([chosen[groups[g][0]] for g in order], dtype=int)
-        late_mask = observation_start(heads, np.array(group_times)) > cpa[heads] - ahead_margin + 1.0
-        if not late_mask.any():
+        ahead_now = ahead_ok[heads] & (
+            observation_start(heads, np.array(group_times)) <= cpa[heads] - ahead_margin + 1.0)
+        if ahead_now.any():
             break
-        late = {g for g, bad in zip(order, late_mask, strict=True) if bad}
-        keep = [g for g in keep if g not in late]
-        if not keep:
+        first = next((k for k, i in enumerate(heads) if ahead_ok[i]), None)
+        if not first:  # none could, or the first one is already flown first
             return [], "optimal: the layer cannot lay an observer ahead of the target before its CPA", report
+        keep = [g for g in keep if g not in set(order[:first])]
     removed = sum(len(g) for g in groups) - sum(len(groups[g]) for g in keep)
     flat = [k for g in order for k in groups[g]]
     times = [t for g, t in zip(order, group_times, strict=True) for _ in groups[g]]
@@ -916,7 +919,7 @@ def plan_optimal_deployment(
         f"drop in {[round(t) for t in report.drop_times_s]} s"
     )
     if removed:
-        reason += f"; {removed} observers left out (the layer would lay them after the target passes)"
+        reason += f"; {removed} observers left out (they delayed the one ahead of the target past its CPA)"
     return positions, reason, report
 
 

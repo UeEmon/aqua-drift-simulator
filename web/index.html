@@ -412,8 +412,8 @@
               <label title="最適方式：深度誤差の重み（0 で水平のみ）">深度の重み<input id="fwd-depth-weight" type="number" min="0" max="10" step="0.1" required /></label>
               <label title="最適方式：追加1本でこの割合以上改善しなければ追加しない">追加の最小改善 (%)<input id="fwd-min-gain" type="number" min="0" max="100" step="1" required /></label>
               <label title="最適方式：変針・変速・深度変化の仮説の重み（0 で推定航跡の直進のみ）">機動の重み (%)<input id="fwd-maneuver" type="number" min="0" max="90" step="5" required /></label>
-              <label title="最適方式：観測者が着水してから観測を始めるまでの時間（起動・整定）。投下＋落下＋この時間で観測開始とし、そのとき目標が CPA の手前にいるよう投入時刻を計画する（初期配置には適用しない）">観測者の起動時間 (秒)<input id="fwd-startup" type="number" min="0" max="1800" step="5" required /></label>
-              <label title="最適方式：観測開始の時点で、目標が CPA までこの時間（＋位置の不確かさの余裕）以上手前にいること">観測開始時の CPA までの余裕 (秒)<input id="fwd-cpa-ahead" type="number" min="0" max="3600" step="10" required /></label>
+              <label title="最適方式：観測者が着水してから観測を始めるまでの時間（起動・整定）。投下＋落下＋この時間で観測開始とし、1 回の計画のうち少なくとも 1 本は、そのとき目標が CPA の手前にいるよう投入時刻を計画する（初期配置には適用しない）">観測者の起動時間 (秒)<input id="fwd-startup" type="number" min="0" max="1800" step="5" required /></label>
+              <label title="最適方式：前方の 1 本の観測開始の時点で、目標が CPA までこの時間（＋位置の不確かさの余裕）以上手前にいること">観測開始時の CPA までの余裕 (秒)<input id="fwd-cpa-ahead" type="number" min="0" max="3600" step="10" required /></label>
               <label class="check" title="最適方式：探知の開始・終了（斜距離＝上限斜距離）の距離情報も評価する"><input id="fwd-gate" type="checkbox" />探知境界を評価</label>
               <label class="check" title="最適方式：探知距離が設標者の旋回半径より短いとき、1 回の計画を航跡に沿った 1 本の線にし、1 回の直線飛行で敷く"><input id="fwd-line" type="checkbox" />短距離は直線敷設</label>
               <label>先行時間 (秒)<input id="fwd-lead" type="number" min="30" max="7200" step="30" required /></label>

@@ -314,10 +314,10 @@ class ForwardDeploymentConfig(BaseModel):
     line_queue_ahead_s: int = Field(default=60, ge=0, le=1800)
     drop_lead_s: int = Field(default=60, ge=0, le=1800)  # in the water this long before detection starts
     # an observer starts observing observer_startup_s after it enters the water (start-up and settling of
-    # the sensor), and at that moment the target on its estimated track must still be at least
-    # cpa_ahead_s (+ 2 sigma of the position / speed) before its closest point of approach (CPA) to the
-    # observer: the observer is ahead of the target and sees the Doppler pass through zero. Candidates the
-    # layer cannot lay in time are not used, and the drop times are planned for it. Both are set by the
+    # the sensor). At least one observer of each plan starts observing while the target on its estimated
+    # track is still at least cpa_ahead_s (+ 2 sigma of the position / speed) before its closest point of
+    # approach (CPA) to it: ahead of the target, so it sees the Doppler pass through zero; the others may
+    # be anywhere. Both are set by the
     # operator (settings tab). The initial observers (deployment.*) are placed at once and are exempt
     observer_startup_s: int = Field(default=30, ge=0, le=1800)
     cpa_ahead_s: int = Field(default=60, ge=0, le=3600)
