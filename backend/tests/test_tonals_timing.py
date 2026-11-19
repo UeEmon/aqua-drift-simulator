@@ -133,6 +133,7 @@ def test_maneuver_reaches_observers_after_their_delays() -> None:
     """A turn: each observer's onset is the maneuver time plus its own propagation delay."""
     config = ScenarioConfig()
     config.estimator.particle_count = 1000
+    config.estimator.estimate_detection_range = False  # accuracy with the range known
     config.deployment.pattern = "ring"
     config.deployment.spacing_yd = 2500
     run = ScenarioRun(config, 12)
