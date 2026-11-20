@@ -60,6 +60,7 @@ async def test_layer_stops_at_the_drop_limit() -> None:
     assert status.drop_rate.laid == 2 and status.drop_rate.remaining == 1
     assert status.drop_rate.rate_per_hour == pytest.approx(24.0)  # 2 in 300 s
     assert status.drop_rate.limit_tick == 450
+    assert status.drop_ticks == [300, 300] and status.drop_rate.start_tick == 0
     await sim.queue_deployment(DeploymentRequest(tick=sim.tick, positions=points[2:], reason="plan"))
     # 2 open, 1 left: the layer is given only the first in its flight order and nothing more is planned
     assert [t.task_id for t in (await sim.layer_feed()).tasks] == [3]

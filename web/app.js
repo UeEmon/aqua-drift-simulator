@@ -1122,6 +1122,8 @@ function updateLayer(deployment) {
     ["設標", paused ? "一時停止中" : "実施"],
     ...(rateText ? [["投入数", rateText.laid], ["投入レート", rateText.perHour], ["上限到達の見積もり", rateText.limit]] : []),
   ] : [];
+  state.dropChartStatus = status;
+  drawDropChart($("chart-drops"), status);
   setHtml($("layer-detail").querySelector("tbody") || $("layer-detail"),
     detail.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("") || "<tr><td>--</td></tr>");
   // open drops first in the drop order (設標順, ▲▼ to change it), then the latest closed ones
@@ -2795,6 +2797,161 @@ for (const [id, opts] of Object.entries(chartDefs)) {
     $("chart-tooltip").hidden = true;
     drawChart(canvas, state.history, opts);
   });
+}
+
+// ---- 累積投入数 (設標者): actual drops (実績), the approved drops at their expected times (計画)
+// and the measured rate carried on to the drop limit (予想). One entity, three line styles.
+const DROP_CHART = { actual: "#3987e5", planned: "#7fb2ee", forecast: "#7fb2ee", limit: "#8faecb" };
+
+function dropChartModel(status) {
+  const rate = status?.drop_rate;
+  if (!rate) return null;
+  const now = rate.tick;
+  const start = rate.start_tick ?? 0;
+  const ticks = (status.drop_ticks || []).filter((t) => t >= start);
+  const actual = [[start, 0]];
+  ticks.forEach((t, i) => actual.push([t, i], [t, i + 1]));
+  actual.push([now, ticks.length]);
+  // approved drops the layer will fly (up to the limit), at their expected drop times
+  const left = rate.remaining ?? Infinity;
+  const due = (status.tasks || []).filter((t) => t.status === "APPROVED")
+    .map((t) => (t.eta_s != null ? now + t.eta_s : t.planned_tick ?? now))
+    .sort((a, b) => a - b).slice(0, left);
+  const planned = due.length ? [[now, ticks.length]] : [];
+  due.forEach((t, i) => planned.push([t, ticks.length + i], [t, ticks.length + i + 1]));
+  // forecast at the measured rate: to the limit, or one measurement window ahead without a limit
+  let forecast = [];
+  if (rate.rate_per_hour > 0 && !rate.reached) {
+    const end = rate.limit != null ? rate.limit_tick : now + rate.window_s;
+    const count = rate.limit != null ? rate.limit : ticks.length + (rate.rate_per_hour * (end - now)) / 3600;
+    forecast = [[now, ticks.length], [end, count]];
+  }
+  const xs = [...actual, ...planned, ...forecast].map((p) => p[0]);
+  const ys = [...actual, ...planned, ...forecast].map((p) => p[1]).concat(rate.limit ?? 0);
+  return { rate, now, start, actual, planned, forecast, t0: start, t1: Math.max(...xs, now + 60), yMax: niceMax(Math.max(...ys, 1) * 1.05) };
+}
+
+function valueOnSteps(points, tick) {
+  let value = null;
+  for (const [t, v] of points) if (t <= tick) value = v;
+  return value;
+}
+
+function drawDropChart(canvas, status) {
+  const ctx = canvas && canvas.getContext && canvas.getContext("2d");
+  if (!ctx || canvas.clientWidth === 0) return;
+  const ratio = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth;
+  // CSS height from the markup, kept apart from the backing store (canvas.height = height x ratio)
+  canvas.dataset.cssHeight ||= canvas.getAttribute("height") || "150";
+  const height = Number(canvas.dataset.cssHeight);
+  canvas.width = width * ratio;
+  canvas.height = height * ratio;
+  canvas.style.height = `${height}px`;
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  const pad = { l: 34, r: 40, t: 10, b: 20 };
+  const w = width - pad.l - pad.r;
+  const h = height - pad.t - pad.b;
+  ctx.font = "10px sans-serif";
+  const model = dropChartModel(status);
+  canvas._drops = model ? { model, pad, w } : null;
+  if (!model) {
+    ctx.fillStyle = CHART.axis;
+    ctx.fillText("設標者がいるときに表示", pad.l, pad.t + h / 2);
+    return;
+  }
+  const { t0, t1, yMax, now, rate } = model;
+  const x = (t) => pad.l + ((t - t0) / Math.max(t1 - t0, 1)) * w;
+  const y = (v) => pad.t + h - (v / yMax) * h;
+  ctx.lineWidth = 1;
+  for (const v of [0, yMax / 2, yMax]) {
+    ctx.strokeStyle = CHART.grid;
+    ctx.beginPath(); ctx.moveTo(pad.l, y(v)); ctx.lineTo(pad.l + w, y(v)); ctx.stroke();
+    ctx.fillStyle = CHART.axis; ctx.textAlign = "right";
+    ctx.fillText(String(Math.round(v)), pad.l - 4, y(v) + 3);
+  }
+  ctx.textAlign = "left"; ctx.fillText(clockAt(t0), pad.l, height - 5);
+  ctx.textAlign = "right"; ctx.fillText(clockAt(t1), pad.l + w, height - 5);
+  // now
+  ctx.strokeStyle = CHART.grid; ctx.setLineDash([2, 3]);
+  ctx.beginPath(); ctx.moveTo(x(now), pad.t); ctx.lineTo(x(now), pad.t + h); ctx.stroke();
+  ctx.fillStyle = CHART.axis; ctx.textAlign = "center"; ctx.fillText("現在", x(now), pad.t + 8);
+  const line = (points, color, dash, width2 = 2) => {
+    if (points.length < 2) return;
+    ctx.strokeStyle = color; ctx.lineWidth = width2; ctx.setLineDash(dash); ctx.lineJoin = "round";
+    ctx.beginPath();
+    points.forEach(([t, v], i) => (i ? ctx.lineTo(x(t), y(v)) : ctx.moveTo(x(t), y(v))));
+    ctx.stroke();
+  };
+  const label = (text, t, v, color) => {
+    ctx.setLineDash([]); ctx.fillStyle = color; ctx.textAlign = "left";
+    ctx.fillText(text, Math.min(x(t) + 3, pad.l + w + 3), Math.max(y(v) + 3, pad.t + 8));
+  };
+  if (rate.limit != null) {
+    line([[t0, rate.limit], [t1, rate.limit]], DROP_CHART.limit, [6, 4], 1);
+    ctx.setLineDash([]); ctx.fillStyle = CHART.axis; ctx.textAlign = "left";
+    ctx.fillText(`上限 ${rate.limit} 本`, pad.l + 3, y(rate.limit) - 3);
+  }
+  line(model.forecast, DROP_CHART.forecast, [6, 4]);
+  line(model.planned, DROP_CHART.planned, [2, 3]);
+  line(model.actual, DROP_CHART.actual, []);
+  ctx.setLineDash([]);
+  const last = model.actual[model.actual.length - 1];
+  label("実績", now, last[1], CHART.text);
+  if (model.forecast.length) {
+    const end = model.forecast[1];
+    ctx.fillStyle = DROP_CHART.forecast;
+    ctx.beginPath(); ctx.arc(x(end[0]), y(end[1]), 4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = CHART.text; ctx.textAlign = "right";
+    ctx.fillText(rate.limit != null ? `到達予想 ${clockAt(end[0])}` : "予想", x(end[0]) - 6, y(end[1]) + 14);
+  }
+  if (model.planned.length) {
+    const end = model.planned[model.planned.length - 1];
+    label("計画", end[0], end[1], CHART.text);
+  }
+  if (canvas._hoverTick != null) {
+    ctx.strokeStyle = CHART.axis; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x(canvas._hoverTick), pad.t); ctx.lineTo(x(canvas._hoverTick), pad.t + h); ctx.stroke();
+  }
+}
+
+function dropChartTip(model, tick) {
+  const parts = [clockAt(tick)];
+  if (tick <= model.now) parts.push(`実績 ${valueOnSteps(model.actual, tick)} 本`);
+  else {
+    const planned = model.planned.length ? valueOnSteps(model.planned, tick) : null;
+    if (planned != null) parts.push(`計画 ${planned} 本`);
+    const [a, b] = model.forecast;
+    if (a && tick <= b[0]) parts.push(`予想 ${fmt(a[1] + ((b[1] - a[1]) * (tick - a[0])) / Math.max(b[0] - a[0], 1), 1)} 本`);
+  }
+  if (model.rate.limit != null) parts.push(`上限 ${model.rate.limit} 本`);
+  return parts.join("　");
+}
+
+{
+  const canvas = $("chart-drops");
+  if (canvas && canvas.addEventListener) {
+    canvas.addEventListener("mousemove", (event) => {
+      const chart = canvas._drops;
+      if (!chart) return;
+      const rect = canvas.getBoundingClientRect();
+      const { model } = chart;
+      const frac = Math.min(Math.max((event.clientX - rect.left - chart.pad.l) / chart.w, 0), 1);
+      canvas._hoverTick = model.t0 + frac * (model.t1 - model.t0);
+      const tip = $("drop-chart-tooltip");
+      tip.hidden = false;
+      tip.textContent = dropChartTip(model, canvas._hoverTick);
+      tip.style.left = `${event.clientX + 12}px`;
+      tip.style.top = `${event.clientY - 28}px`;
+      drawDropChart(canvas, state.dropChartStatus);
+    });
+    canvas.addEventListener("mouseleave", () => {
+      canvas._hoverTick = null;
+      $("drop-chart-tooltip").hidden = true;
+      drawDropChart(canvas, state.dropChartStatus);
+    });
+  }
 }
 
 // ================================================================== forms

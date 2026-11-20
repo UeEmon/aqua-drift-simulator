@@ -400,6 +400,7 @@ class SimulationState:
             falling=len(self.falling),
             wind_estimates=list(self.wind_estimates),
             drop_rate=self._drop_rate() if self.config.layer.enabled else None,
+            drop_ticks=list(self.drop_ticks[-1000:]) if self.config.layer.enabled else [],
         )
 
     def _drop_rate(self) -> DropRate:

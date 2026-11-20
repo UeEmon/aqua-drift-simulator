@@ -25,7 +25,7 @@ def drop_rate(
     window_laid = laid if since <= start_tick else sum(1 for t in drop_ticks if t > since)
     rate = window_laid / measured * 3600.0 if measured >= MIN_MEASURED_S else None
     result = DropRate(
-        tick=tick, laid=laid, open=open_count, window_s=window_s, measured_s=measured,
+        tick=tick, start_tick=start_tick, laid=laid, open=open_count, window_s=window_s, measured_s=measured,
         window_laid=window_laid, rate_per_hour=rate,
         last_drop_tick=drop_ticks[-1] if drop_ticks else None,
     )
