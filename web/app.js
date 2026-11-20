@@ -2874,7 +2874,7 @@ function populateForms(config) {
       "layer-orbit": lay.orbit_radius_yd, "layer-timeout": lay.proposal_timeout_s,
       "layer-cruise-alt": lay.cruise_altitude_ft ?? 3000, "layer-drop-alt": lay.drop_altitude_ft ?? 1000, "layer-climb": lay.climb_rate_fpm ?? 2000,
       "layer-max-release": lay.max_per_release ?? 4,
-      "layer-drop-limit": lay.drop_limit ?? 0, "layer-rate-window": Math.round((lay.rate_window_s ?? 1800) / 60) };
+      "layer-drop-limit": lay.drop_limit ?? 100, "layer-rate-window": Math.round((lay.rate_window_s ?? 1800) / 60) };
     for (const [id, value] of Object.entries(layValues)) $(id).value = value;
     $("layer-wind-correction").checked = lay.wind_correction !== false;
   }

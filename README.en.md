@@ -103,7 +103,7 @@ speed, heading, bank and turn direction, current / next drop), pause, approval m
 speed / bank / orbit settings, and the drop list (approve / reject, drop now, set a drop
 time, cancel) plus manual placement.
 It also measures the layer's **drop rate** (observers laid per hour over the last measurement
-window, 30 min by default) and, with a **drop limit** set (what the layer carries; 0 = no limit),
+window, 30 min by default) and, with a **drop limit** set (what the layer carries; 100 by default, 0 = no limit),
 estimates when the limit will be reached at that rate. At the limit the layer lays no more and
 the forward planner plans no new drops (open drops beyond the limit are marked).
 

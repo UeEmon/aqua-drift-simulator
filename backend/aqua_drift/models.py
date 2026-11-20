@@ -257,7 +257,7 @@ class LayerConfig(BaseModel):
     wind_correction: bool = True
     # 投入上限数: observers the layer can lay in one run (what it carries); 0 = no limit. At
     # the limit the layer flies no more drops and the planner plans none (free slots)
-    drop_limit: int = Field(default=0, ge=0, le=999)
+    drop_limit: int = Field(default=100, ge=0, le=999)
     # 投入レート: drops per unit time measured over the last rate_window_s (aqua_drift.drop_rate)
     rate_window_s: int = Field(default=1800, ge=60, le=14400)
 

@@ -77,9 +77,14 @@ async def test_layer_stops_at_the_drop_limit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_limit_by_default() -> None:
+async def test_default_limit_is_100_and_0_means_none() -> None:
     sim = SimulationState(ScenarioConfig())
     await sim.queue_deployment(DeploymentRequest(tick=0, positions=[_offset(DATUM, 3000.0, 0.0, 200.0)], reason="plan"))
     rate = (await sim.snapshot()).deployment.drop_rate
-    assert rate.limit is None and rate.open == 1
+    assert rate.limit == 100 and rate.remaining == 100 and rate.open == 1
+    config = ScenarioConfig()
+    config.layer.drop_limit = 0
+    await sim.set_config(config)
+    rate = (await sim.snapshot()).deployment.drop_rate
+    assert rate.limit is None and rate.remaining is None
     assert (await sim.deployment_feed()).free_slots > 50
