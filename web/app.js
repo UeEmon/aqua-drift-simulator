@@ -1103,9 +1103,10 @@ function updateLayer(deployment) {
   const enabled = lay.enabled !== false;
   const paused = Boolean(lay.paused);
   $("layer-status").textContent = !enabled ? "設標者なし（追加の観測者は即時に投入）"
-    : layer ? `設標者 ${fmt(layer.speed_kt, 0)} kt・バンク ${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）・${layer.mode === "TRANSIT" ? `設標 #${layer.task_id} へ移動中（到着 ${layer.eta_s != null ? clockAt((layer.tick || 0) + layer.eta_s) : "--"}）` : "目標推定位置の周囲を旋回待機"}${paused ? "【設標一時停止中】" : ""}　了承待ち ${proposed.length}・設標待ち ${open.length - proposed.length}`
+    : layer ? `設標者 ${fmt(layer.speed_kt, 0)} kt・バンク ${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）・${layer.mode === "TRANSIT" ? `設標 #${layer.task_id} へ移動中（到着 ${layer.eta_s != null ? clockAt((layer.tick || 0) + layer.eta_s) : "--"}）` : "目標推定位置の周囲を旋回待機"}${paused ? "【設標一時停止中】" : ""}${status.drop_rate?.reached ? "【投入上限に到達】" : ""}　了承待ち ${proposed.length}・設標待ち ${open.length - proposed.length}`
       : "設標者の準備中";
   const next = open.find((t) => t.status === "APPROVED");
+  const rateText = dropRateText(status.drop_rate);
   const detail = layer && enabled ? [
     ["状態", { ORBIT: "旋回待機", TRANSIT: "設標へ移動" }[layer.mode] || layer.mode],
     ["位置", `${fmt(layer.position.latitude, 4)}, ${fmt(layer.position.longitude, 4)}`],
@@ -1117,13 +1118,17 @@ function updateLayer(deployment) {
     ["バンク", `${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）`],
     ["旋回方向", `左右とも（経路の短い側、最大バンク ${fmt(lay.max_bank_deg ?? 15, 0)}°）${layer.orbit_sense ? `・待機旋回は${layer.orbit_sense < 0 ? "反時計回り" : "時計回り"}` : ""}`],
     ["実施中", layer.task_id != null ? `#${layer.task_id}・到着 ${layer.eta_s != null ? `${clockAt((layer.tick || 0) + layer.eta_s)}（あと ${fmt(layer.eta_s, 0)} s）` : "--"}` : "なし"],
-    ["次の設標", next ? `#${next.task_id}・${next.planned_tick != null ? `計画 ${clockAt(next.planned_tick)}（あと ${Math.max(0, next.planned_tick - (layer.tick || 0))} s）` : "すぐ"}` : "なし"],
+    ["次の設標", status.drop_rate?.reached ? "なし（投入上限に到達）" : next ? `#${next.task_id}・${next.planned_tick != null ? `計画 ${clockAt(next.planned_tick)}（あと ${Math.max(0, next.planned_tick - (layer.tick || 0))} s）` : "すぐ"}` : "なし"],
     ["設標", paused ? "一時停止中" : "実施"],
+    ...(rateText ? [["投入数", rateText.laid], ["投入レート", rateText.perHour], ["上限到達の見積もり", rateText.limit]] : []),
   ] : [];
   setHtml($("layer-detail").querySelector("tbody") || $("layer-detail"),
     detail.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("") || "<tr><td>--</td></tr>");
   // open drops first in the drop order (設標順, ▲▼ to change it), then the latest closed ones
   const closed = tasks.filter((t) => !open.includes(t)).reverse();
+  // approved drops beyond the drop limit (投入上限数): the layer does not fly them
+  const left = status.drop_rate?.remaining;
+  const overLimit = new Set(left == null ? [] : open.filter((t) => t.status === "APPROVED").slice(left).map((t) => t.task_id));
   const rows = [...open, ...closed].slice(0, 15).map((t) => {
     const index = open.indexOf(t);
     const move = index >= 0 && open.length > 1
@@ -1143,14 +1148,32 @@ function updateLayer(deployment) {
     const when = t.status === "APPROVED" ? `${plan}・あと ${fmt(t.eta_s, 0)} s` : t.status === "DONE" ? `${clockAt(t.done_tick)} 投下${late}${fall}` : plan;
     const src = { forward: "自動", search: "再探知", operator: "即時配置", manual: "手動配置" }[t.source] || t.source;
     const rank = index >= 0 && open.length > 1 ? `・${index + 1}番目` : "";
-    const suggest = t.status === "APPROVED" && t.cancel_suggestion
-      ? `<br /><small class="cancel-note">中止を提案：${escapeHtml(t.cancel_suggestion)}</small>` : "";
+    const suggest = (t.status === "APPROVED" && t.cancel_suggestion
+      ? `<br /><small class="cancel-note">中止を提案：${escapeHtml(t.cancel_suggestion)}</small>` : "")
+      + (overLimit.has(t.task_id) ? `<br /><small class="cancel-note">投入上限を超えるため投入しない</small>` : "");
     return `<tr${suggest ? ' class="cancel-suggested"' : ""}><td>${t.task_id}<br /><small>${src}${rank}</small></td><td>${TASK_STATUS[t.status] || t.status}${suggest}</td>`
       + `<td>${Math.round(t.position.depth_ft)} Ft<br /><small>${when}</small></td><td>${actions}</td></tr>`;
   });
   // keep a drop time the operator is typing: do not rebuild the table under the cursor
   const editing = document.activeElement?.closest?.("#drop-table") && document.activeElement.matches("input");
   if (!editing) setHtml($("drop-table").querySelector("tbody"), rows.join("") || "<tr><td colspan='4'>設標計画なし</td></tr>");
+}
+
+// ---- 設標者の投入レート and the drop limit (投入上限数): measured on the server (aqua_drift.drop_rate)
+function dropRateText(rate) {
+  if (!rate) return null;
+  const windowMin = Math.round((rate.window_s || 0) / 60);
+  const laid = rate.limit != null ? `${rate.laid} / ${rate.limit} 本（残り ${rate.remaining} 本）` : `${rate.laid} 本（上限なし）`;
+  const perHour = rate.rate_per_hour == null ? `計測中（${durationText(rate.measured_s)}）`
+    : `${fmt(rate.rate_per_hour, 1)} 本/時（直近 ${rate.measured_s < rate.window_s ? durationText(rate.measured_s) : `${windowMin} 分`} で ${rate.window_laid} 本）`;
+  let limit = "上限なし";
+  if (rate.limit != null) {
+    limit = rate.reached ? `到達（${clockAt(rate.limit_tick)}）・これ以上投入しない`
+      : rate.limit_eta_s != null ? `${clockAt(rate.limit_tick)} ごろ（あと ${durationText(rate.limit_eta_s)}）`
+        : rate.rate_per_hour == null ? "レート計測中" : "見積もれない（直近の投入なし）";
+    if (!rate.reached && rate.open > rate.remaining) limit += `・設標待ち ${rate.open} 件のうち ${rate.open - rate.remaining} 件は上限を超える`;
+  }
+  return { laid, perHour, limit };
 }
 
 // ---- observers the layer laid (投下済みの観測者): predicted / actual entry point, where the
@@ -1306,6 +1329,8 @@ $("layer-form").addEventListener("submit", (event) => {
     next.layer.drop_altitude_ft = num("layer-drop-alt");
     next.layer.climb_rate_fpm = num("layer-climb");
     next.layer.max_per_release = num("layer-max-release");
+    next.layer.drop_limit = num("layer-drop-limit");
+    next.layer.rate_window_s = Math.round(num("layer-rate-window") * 60);
   })
     .then(() => setMessage("設標者の条件を反映しました。"))
     .catch((error) => setMessage(`設定エラー: ${error.message}`));
@@ -1462,8 +1487,14 @@ function updateForces(snapshot, estimate) {
       row("対地・航跡", layer.ground_speed_kt != null ? `${fmt(layer.ground_speed_kt, 0)} kt・${pad3(layer.track_deg)}°` : "--");
       row("バンク", `${fmt(Math.abs(layer.bank_deg), 1)}°（${turnName(layer.bank_deg)}）`);
       if (layer.task_id != null && layer.eta_s != null) row("到着", `${clockAt((layer.tick || 0) + layer.eta_s)}（あと ${fmt(layer.eta_s, 0)} s）`);
-      if (next) row("次の設標", `#${next.task_id} ${next.planned_tick != null ? `計画 ${clockAt(next.planned_tick)}` : "すぐ"}`);
+      if (deployment.drop_rate?.reached) row("次の設標", "なし（投入上限に到達）");
+      else if (next) row("次の設標", `#${next.task_id} ${next.planned_tick != null ? `計画 ${clockAt(next.planned_tick)}` : "すぐ"}`);
       row("設標待ち", `${open.length - proposed} 件${proposed ? `・了承待ち ${proposed} 件` : ""}`);
+      const rate = deployment.drop_rate;
+      if (rate) {
+        row("投入", `${rate.limit != null ? `${rate.laid}/${rate.limit}` : rate.laid} 本・${rate.rate_per_hour != null ? `${fmt(rate.rate_per_hour, 1)} 本/時` : "計測中"}`);
+        if (rate.limit != null) row("上限到達", rate.reached ? "到達済み" : rate.limit_eta_s != null ? `${clockAt(rate.limit_tick)}（あと ${durationText(rate.limit_eta_s)}）` : "--");
+      }
     }
   }
   fill("layer-info", showLayer);
@@ -2842,7 +2873,8 @@ function populateForms(config) {
       "layer-straight-before": lay.straight_before_s ?? 0, "layer-straight-after": lay.straight_after_s ?? 0,
       "layer-orbit": lay.orbit_radius_yd, "layer-timeout": lay.proposal_timeout_s,
       "layer-cruise-alt": lay.cruise_altitude_ft ?? 3000, "layer-drop-alt": lay.drop_altitude_ft ?? 1000, "layer-climb": lay.climb_rate_fpm ?? 2000,
-      "layer-max-release": lay.max_per_release ?? 4 };
+      "layer-max-release": lay.max_per_release ?? 4,
+      "layer-drop-limit": lay.drop_limit ?? 100, "layer-rate-window": Math.round((lay.rate_window_s ?? 1800) / 60) };
     for (const [id, value] of Object.entries(layValues)) $(id).value = value;
     $("layer-wind-correction").checked = lay.wind_correction !== false;
   }

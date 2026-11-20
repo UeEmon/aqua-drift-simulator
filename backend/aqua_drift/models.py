@@ -255,6 +255,11 @@ class LayerConfig(BaseModel):
     # release the observer upwind by the drift of the estimated mean wind (from the last drop;
     # before the first estimate: the wind at the layer's current altitude)
     wind_correction: bool = True
+    # 投入上限数: observers the layer can lay in one run (what it carries); 0 = no limit. At
+    # the limit the layer flies no more drops and the planner plans none (free slots)
+    drop_limit: int = Field(default=100, ge=0, le=999)
+    # 投入レート: drops per unit time measured over the last rate_window_s (aqua_drift.drop_rate)
+    rate_window_s: int = Field(default=1800, ge=60, le=14400)
 
 
 class ForwardDeploymentConfig(BaseModel):
@@ -974,6 +979,24 @@ class LayerFeed(BaseModel):
     wind_estimate: WindEstimate | None = None  # latest estimated mean wind (release correction)
 
 
+class DropRate(BaseModel):
+    """設標者の投入レート and when the layer reaches its drop limit (aqua_drift.drop_rate)."""
+
+    tick: int
+    laid: int = 0  # observers laid by the layer in this run
+    limit: int | None = None  # LayerConfig.drop_limit (None: no limit)
+    remaining: int | None = None  # limit - laid
+    open: int = 0  # open drops (proposed / approved) still to be laid
+    window_s: int = 1800  # measurement window (LayerConfig.rate_window_s)
+    measured_s: float = 0.0  # time actually measured: the window, or the run so far if shorter
+    window_laid: int = 0  # drops laid within the measured time
+    rate_per_hour: float | None = None  # None: measured too short
+    last_drop_tick: int | None = None
+    reached: bool = False
+    limit_eta_s: float | None = None  # from now to the limit at the measured rate
+    limit_tick: int | None = None  # when the limit is (expected to be) reached
+
+
 class DeploymentStatus(BaseModel):
     standby_count: int = 0
     pending_placements: int = 0
@@ -984,6 +1007,7 @@ class DeploymentStatus(BaseModel):
     layer: LayerState | None = None
     falling: int = 0  # observers released and still falling
     wind_estimates: list[WindEstimate] = Field(default_factory=list)  # newest last
+    drop_rate: DropRate | None = None  # with the layer: drops per hour and the limit
 
 
 class EstimatorFeed(BaseModel):

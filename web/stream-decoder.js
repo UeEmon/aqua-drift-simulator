@@ -98,6 +98,7 @@
       // the layer's planned flight path comes separately, only when it changed (older servers
       // send it inside the layer state)
       if ("lpp" in message) st.layerPath = message.lpp;
+      st.dropRate = message.drt || null;
       st.layer = message.lay && st.layerPath !== undefined ? { ...message.lay, planned_path: st.layerPath || [] } : message.lay || null;
       if ("arch" in message) st.archived = message.arch;
       if ("lly" in message) st.lloyd = message.lly;
@@ -190,7 +191,7 @@
         estimates,
         cpa: st.cpa,
         current_estimate: st.current,
-        deployment: { ...st.deployment, layer: st.layer },
+        deployment: { ...st.deployment, layer: st.layer, drop_rate: st.dropRate },
         archived_observer_ids: st.archived,
         lloyd: st.lloyd,
         predicted_regions: st.predicted || [],

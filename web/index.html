@@ -453,6 +453,8 @@
               <label title="設標に向かう間にこの高度まで降下（上昇）して投下">投下高度 (ft)<input id="layer-drop-alt" type="number" min="100" max="30000" step="100" required /></label>
               <label>昇降率 (ft/分)<input id="layer-climb" type="number" min="100" max="20000" step="100" required /></label>
               <label title="1 回の投下で同時に投下できる観測者の上限（毎回この数を投下するのではない）。同じ投下点に複数の観測者が要るときだけ一度に投下し、同じ地点への再進入を減らす">1回の投下の上限本数<input id="layer-max-release" type="number" min="1" max="8" step="1" required /></label>
+              <label title="この実行で設標者が投入できる観測者の総数（搭載数）。0 は上限なし。上限に達すると設標者は投入せず、新しい設標も計画しない">投入上限数（0：なし）<input id="layer-drop-limit" type="number" min="0" max="999" step="1" required /></label>
+              <label title="投入レート（本/時）を直近この時間の投入数から計測し、上限に達する時刻をそのレートで見積もる">レートの計測時間 (分)<input id="layer-rate-window" type="number" min="1" max="240" step="1" required /></label>
               <label class="check" title="直前の投下から推定した平均風（推定がない間は現在高度の風）の分だけ風上で投下する"><input id="layer-wind-correction" type="checkbox" />平均風で投下点を修正</label>
               <button type="submit" class="span2">設標者の設定を反映</button>
             </form>
