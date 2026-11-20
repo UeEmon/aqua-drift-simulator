@@ -102,6 +102,10 @@ with the least turn). The **設標者 tab** controls it: live state (mode,
 speed, heading, bank and turn direction, current / next drop), pause, approval mode,
 speed / bank / orbit settings, and the drop list (approve / reject, drop now, set a drop
 time, cancel) plus manual placement.
+It also measures the layer's **drop rate** (observers laid per hour over the last measurement
+window, 30 min by default) and, with a **drop limit** set (what the layer carries; 0 = no limit),
+estimates when the limit will be reached at that rate. At the limit the layer lays no more and
+the forward planner plans no new drops (open drops beyond the limit are marked).
 
 The background map (Natural Earth II) is **off by default** to prioritise rendering; switch it
 on with 「背景地図」 in the view toolbar when needed.

@@ -207,6 +207,9 @@ class WireEncoder:
             # does: sent separately, only when changed, instead of in every message
             path = [[round(lat, 6), round(lon, 6)] for lat, lon in layer.pop("planned_path", [])]
         message["lay"] = layer
+        # the drop rate (投入レート) and the estimate of the drop limit move with the clock: sent
+        # with the layer in every message
+        message["drt"] = data["deployment"].pop("drop_rate", None)
         # the path starts at the layer, so it changes every second: resend it at most every
         # `path_interval_s` (the client starts it at the layer's current position), at once when
         # where it leads changes (new / reordered / finished drops, path cleared)

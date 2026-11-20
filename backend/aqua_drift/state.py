@@ -8,6 +8,7 @@ from aqua_drift import layer as layerlib
 from aqua_drift import replanning
 from aqua_drift import route as routelib
 from aqua_drift.deployment import default_position
+from aqua_drift.drop_rate import drop_rate
 from aqua_drift.models import (
     BearingReport,
     CancelSuggestions,
@@ -19,6 +20,7 @@ from aqua_drift.models import (
     DeploymentRequest,
     DeploymentStatus,
     DopplerBatch,
+    DropRate,
     DropRelease,
     DropTask,
     EstimationControl,
@@ -100,6 +102,9 @@ class SimulationState:
         self.layer_state: LayerState | None = None
         self.falling: list[tuple[DropRelease, str]] = []  # released observers in free fall (source)
         self.wind_estimates: deque[WindEstimate] = deque(maxlen=20)  # mean wind from each drop
+        # 投入レート: when each observer of this run was laid by the layer, from run_start_tick
+        self.drop_ticks: list[int] = []
+        self.run_start_tick = 0
 
     async def set_config(self, config: ScenarioConfig) -> None:
         async with self.lock:
@@ -314,10 +319,11 @@ class SimulationState:
                 + [drop.splash_position for drop, _ in self.falling],
                 standby_count=self._standby_count(),
                 last_deploy_tick=self.last_deploy_tick,
-                free_slots=max(
+                free_slots=max(min(
                     self.config.observer_limit - len(self.observers) - len(self.placements)
-                    - self._open_task_count() - len(self.falling), 0
-                ),
+                    - self._open_task_count() - len(self.falling),
+                    self._drops_left() - self._open_task_count(),
+                ), 0),
                 source_frequency_hz=self.config.source.source_frequency_hz
                 + self.config.source.shared_recognition_bias_hz,
                 sound_speed_mps=self.config.source.sound_speed_mps,
@@ -393,7 +399,20 @@ class SimulationState:
             layer=self.layer_state if self.config.layer.enabled else None,
             falling=len(self.falling),
             wind_estimates=list(self.wind_estimates),
+            drop_rate=self._drop_rate() if self.config.layer.enabled else None,
         )
+
+    def _drop_rate(self) -> DropRate:
+        layer = self.config.layer
+        return drop_rate(self.drop_ticks, self.tick, self.run_start_tick, layer.rate_window_s,
+                         layer.drop_limit, self._open_task_count())
+
+    def _drops_left(self) -> int:
+        """Observers the layer can still lay in this run (投入上限数 - laid; no limit: many)."""
+        limit = self.config.layer.drop_limit
+        if not self.config.layer.enabled or limit <= 0:
+            return 10**6
+        return max(limit - len(self.drop_ticks), 0)
 
     # ---------------------------------------------------------------- layer (設標者)
     OPEN_TASK_STATES = ("PROPOSED", "APPROVED")
@@ -524,6 +543,7 @@ class SimulationState:
                 datum = self.config.target.initial_position  # operator's datum until an estimate exists
             current = self.current_estimate.base_velocity if self.current_estimate else None
             approved = sorted((t for t in self.tasks if t.status == "APPROVED"), key=lambda t: t.flight_key())
+            approved = approved[: self._drops_left()]  # at the drop limit the layer flies no more drops
             return LayerFeed(
                 tick=self.tick,
                 generation=self.generation,
@@ -552,10 +572,11 @@ class SimulationState:
                     task.release_position = update.release_positions.get(task_id)
             for task_id, position in update.completed.items():
                 task = by_id.get(task_id)
-                if not task or task.status != "APPROVED":
+                if not task or task.status != "APPROVED" or self._drops_left() <= 0:
                     continue
                 task.status = "DONE"
                 task.done_tick = update.state.tick
+                self.drop_ticks.append(update.state.tick)
                 task.eta_s = 0.0
                 source = "manual" if task.source == "manual" else "forward"
                 drop = update.releases.get(task_id)
@@ -770,6 +791,8 @@ class SimulationState:
             self.layer_state = None
             self.falling = []
             self.wind_estimates.clear()
+            self.drop_ticks = []
+            self.run_start_tick = self.tick
             self.standby.clear()
             if replace_observers:
                 explicit = {k: v for k, v in self.assignments.items() if k in self.explicit_ids}
