@@ -106,6 +106,7 @@ It also measures the layer's **drop rate** (observers laid per hour over the las
 window, 30 min by default) and, with a **drop limit** set (what the layer carries; 100 by default, 0 = no limit),
 estimates when the limit will be reached at that rate. At the limit the layer lays no more and
 the forward planner plans no new drops (open drops beyond the limit are marked).
+A chart of the cumulative drops shows the actual drops, the approved drops at their expected times and the forecast at the measured rate up to the limit.
 
 The background map (Natural Earth II) is **off by default** to prioritise rendering; switch it
 on with 「背景地図」 in the view toolbar when needed.

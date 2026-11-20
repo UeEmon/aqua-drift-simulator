@@ -995,6 +995,7 @@ class DropRate(BaseModel):
     reached: bool = False
     limit_eta_s: float | None = None  # from now to the limit at the measured rate
     limit_tick: int | None = None  # when the limit is (expected to be) reached
+    start_tick: int = 0  # start of the run (the drop chart starts here)
 
 
 class DeploymentStatus(BaseModel):
@@ -1008,6 +1009,7 @@ class DeploymentStatus(BaseModel):
     falling: int = 0  # observers released and still falling
     wind_estimates: list[WindEstimate] = Field(default_factory=list)  # newest last
     drop_rate: DropRate | None = None  # with the layer: drops per hour and the limit
+    drop_ticks: list[int] = Field(default_factory=list)  # when each observer of this run was laid (chart)
 
 
 class EstimatorFeed(BaseModel):
