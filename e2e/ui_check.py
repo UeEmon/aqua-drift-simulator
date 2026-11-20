@@ -105,7 +105,7 @@ def main() -> int:
         page.wait_for_function("() => window.aquaDrift && window.aquaDrift.state.latestSnapshot", timeout=120_000)
         try:
             page.wait_for_function(
-                "() => document.querySelectorAll('#compare-cards .card').length === 8", timeout=240_000
+                "() => document.querySelectorAll('#compare-cards .card').length === 9", timeout=240_000
             )
         except Exception:  # noqa: BLE001
             fail("comparison cards did not appear within 4 min")
